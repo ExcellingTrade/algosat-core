@@ -98,10 +98,16 @@ async def update_rows_in_table(
         await conn.execute(stmt)
         # For information: result.rowcount would give the number of affected rows
 
-def initialize_database(engine):
+
+
+# --- Async database initialization ---
+async def init_db() -> None:
     """
-    Create all tables (strategies, strategy_configs, etc.) if they do not exist.
+    Create all tables and indexes defined on metadata if they do not exist.
+    Uses the AsyncEngine to run the creation in a transaction.
     """
-    metadata.create_all(engine)
+    async with engine.begin() as conn:
+        # metadata.create_all will issue CREATE TABLE IF NOT EXISTS and create indexes
+        await conn.run_sync(metadata.create_all)
 
 

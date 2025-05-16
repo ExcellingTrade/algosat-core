@@ -1,11 +1,12 @@
 # algosat/core/strategy_manager.py
 
 import asyncio
-from sqlalchemy import text
 from sqlalchemy.exc import ProgrammingError
 from core.db import get_session
 from config import settings
 from common.logger import get_logger
+from sqlalchemy import select
+from core.dbschema import strategy_configs
 
 logger = get_logger("strategy_manager")
 
@@ -18,13 +19,11 @@ async def run_poll_loop():
     async for session in get_session():
         while True:
             try:
-                # Note the corrected table name: strategy_configs
-                result = await session.execute(
-                    text("SELECT id FROM strategy_config WHERE enabled = true")
-                )
-                rows = result.fetchall()
-                if rows:
-                    ids = [row[0] for row in rows]
+                # Fetch enabled strategy config IDs via SQLAlchemy Core
+                stmt = select(strategy_configs.c.id).where(strategy_configs.c.enabled == True)
+                result = await session.execute(stmt)
+                ids = result.scalars().all()
+                if ids:
                     logger.info(f"Found configs: {ids}")
                 else:
                     logger.info("No configs found")

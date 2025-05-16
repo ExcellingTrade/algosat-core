@@ -1,16 +1,16 @@
 # algosat/main.py
 
 import asyncio
-from core.db import create_table_ddl, engine
-from core.dbschema import strategies, strategy_configs, trade_logs, broker_credentials, metadata
+from core.db import init_db, engine
+from core.dbschema import strategies, strategy_configs, broker_credentials
 from core.strategy_manager import run_poll_loop
 from brokers.factory import get_broker
-from brokers.broker_auth import auth_broker, auth_all_enabled_brokers, validate_broker_credentials
+from brokers.broker_auth import auth_all_enabled_brokers
 from common.broker_utils import get_broker_credentials, upsert_broker_credentials
 from common.logger import get_logger
 from common.default_broker_configs import DEFAULT_BROKER_CONFIGS # Import the default configs
 from common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
-from sqlalchemy import select, insert
+from sqlalchemy import select
 from datetime import datetime
 
 logger = get_logger(__name__)
@@ -28,8 +28,6 @@ async def initialize_brokers():
     """
     logger.info("Initializing broker configurations...")
     
-    # Ensure broker_credentials table exists
-    await create_table_ddl(broker_credentials)
     
     # Initialize each broker configuration
     for broker_key in BROKERS_TO_SETUP:
@@ -115,14 +113,6 @@ async def prompt_for_missing_credentials():
             
     return results
 
-async def initialize_all_tables():
-    """
-    Ensure all required tables are created in the database if they do not exist.
-    This is modular and can be called from anywhere.
-    """
-    async with engine.begin() as conn:
-        await conn.run_sync(metadata.create_all)
-
 async def seed_strategies_and_configs():
     """
     Seed the strategies and strategy_configs tables with default strategies and configs if empty.
@@ -168,72 +158,39 @@ async def seed_strategies_and_configs():
             await conn.execute(ins_cfg)
         logger.info("Default strategies and configs seeded.")
 
-async def _start():
-    """
-    Main entry point for the application.
-    """
-    # 1) Ensure all necessary tables exist
-    logger.info("🔄 Creating tables if they don't exist…")
-    await create_table_ddl(strategies)
-    await create_table_ddl(strategy_configs)
-    await create_table_ddl(trade_logs)
-    
-    # 2) Initialize broker configurations
-    await initialize_brokers()
-    
-    # 3) Prompt for any missing credentials
-    await prompt_for_missing_credentials()
-    
-    # 4) Authenticate all enabled brokers
-    logger.info("Authenticating enabled brokers...")
-    auth_results = await auth_all_enabled_brokers()
-    
-    if not auth_results:
-        logger.info("No enabled brokers found. Skipping broker authentication.")
-    else:
-        for broker_name, (success, message) in auth_results.items():
-            if success:
-                logger.info(f"Authentication successful for {broker_name}: {message}")
-                
-                # Get the broker instance to demonstrate profile retrieval
-                broker = get_broker(broker_name)
-                profile = await broker.get_profile()
-                logger.info(f"Profile for {broker_name}: {profile}")
-                 
-                # Show positions for the broker
-                positions = await broker.get_positions()
-                logger.info(f"Positions for {broker_name}: {positions}")
-                print("*"*50)   
-            else:
-                logger.warning(f"Authentication failed for {broker_name}: {message}")
-    
-    # 5) Start the strategy polling loop
-    logger.info("🚀 All brokers processed. Entering poll loop...")
-    # quit()
-    # await run_poll_loop()
-
 if __name__ == "__main__":
-    import sys
+    import asyncio
+
     async def main():
-        await initialize_all_tables()
+        # 1) Ensure database schema exists
+        logger.info("🔄 Initializing database schema…")
+        await init_db()
+
+        # 2) Seed default strategies and configs
         await seed_strategies_and_configs()
+
+        # 3) Initialize broker configurations
         await initialize_brokers()
-        # Authenticate all enabled brokers
+
+        # 4) Prompt for any missing credentials
+        await prompt_for_missing_credentials()
+
+        # 5) Authenticate all enabled brokers
         logger.info("Authenticating enabled brokers...")
         auth_results = await auth_all_enabled_brokers()
-        if not auth_results:
-            logger.info("No enabled brokers found. Skipping broker authentication.")
-        else:
-            for broker_name, (success, message) in auth_results.items():
-                if success:
-                    logger.info(f"Authentication successful for {broker_name}: {message}")
-                    broker = get_broker(broker_name)
-                    profile = await broker.get_profile()
-                    logger.info(f"Profile for {broker_name}: {profile}")
-                    positions = await broker.get_positions()
-                    logger.info(f"Positions for {broker_name}: {positions}")
-                    print("*"*50)
-                else:
-                    logger.warning(f"Authentication failed for {broker_name}: {message}")
+        for broker_name, (success, message, broker) in auth_results.items():
+            if success:
+                logger.info(f"Authentication successful for {broker_name}: {message}")
+                # Use the already-authenticated instance:
+                profile = await broker.get_profile()
+                logger.info(f"Profile for {broker_name}: {profile}")
+                positions = await broker.get_positions()
+                logger.info(f"Positions for {broker_name}: {positions}")
+            else:
+                logger.warning(f"Authentication failed for {broker_name}: {message}")
+
+        # 6) Start the strategy polling loop
+        logger.info("🚀 All brokers processed. Entering poll loop...")
         await run_poll_loop()
+
     asyncio.run(main())

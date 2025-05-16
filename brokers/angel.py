@@ -45,132 +45,82 @@ class AngelWrapper(BrokerInterface):
             if not full_config:
                 logger.error(f"No configuration found for broker '{self.broker_name}' in DB.")
                 return False
-            
+
             # Extract credentials
             creds_json = full_config.get("credentials", {})
             if not creds_json:
                 logger.error(f"Credentials JSON missing in config for broker '{self.broker_name}'")
                 return False
 
-            # Check if we have existing tokens that might be reusable
-            regenerate_token = True
-            # if "jwt_token" in creds_json and "feed_token" in creds_json and "generated_on" in creds_json:
-                # ist_timezone = pytz.timezone("Asia/Kolkata")
-                # token_generated_on = ist_timezone.localize(datetime.strptime(creds_json["generated_on"],
-                #                                                           "%d/%m/%Y %H:%M:%S"))
-                # current_ist_time = get_ist_datetime()
-                # today_6am = current_ist_time.replace(hour=6, minute=0, second=0, microsecond=0)
-                # today_date = current_ist_time.date()
-                # token_date = token_generated_on.date()
+            # Always generate a new Angel access token with retry
+            logger.info("Generating a new Angel access token.")
 
-                # # Token reuse logic:
-                # # 1. If token generated after 6AM today and we're still on the same day - reuse token
-                # # 2. If token generated before 6AM today AND current time is after 6AM - regenerate token
-                # # 3. If token generated on previous day - regenerate token
-                
-                # can_reuse_token = (
-                #     token_date == today_date and  # Same day
-                #     (token_generated_on >= today_6am)  # Generated after 6AM
-                # )
-                
-                # if can_reuse_token:
-                #     try:
-                #         # Initialize SmartConnect with existing token
-                #         api_key = creds_json.get("api_key")
-                #         loop = asyncio.get_running_loop()
-                        
-                #         def _init_with_existing_token():
-                #             sc = SmartConnect(api_key)
-                #             # Set the existing tokens
-                #             sc._SmartConnect__access_token = creds_json["jwt_token"]
-                #             sc._SmartConnect__refresh_token = creds_json.get("refresh_token", "")
-                #             sc._SmartConnect__feedToken = creds_json["feed_token"]
-                #             return sc
-                        
-                #         self.smart_api = await loop.run_in_executor(None, _init_with_existing_token)
-                #         self.auth_token = creds_json["jwt_token"]
-                #         self.refresh_token = creds_json.get("refresh_token", "")
-                #         self.feed_token = creds_json["feed_token"]
-                        
-                #         # Test if token is still valid
-                #         token_valid = await self._validate_token()
-                #         if token_valid:
-                #             logger.info(f"Successfully reused existing token for Angel broker.")
-                #             regenerate_token = False
-                #         else:
-                #             logger.warning(f"Existing Angel token failed validation, regenerating.")
-                #     except Exception as e:
-                #         logger.warning(f"Token validation failed for Angel: {e}")
-                # else:
-                #     # Log the reason for regenerating token
-                #     if token_date != today_date:
-                #         logger.info(f"Token was generated on a previous day ({token_date}), regenerating")
-                #     elif token_generated_on < today_6am and current_ist_time > today_6am:
-                #         logger.info(f"Token was generated before 6AM ({token_generated_on.strftime('%H:%M:%S')}) and current time is after 6AM, regenerating")
-            
-            # If we need to regenerate the token
-            if regenerate_token:
-                logger.info("Generating a new Angel access token.")
-                
-                # Validate required fields
-                api_key = creds_json.get("api_key")
-                username = creds_json.get("client_id")  # client_id is used as username in Angel
-                password = creds_json.get("password")
-                totp_secret = creds_json.get("totp_secret")
+            # Validate required fields
+            api_key = creds_json.get("api_key")
+            username = creds_json.get("client_id")  # client_id is used as username in Angel
+            password = creds_json.get("password")
+            totp_secret = creds_json.get("totp_secret")
 
-                if not all([api_key, username, password, totp_secret]):
-                    missing_fields = [
-                        field for field in ["api_key", "client_id", "password", "totp_secret"]
-                        if not creds_json.get(field)
-                    ]
-                    logger.error(f"Incomplete Angel credentials in DB for '{self.broker_name}'. Missing: {missing_fields}")
-                    return False
+            if not all([api_key, username, password, totp_secret]):
+                missing_fields = [
+                    field for field in ["api_key", "client_id", "password", "totp_secret"]
+                    if not creds_json.get(field)
+                ]
+                logger.error(f"Incomplete Angel credentials in DB for '{self.broker_name}'. Missing: {missing_fields}")
+                return False
 
-                # Generate TOTP code
-                totp_code = pyotp.TOTP(totp_secret).now()
-                
-                # Perform login using SmartConnect
-                loop = asyncio.get_running_loop()
-                def _sync_login():
-                    sc = SmartConnect(api_key)
-                    session_data = sc.generateSession(username, password, totp_code)
-                    return sc, session_data
+            # Generate TOTP code
+            totp_code = pyotp.TOTP(totp_secret).now()
 
+            # Perform login using SmartConnect with retry
+            loop = asyncio.get_running_loop()
+            def _sync_login():
+                sc = SmartConnect(api_key)
+                session_data = sc.generateSession(username, password, totp_code)
+                return sc, session_data
+
+            # Attempt login with retry
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
                 try:
                     self.smart_api, login_data = await loop.run_in_executor(None, _sync_login)
+                    break
                 except Exception as e:
-                    logger.error(f"Angel SmartConnect login attempt failed: {e}", exc_info=True)
-                    return False
+                    logger.error(f"Angel SmartConnect login attempt {attempt} failed: {e}", exc_info=True)
+                    if attempt < max_retries:
+                        await asyncio.sleep(2)
+                    else:
+                        return False
 
-                # Validate login response
-                if not login_data or not login_data.get("status") or login_data.get("message", "").upper() != "SUCCESS":
-                    error_msg = login_data.get("message", "Unknown error")
-                    error_code = login_data.get("errorcode", "N/A")
-                    logger.error(f"Angel login API call failed. Status: {login_data.get('status')}, Message: {error_msg}, ErrorCode: {error_code}")
-                    return False
+            # Validate login response
+            if not login_data or not login_data.get("status") or login_data.get("message", "").upper() != "SUCCESS":
+                error_msg = login_data.get("message", "Unknown error")
+                error_code = login_data.get("errorcode", "N/A")
+                logger.error(f"Angel login API call failed. Status: {login_data.get('status')}, Message: {error_msg}, ErrorCode: {error_code}")
+                return False
 
-                # Extract tokens from response
-                api_response_data = login_data.get("data", {})
-                self.auth_token = api_response_data.get("jwtToken")
-                self.refresh_token = api_response_data.get("refreshToken")
-                self.feed_token = api_response_data.get("feedToken")
+            # Extract tokens from response
+            api_response_data = login_data.get("data", {})
+            self.auth_token = api_response_data.get("jwtToken")
+            self.refresh_token = api_response_data.get("refreshToken")
+            self.feed_token = api_response_data.get("feedToken")
 
-                if not all([self.auth_token, self.refresh_token, self.feed_token]):
-                    logger.error(f"Angel login successful but token(s) missing in response: {api_response_data}")
-                    return False
+            if not all([self.auth_token, self.refresh_token, self.feed_token]):
+                logger.error(f"Angel login successful but token(s) missing in response: {api_response_data}")
+                return False
 
-                # Save tokens back to database with generated timestamp
-                creds_json["jwt_token"] = self.auth_token
-                creds_json["refresh_token"] = self.refresh_token
-                creds_json["feed_token"] = self.feed_token
-                creds_json["generated_on"] = get_ist_datetime().strftime("%d/%m/%Y %H:%M:%S")
-                
-                full_config["credentials"] = creds_json
-                await upsert_broker_credentials(self.broker_name, full_config)
-                logger.info(f"Angel login successful for '{username}' and new tokens updated in DB.")
-            
+            # Save tokens back to database with generated timestamp
+            creds_json["jwt_token"] = self.auth_token
+            creds_json["refresh_token"] = self.refresh_token
+            creds_json["feed_token"] = self.feed_token
+            creds_json["generated_on"] = get_ist_datetime().strftime("%d/%m/%Y %H:%M:%S")
+
+            full_config["credentials"] = creds_json
+            await upsert_broker_credentials(self.broker_name, full_config)
+            logger.info(f"Angel login successful for '{username}' and new tokens updated in DB.")
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Angel login failed: {e}", exc_info=True)
             return False

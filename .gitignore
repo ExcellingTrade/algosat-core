@@ -32,6 +32,12 @@ Thumbs.db
 *.png
 *.html
 
+# Ignore image files created by screenshots
+*.jpg
+*.jpeg
+*.bmp
+*.gif
+
 # Pip cache
 pip-log.txt
 

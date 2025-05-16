@@ -1,4 +1,3 @@
-\
 """
 broker_auth.py
 
@@ -25,7 +24,7 @@ from brokers.factory import get_broker, BROKER_REGISTRY
 
 logger = get_logger("broker_auth")
 
-async def auth_broker(broker_name: str) -> Tuple[bool, str]:
+async def auth_broker(broker_name: str) -> Tuple[bool, str, Optional[Any]]:
     """
     Authenticate a specific broker by name.
     
@@ -33,24 +32,24 @@ async def auth_broker(broker_name: str) -> Tuple[bool, str]:
         broker_name: The name of the broker to authenticate (e.g., 'fyers', 'angel')
         
     Returns:
-        Tuple of (success: bool, message: str)
+        Tuple of (success: bool, message: str, broker_instance: Optional[Any])
     """
     try:
         # Get broker config from database
         broker_config = await get_broker_credentials(broker_name)
         
         if not broker_config:
-            return False, f"No configuration found for broker: {broker_name}"
+            return False, f"No configuration found for broker: {broker_name}", None
             
         # Skip if broker is not enabled
         if not broker_config.get("is_enabled", False):
             logger.info(f"Broker {broker_name} is not enabled. Skipping authentication.")
-            return False, f"Broker {broker_name} is not enabled"
+            return False, f"Broker {broker_name} is not enabled", None
         
         # Get the broker instance
         broker_instance = get_broker(broker_name)
         if not broker_instance:
-            return False, f"Failed to initialize broker instance for {broker_name}"
+            return False, f"Failed to initialize broker instance for {broker_name}", None
         
         # Perform login
         logger.info(f"Authenticating broker: {broker_name}")
@@ -59,21 +58,21 @@ async def auth_broker(broker_name: str) -> Tuple[bool, str]:
         if login_successful:
             logger.info(f"Authentication successful for broker: {broker_name}")
             # Store the successful broker instance for future use
-            return True, f"Successfully authenticated {broker_name}"
+            return True, f"Successfully authenticated {broker_name}", broker_instance
         else:
             logger.error(f"Authentication failed for broker: {broker_name}")
-            return False, f"Authentication failed for {broker_name}"
+            return False, f"Authentication failed for {broker_name}", None
             
     except Exception as e:
         logger.error(f"Error during authentication of broker {broker_name}: {e}", exc_info=True)
-        return False, f"Error during authentication: {str(e)}"
+        return False, f"Error during authentication: {str(e)}", None
 
-async def auth_all_enabled_brokers() -> Dict[str, Tuple[bool, str]]:
+async def auth_all_enabled_brokers() -> Dict[str, Tuple[bool, str, Optional[Any]]]:
     """
     Authenticate all brokers that are enabled in the database.
     
     Returns:
-        Dictionary mapping broker names to tuples of (success: bool, message: str)
+        Dictionary mapping broker names to tuples of (success: bool, message: str, broker_instance: Optional[Any])
     """
     results = {}
     enabled_brokers = []
@@ -92,12 +91,12 @@ async def auth_all_enabled_brokers() -> Dict[str, Tuple[bool, str]]:
     
     # Authenticate only enabled brokers
     for broker_name in enabled_brokers:
-        success, message = await auth_broker(broker_name)
-        results[broker_name] = (success, message)
+        success, message, broker = await auth_broker(broker_name)
+        results[broker_name] = (success, message, broker)
     
     # Summarize results
-    successful = [name for name, (success, _) in results.items() if success]
-    failed = [name for name, (success, _) in results.items() if not success]
+    successful = [name for name, (success, _, _) in results.items() if success]
+    failed = [name for name, (success, _, _) in results.items() if not success]
     
     if successful:
         logger.info(f"Successfully authenticated brokers: {', '.join(successful)}")
@@ -105,46 +104,6 @@ async def auth_all_enabled_brokers() -> Dict[str, Tuple[bool, str]]:
         logger.warning(f"Failed to authenticate brokers: {', '.join(failed)}")
         
     return results
-
-async def validate_broker_credentials(broker_name: str) -> bool:
-    """
-    Validate if all required authentication fields exist for a broker.
-    
-    Args:
-        broker_name: The name of the broker to validate
-        
-    Returns:
-        True if all required fields are present, False otherwise
-    """
-    try:
-        broker_config = await get_broker_credentials(broker_name)
-        
-        if not broker_config:
-            logger.warning(f"No configuration found for broker: {broker_name}")
-            return False
-            
-        required_fields = broker_config.get("required_auth_fields", [])
-        if not required_fields:
-            logger.warning(f"No required authentication fields defined for broker: {broker_name}")
-            return False
-            
-        credentials = broker_config.get("credentials", {})
-        
-        # Check if all required fields exist and are not empty
-        missing_fields = []
-        for field in required_fields:
-            if not credentials.get(field):
-                missing_fields.append(field)
-                
-        if missing_fields:
-            logger.warning(f"Missing required authentication fields for broker {broker_name}: {', '.join(missing_fields)}")
-            return False
-            
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error validating credentials for broker {broker_name}: {e}", exc_info=True)
-        return False
 
 # For testing
 if __name__ == "__main__":

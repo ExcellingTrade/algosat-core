@@ -82,6 +82,12 @@ broker_credentials = Table(
         server_default=text("false")
     ),
     Column(
+        "is_data_provider",
+        Boolean,
+        nullable=False,
+        server_default=text("false")
+    ),
+    Column(
         "notes",
         String,
         nullable=True,
@@ -105,4 +111,12 @@ broker_credentials = Table(
         nullable=False,
         server_default=text("now()")
     ),
+)
+
+# Ensure only one broker can be marked as the data provider
+Index(
+    "uq_single_data_provider",
+    broker_credentials.c.is_data_provider,
+    unique=True,
+    postgresql_where=text("is_data_provider = true"),
 )
