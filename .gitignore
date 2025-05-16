@@ -34,3 +34,6 @@ Thumbs.db
 
 # Pip cache
 pip-log.txt
+
+# Ignore Files folder and all its contents
+Files/
