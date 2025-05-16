@@ -188,3 +188,80 @@ Traceback (most recent call last):
 TypeError: Can't instantiate abstract class FyersWrapper without an implementation for abstract method 'login'
 2025-05-16 01:46:53 - broker_factory - factory.py:50 - INFO - Creating new broker instance for zerodha
 2025-05-16 01:46:53 - broker_auth - broker_auth.py:56 - INFO - Authenticating broker: zerodha
+2025-05-16 01:58:48 - __main__ - main.py:120 - INFO - 🔄 Creating tables if they don't exist…
+2025-05-16 01:58:48 - __main__ - main.py:26 - INFO - Initializing broker configurations...
+2025-05-16 01:58:48 - __main__ - main.py:33 - INFO - Setting up broker configuration: zerodha
+2025-05-16 01:58:48 - __main__ - main.py:62 - INFO - Broker configurations initialized
+2025-05-16 01:58:48 - __main__ - main.py:76 - INFO - Checking credentials for broker: zerodha
+2025-05-16 01:58:48 - __main__ - main.py:110 - INFO - No credential updates needed for zerodha
+2025-05-16 01:58:48 - __main__ - main.py:132 - INFO - Authenticating enabled brokers...
+2025-05-16 01:58:48 - broker_auth - broker_auth.py:83 - INFO - Found 3 broker(s) in registry: fyers, zerodha, angel
+2025-05-16 01:58:48 - broker_auth - broker_auth.py:91 - INFO - Found 3 enabled broker(s): fyers, zerodha, angel
+2025-05-16 01:58:48 - broker_factory - factory.py:50 - INFO - Creating new broker instance for fyers
+2025-05-16 01:58:48 - broker_auth - broker_auth.py:68 - ERROR - Error during authentication of broker fyers: Can't instantiate abstract class FyersWrapper without an implementation for abstract method 'login'
+Traceback (most recent call last):
+  File "/opt/algosat/algosat/brokers/broker_auth.py", line 51, in auth_broker
+    broker_instance = get_broker(broker_name)
+                      ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/opt/algosat/algosat/brokers/factory.py", line 59, in get_broker
+    broker_instance = BrokerClass()
+                      ^^^^^^^^^^^^^
+TypeError: Can't instantiate abstract class FyersWrapper without an implementation for abstract method 'login'
+2025-05-16 01:58:48 - broker_factory - factory.py:50 - INFO - Creating new broker instance for zerodha
+2025-05-16 01:58:48 - broker_auth - broker_auth.py:56 - INFO - Authenticating broker: zerodha
+2025-05-16 01:59:34 - zerodha_wrapper - zerodha.py:97 - ERROR - Zerodha authentication failed in Selenium: Message: 
+ Element {button[type="submit"]} was not present after 20 seconds!
+
+2025-05-16 01:59:34 - broker_auth - broker_auth.py:64 - ERROR - Authentication failed for broker: zerodha
+2025-05-16 01:59:34 - broker_factory - factory.py:50 - INFO - Creating new broker instance for angel
+2025-05-16 01:59:34 - broker_auth - broker_auth.py:56 - INFO - Authenticating broker: angel
+2025-05-16 01:59:34 - angel_wrapper - angel.py:113 - INFO - Generating a new Angel access token.
+2025-05-16 01:59:34 - angel_wrapper - angel.py:170 - INFO - Angel login successful for 'R476835' and new tokens updated in DB.
+2025-05-16 01:59:34 - broker_auth - broker_auth.py:60 - INFO - Authentication successful for broker: angel
+2025-05-16 01:59:34 - broker_auth - broker_auth.py:103 - INFO - Successfully authenticated brokers: angel
+2025-05-16 01:59:34 - broker_auth - broker_auth.py:105 - WARNING - Failed to authenticate brokers: fyers, zerodha
+2025-05-16 01:59:34 - __main__ - main.py:152 - WARNING - Authentication failed for fyers: Error during authentication: Can't instantiate abstract class FyersWrapper without an implementation for abstract method 'login'
+2025-05-16 01:59:34 - __main__ - main.py:152 - WARNING - Authentication failed for zerodha: Authentication failed for zerodha
+2025-05-16 01:59:34 - __main__ - main.py:140 - INFO - Authentication successful for angel: Successfully authenticated angel
+2025-05-16 01:59:34 - broker_factory - factory.py:40 - DEBUG - Reusing existing broker instance for angel
+2025-05-16 01:59:34 - __main__ - main.py:145 - INFO - Profile for angel: {'clientcode': 'R476835', 'name': 'SATHISH KUMAR R', 'email': '', 'mobileno': '', 'exchanges': ['nse_fo', 'nse_cm', 'cde_fo', 'ncx_fo', 'bse_fo', 'bse_cm', 'mcx_fo'], 'products': ['MARGIN', 'MIS', 'NRML', 'CNC', 'CO', 'BO'], 'lastlogintime': '', 'broker': ''}
+2025-05-16 01:59:34 - __main__ - main.py:149 - INFO - Positions for angel: {'status': True, 'message': 'SUCCESS', 'errorcode': '', 'data': None}
+2025-05-16 01:59:34 - __main__ - main.py:155 - INFO - 🚀 All brokers processed. Entering poll loop...
+2025-05-16 01:59:48 - __main__ - main.py:120 - INFO - 🔄 Creating tables if they don't exist…
+2025-05-16 01:59:48 - __main__ - main.py:26 - INFO - Initializing broker configurations...
+2025-05-16 01:59:48 - __main__ - main.py:33 - INFO - Setting up broker configuration: zerodha
+2025-05-16 01:59:48 - __main__ - main.py:62 - INFO - Broker configurations initialized
+2025-05-16 01:59:48 - __main__ - main.py:76 - INFO - Checking credentials for broker: zerodha
+2025-05-16 01:59:48 - __main__ - main.py:110 - INFO - No credential updates needed for zerodha
+2025-05-16 01:59:48 - __main__ - main.py:132 - INFO - Authenticating enabled brokers...
+2025-05-16 01:59:48 - broker_auth - broker_auth.py:83 - INFO - Found 3 broker(s) in registry: fyers, zerodha, angel
+2025-05-16 01:59:48 - broker_auth - broker_auth.py:91 - INFO - Found 3 enabled broker(s): fyers, zerodha, angel
+2025-05-16 01:59:48 - broker_factory - factory.py:50 - INFO - Creating new broker instance for fyers
+2025-05-16 01:59:48 - broker_auth - broker_auth.py:56 - INFO - Authenticating broker: fyers
+2025-05-16 01:59:48 - fyers_wrapper - fyers.py:277 - INFO - Reusing existing Fyers access token (generated today after 6AM or before 6AM and still before 6AM)
+2025-05-16 01:59:48 - broker_auth - broker_auth.py:60 - INFO - Authentication successful for broker: fyers
+2025-05-16 01:59:48 - broker_factory - factory.py:50 - INFO - Creating new broker instance for zerodha
+2025-05-16 01:59:48 - broker_auth - broker_auth.py:56 - INFO - Authenticating broker: zerodha
+2025-05-16 02:00:15 - zerodha_wrapper - zerodha.py:113 - INFO - Successfully authenticated and stored new Zerodha access token.
+2025-05-16 02:00:15 - broker_auth - broker_auth.py:60 - INFO - Authentication successful for broker: zerodha
+2025-05-16 02:00:15 - broker_factory - factory.py:50 - INFO - Creating new broker instance for angel
+2025-05-16 02:00:15 - broker_auth - broker_auth.py:56 - INFO - Authenticating broker: angel
+2025-05-16 02:00:15 - angel_wrapper - angel.py:113 - INFO - Generating a new Angel access token.
+2025-05-16 02:00:15 - angel_wrapper - angel.py:170 - INFO - Angel login successful for 'R476835' and new tokens updated in DB.
+2025-05-16 02:00:15 - broker_auth - broker_auth.py:60 - INFO - Authentication successful for broker: angel
+2025-05-16 02:00:15 - broker_auth - broker_auth.py:103 - INFO - Successfully authenticated brokers: fyers, zerodha, angel
+2025-05-16 02:00:15 - __main__ - main.py:140 - INFO - Authentication successful for fyers: Successfully authenticated fyers
+2025-05-16 02:00:15 - broker_factory - factory.py:40 - DEBUG - Reusing existing broker instance for fyers
+2025-05-16 02:00:15 - __main__ - main.py:145 - INFO - Profile for fyers: {'fy_id': 'XR01921', 'name': 'R SATHISH KUMAR', 'image': None, 'display_name': None, 'pin_change_date': '05-02-2025 10:58:28', 'email_id': 'sathishwebsite@gmail.com', 'pwd_change_date': '30-04-2022 00:38:38', 'PAN': '---------', 'mobile_number': '9790143444', 'totp': True, 'pwd_to_expire': -962, 'ddpi_enabled': False, 'mtf_enabled': False}
+2025-05-16 02:00:15 - __main__ - main.py:149 - INFO - Positions for fyers: {'code': 200, 'message': '', 's': 'ok', 'netPositions': [], 'overall': {'count_open': 0, 'count_total': 0, 'pl_realized': 0, 'pl_total': 0, 'pl_unrealized': 0}}
+2025-05-16 02:00:15 - __main__ - main.py:140 - INFO - Authentication successful for zerodha: Successfully authenticated zerodha
+2025-05-16 02:00:15 - broker_factory - factory.py:40 - DEBUG - Reusing existing broker instance for zerodha
+2025-05-16 02:00:15 - zerodha_wrapper - zerodha.py:166 - WARNING - Zerodha implementation is a placeholder only. Profile retrieval not implemented.
+2025-05-16 02:00:15 - __main__ - main.py:145 - INFO - Profile for zerodha: {'name': 'Placeholder', 'status': 'Not implemented'}
+2025-05-16 02:00:15 - zerodha_wrapper - zerodha.py:142 - WARNING - Zerodha implementation is a placeholder only. Positions retrieval not implemented.
+2025-05-16 02:00:15 - __main__ - main.py:149 - INFO - Positions for zerodha: []
+2025-05-16 02:00:15 - __main__ - main.py:140 - INFO - Authentication successful for angel: Successfully authenticated angel
+2025-05-16 02:00:15 - broker_factory - factory.py:40 - DEBUG - Reusing existing broker instance for angel
+2025-05-16 02:00:16 - __main__ - main.py:145 - INFO - Profile for angel: {'clientcode': 'R476835', 'name': 'SATHISH KUMAR R', 'email': '', 'mobileno': '', 'exchanges': ['nse_fo', 'nse_cm', 'cde_fo', 'ncx_fo', 'bse_fo', 'bse_cm', 'mcx_fo'], 'products': ['MARGIN', 'MIS', 'NRML', 'CNC', 'CO', 'BO'], 'lastlogintime': '', 'broker': ''}
+2025-05-16 02:00:16 - __main__ - main.py:149 - INFO - Positions for angel: {'status': True, 'message': 'SUCCESS', 'errorcode': '', 'data': None}
+2025-05-16 02:00:16 - __main__ - main.py:155 - INFO - 🚀 All brokers processed. Entering poll loop...

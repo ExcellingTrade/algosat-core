@@ -167,15 +167,90 @@ class FyersWrapper(BrokerInterface):
     @staticmethod
     async def _setup_auth_async():
         """Authenticate asynchronously."""
-        # Call the sync version in a thread for now
-        return await asyncio.to_thread(FyersWrapper._setup_auth_sync)
+        return FyersWrapper._setup_auth_sync()
 
     @staticmethod
     def _setup_auth_sync():
         """Authenticate synchronously."""
+        # Fetch full broker config and extract credentials only
+        full_config = asyncio.run(get_broker_credentials("fyers"))
+        credentials = None
+        if isinstance(full_config, dict):
+            credentials = full_config.get("credentials")
+        if not credentials or not isinstance(credentials, dict):
+            logger.error("No Fyers credentials found in database or credentials are invalid")
+            return None
+
+        # Use can_reuse_token utility for token validation
+        if (
+            "access_token" in credentials and
+            "generated_on" in credentials and
+            can_reuse_token(credentials["generated_on"])
+        ):
+            try:
+                FyersWrapper.fyers = fyersModel.FyersModel(
+                    token=credentials["access_token"],
+                    is_async=FyersWrapper.is_async,
+                    client_id=credentials["api_key"],
+                    log_path=constants.FYER_LOG_DIR,
+                )
+                FyersWrapper.token = credentials["access_token"]
+                FyersWrapper.appId = credentials["api_key"]
+                logger.info("Successfully authenticated using existing token.")
+                return
+            except Exception as e:
+                logger.exception("Token validation exception while checking reuse")
+
+        # Perform re-authentication
+        logger.info("Generating a new access token.")
+        session = fyersModel.SessionModel(
+            client_id=credentials["api_key"],
+            secret_key=credentials["api_secret"],
+            redirect_uri=credentials["redirect_uri"],
+            response_type="code",
+            grant_type="authorization_code",
+        )
+
+        auth_url = session.generate_authcode()
+        auth_code = FyersWrapper.authenticate(
+            url=auth_url,
+            mobile_number=credentials["client_id"], # Assuming client_id is the mobile number
+            password_2fa=credentials["pin"], # Assuming pin is the 2FA password
+            totp_secret_key=credentials["totp_secret"],
+        )
+
+        if not auth_code:
+            raise Exception("Authentication failed.")
+
+        session.set_token(auth_code)
+        response = session.generate_token()
+        credentials["access_token"] = response["access_token"]
+        credentials["generated_on"] = get_ist_datetime().strftime("%d/%m/%Y %H:%M:%S")
+        # Persist the entire broker config, not just the credentials sub-dict
+        full_config["credentials"] = credentials
+        asyncio.run(upsert_broker_credentials("fyers", full_config))
+
+        FyersWrapper.fyers = fyersModel.FyersModel(
+            token=credentials["access_token"],
+            is_async=FyersWrapper.is_async,
+            client_id=credentials["api_key"],
+            log_path=constants.FYER_LOG_DIR,
+        )
+        FyersWrapper.token = credentials["access_token"]
+        FyersWrapper.appId = credentials["api_key"]
+        logger.info(f"Successfully authenticated with new token.")
+
+    @staticmethod
+    async def login():
+        """
+        Authenticate with Fyers API using stored credentials.
+        This method conforms to the BrokerInterface.
+        Returns:
+            bool: True if authentication was successful, False otherwise
+        """
         try:
-            # Fetch full broker config and extract credentials only
-            full_config = asyncio.run(get_broker_credentials("fyers"))
+            # Fetch full broker config and extract only the credentials field
+            full_config = await get_broker_credentials("fyers")
             credentials = None
             if isinstance(full_config, dict):
                 credentials = full_config.get("credentials")
@@ -183,72 +258,34 @@ class FyersWrapper(BrokerInterface):
                 logger.error("No Fyers credentials found in database or credentials are invalid")
                 return False
 
-            # Use can_reuse_token utility for token validation
-            if (
-                "access_token" in credentials and
-                "generated_on" in credentials and
-                can_reuse_token(credentials["generated_on"])
-            ):
+            # Use only the credentials dict from now on
+            fyers_creds = credentials
+
+            # Check if we already have a valid access token based on generation time
+            access_token = fyers_creds.get("access_token")
+            generated_on_str = fyers_creds.get("generated_on")
+            if access_token and generated_on_str and can_reuse_token(generated_on_str):
                 try:
+                    FyersWrapper.token = access_token
+                    FyersWrapper.appId = fyers_creds.get("api_key")
                     FyersWrapper.fyers = fyersModel.FyersModel(
-                        token=credentials["access_token"],
+                        client_id = fyers_creds.get("api_key"),
                         is_async=FyersWrapper.is_async,
-                        client_id=credentials["api_key"],
-                        log_path=constants.FYER_LOG_DIR,
+                        token=access_token,
+                        log_path=constants.FYER_LOG_DIR
                     )
-                    FyersWrapper.token = credentials["access_token"]
-                    FyersWrapper.appId = credentials["api_key"]
-                    logger.info("Successfully authenticated using existing token.")
+                    logger.info("Reusing existing Fyers access token (generated today after 6AM or before 6AM and still before 6AM)")
                     return True
                 except Exception as e:
-                    logger.exception("Token validation exception while checking reuse")
-                    # Continue to re-authenticate
+                    logger.warning(f"Token reuse check failed: {e}, will generate new token")
 
-            # Perform re-authentication
-            logger.info("Generating a new access token.")
-            session = fyersModel.SessionModel(
-                client_id=credentials["api_key"],
-                secret_key=credentials["api_secret"],
-                redirect_uri=credentials["redirect_uri"],
-                response_type="code",
-                grant_type="authorization_code",
-            )
-
-            auth_url = session.generate_authcode()
-            auth_code = FyersWrapper.authenticate(
-                url=auth_url,
-                mobile_number=credentials["client_id"], # Assuming client_id is the mobile number
-                password_2fa=credentials["pin"], # Assuming pin is the 2FA password
-                totp_secret_key=credentials["totp_secret"],
-            )
-
-            if not auth_code:
-                logger.error("Authentication failed: No auth code returned.")
-                return False
-
-            session.set_token(auth_code)
-            response = session.generate_token()
-            if not response or "access_token" not in response:
-                logger.error(f"Failed to generate access token: {response}")
-                return False
-            credentials["access_token"] = response["access_token"]
-            credentials["generated_on"] = get_ist_datetime().strftime("%d/%m/%Y %H:%M:%S")
-            # Persist the entire broker config, not just the credentials sub-dict
-            full_config["credentials"] = credentials
-            asyncio.run(upsert_broker_credentials("fyers", full_config))
-
-            FyersWrapper.fyers = fyersModel.FyersModel(
-                token=credentials["access_token"],
-                is_async=FyersWrapper.is_async,
-                client_id=credentials["api_key"],
-                log_path=constants.FYER_LOG_DIR,
-            )
-            FyersWrapper.token = credentials["access_token"]
-            FyersWrapper.appId = credentials["api_key"]
-            logger.info(f"Successfully authenticated with new token.")
-            return True
+            # Use the existing setup_auth method for now
+            # This maintains backward compatibility while still using the new interface
+            logger.info("Obtaining new Fyers access token")
+            result = await FyersWrapper.setup_auth(is_async=True)
+            return result is not None  # Return True if we got a result
         except Exception as e:
-            logger.error(f"Exception during Fyers authentication: {e}", exc_info=True)
+            logger.error(f"Fyers authentication failed: {e}", exc_info=True)
             return False
 
     @staticmethod

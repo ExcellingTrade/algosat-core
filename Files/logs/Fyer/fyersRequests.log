@@ -27,3 +27,5 @@
 {"level":"DEBUG","location":"[get_call:140] fyersModel","message":{"Status Code":200,"API":"/positions"},"timestamp":"2025-05-15 15:56:58,130+0000","service":"FyersAPIRequest","taskName":"Task-1"}
 {"level":"DEBUG","location":"[get_call:140] fyersModel","message":{"Status Code":200,"API":"/profile"},"timestamp":"2025-05-16 01:42:25,746+0000","service":"FyersAPIRequest"}
 {"level":"DEBUG","location":"[get_call:140] fyersModel","message":{"Status Code":200,"API":"/positions"},"timestamp":"2025-05-16 01:42:25,776+0000","service":"FyersAPIRequest","taskName":"Task-1"}
+{"level":"DEBUG","location":"[get_call:140] fyersModel","message":{"Status Code":200,"API":"/profile"},"timestamp":"2025-05-16 02:00:15,937+0000","service":"FyersAPIRequest"}
+{"level":"DEBUG","location":"[get_call:140] fyersModel","message":{"Status Code":200,"API":"/positions"},"timestamp":"2025-05-16 02:00:15,966+0000","service":"FyersAPIRequest","taskName":"Task-1"}

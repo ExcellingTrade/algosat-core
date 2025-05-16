@@ -82,14 +82,11 @@ class ZerodhaWrapper(BrokerInterface):
                     # Allow time for auto-redirect after OTP
                     sb.sleep(2)
                     current_url = sb.get_current_url()
-                    print(current_url)
-                    redirect_uri = credentials.get("redirect_uri")
-                    print(redirect_uri)
-                    if redirect_uri and redirect_uri in current_url:
-                        # Page auto-redirected, no click needed
+                    # If the URL already contains the one-time request_token, no click needed
+                    if "request_token=" in current_url:
                         redirected_url = current_url
                     else:
-                        # Fallback: click the submit button directly
+                        # Otherwise click the submit button to proceed
                         sb.click('button[type="submit"]', timeout=20)
                         sb.sleep(2)
                         redirected_url = sb.get_current_url()
