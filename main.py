@@ -1,14 +1,17 @@
 # algosat/main.py
 
 import asyncio
-from core.db import create_table_ddl
-from core.dbschema import strategies, strategy_configs, trade_logs, broker_credentials
+from core.db import create_table_ddl, engine
+from core.dbschema import strategies, strategy_configs, trade_logs, broker_credentials, metadata
 from core.strategy_manager import run_poll_loop
 from brokers.factory import get_broker
 from brokers.broker_auth import auth_broker, auth_all_enabled_brokers, validate_broker_credentials
 from common.broker_utils import get_broker_credentials, upsert_broker_credentials
 from common.logger import get_logger
 from common.default_broker_configs import DEFAULT_BROKER_CONFIGS # Import the default configs
+from common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
+from sqlalchemy import select, insert
+from datetime import datetime
 
 logger = get_logger(__name__)
 
@@ -112,6 +115,59 @@ async def prompt_for_missing_credentials():
             
     return results
 
+async def initialize_all_tables():
+    """
+    Ensure all required tables are created in the database if they do not exist.
+    This is modular and can be called from anywhere.
+    """
+    async with engine.begin() as conn:
+        await conn.run_sync(metadata.create_all)
+
+async def seed_strategies_and_configs():
+    """
+    Seed the strategies and strategy_configs tables with default strategies and configs if empty.
+    """
+    async with engine.begin() as conn:
+        # Check if strategies table is empty
+        result = await conn.execute(select(strategies))
+        existing = result.first()
+        if existing:
+            logger.info("Strategies table already populated. Skipping seeding.")
+            return
+        logger.info("Seeding default strategies and configs...")
+        # Insert strategies
+        strategy_key_to_id = {}
+        now = datetime.now()
+        for key, default_cfg in DEFAULT_STRATEGY_CONFIGS.items():
+            ins = strategies.insert().values(
+                key=key,
+                name=key,
+                enabled=True,
+                created_at=now,
+                updated_at=now,
+            )
+            res = await conn.execute(ins)
+            # SQLAlchemy 1.4+ returns inserted_primary_key
+            strategy_id = res.inserted_primary_key[0] if hasattr(res, 'inserted_primary_key') else None
+            strategy_key_to_id[key] = strategy_id
+        # Insert strategy configs for OptionBuy and OptionSell only
+        for key in ["OptionBuy", "OptionSell"]:
+            cfg = DEFAULT_STRATEGY_CONFIGS[key]
+            if not cfg:
+                continue
+            ins_cfg = strategy_configs.insert().values(
+                strategy_id=strategy_key_to_id[key],
+                symbol=cfg["symbol"],
+                exchange=cfg["exchange"],
+                params=cfg["params"],
+                is_default=True,
+                enabled=True,
+                created_at=now,
+                updated_at=now,
+            )
+            await conn.execute(ins_cfg)
+        logger.info("Default strategies and configs seeded.")
+
 async def _start():
     """
     Main entry point for the application.
@@ -157,4 +213,27 @@ async def _start():
     # await run_poll_loop()
 
 if __name__ == "__main__":
-    asyncio.run(_start())
+    import sys
+    async def main():
+        await initialize_all_tables()
+        await seed_strategies_and_configs()
+        await initialize_brokers()
+        # Authenticate all enabled brokers
+        logger.info("Authenticating enabled brokers...")
+        auth_results = await auth_all_enabled_brokers()
+        if not auth_results:
+            logger.info("No enabled brokers found. Skipping broker authentication.")
+        else:
+            for broker_name, (success, message) in auth_results.items():
+                if success:
+                    logger.info(f"Authentication successful for {broker_name}: {message}")
+                    broker = get_broker(broker_name)
+                    profile = await broker.get_profile()
+                    logger.info(f"Profile for {broker_name}: {profile}")
+                    positions = await broker.get_positions()
+                    logger.info(f"Positions for {broker_name}: {positions}")
+                    print("*"*50)
+                else:
+                    logger.warning(f"Authentication failed for {broker_name}: {message}")
+        await run_poll_loop()
+    asyncio.run(main())

@@ -10,10 +10,8 @@ metadata = MetaData()
 strategies = Table(
     "strategies", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("key", String, nullable=False, unique=True),
+    Column("key", String, nullable=False, unique=True),  # e.g. OptionBuy, OptionSell, SwingHighLow
     Column("name", String, nullable=False),
-    Column("broker", String, nullable=False),
-    Column("mode", String, nullable=False, server_default="'live'"),
     Column("enabled", Boolean, nullable=False, server_default=text("true")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),

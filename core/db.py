@@ -5,6 +5,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import inspect, Table, MetaData, update  # Modified import
 
 from config import settings
+from core.dbschema import metadata
 
 # 1) Create the Async Engine
 engine = create_async_engine(
@@ -96,5 +97,11 @@ async def update_rows_in_table(
     async with engine.begin() as conn:
         await conn.execute(stmt)
         # For information: result.rowcount would give the number of affected rows
+
+def initialize_database(engine):
+    """
+    Create all tables (strategies, strategy_configs, etc.) if they do not exist.
+    """
+    metadata.create_all(engine)
 
 

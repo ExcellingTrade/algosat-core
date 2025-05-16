@@ -21,12 +21,15 @@ import glob
 import logging
 import os
 import sys
+import time
 import traceback
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 import colorlog
+import pytz
+import time
 from filelock import FileLock
 
 from common import constants
@@ -58,6 +61,19 @@ def get_log_file():
     return log_file
 
 
+class ISTFormatter(logging.Formatter):
+    def converter(self, timestamp):
+        dt = datetime.fromtimestamp(timestamp, pytz.timezone('Asia/Kolkata'))
+        return dt.timetuple()
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            s = time.strftime(datefmt, ct)
+        else:
+            s = time.strftime("%Y-%m-%d %H:%M:%S", ct)
+        return s
+
+
 def configure_root_logger():
     """Configure the root logger with a single daily rotating file handler and color console handler."""
     global _ROOT_LOGGER_CONFIGURED
@@ -69,7 +85,7 @@ def configure_root_logger():
 
     # File handler: DEBUG level, daily file, rotation by size
     log_file = get_log_file()
-    file_formatter = logging.Formatter(
+    file_formatter = ISTFormatter(
         "%(asctime)s - %(name)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
@@ -81,7 +97,20 @@ def configure_root_logger():
     root_logger.addHandler(file_handler)
 
     # Console handler: INFO level, color
-    console_formatter = colorlog.ColoredFormatter(
+    class ISTColorFormatter(colorlog.ColoredFormatter):
+        def converter(self, timestamp):
+            dt = datetime.fromtimestamp(timestamp, pytz.timezone('Asia/Kolkata'))
+            return dt.timetuple()
+        def formatTime(self, record, datefmt=None):
+            ct = self.converter(record.created)
+            if datefmt:
+                s = time.strftime(datefmt, ct)
+            else:
+                s = time.strftime("%Y-%m-%d %H:%M:%S", ct)
+            return s
+    console_handler = colorlog.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(ISTColorFormatter(
         "%(log_color)s%(asctime)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         log_colors={
@@ -91,10 +120,7 @@ def configure_root_logger():
             "ERROR": "red",
             "CRITICAL": "red,bg_white",
         },
-    )
-    console_handler = colorlog.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(console_formatter)
+    ))
     root_logger.addHandler(console_handler)
 
     _ROOT_LOGGER_CONFIGURED = True
