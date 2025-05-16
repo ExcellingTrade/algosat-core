@@ -134,13 +134,27 @@ class ZerodhaWrapper(BrokerInterface):
         
     async def get_positions(self) -> List[Dict[str, Any]]:
         """
-        Retrieve current positions from Zerodha.
+        Retrieve current positions from Zerodha using the Kite Connect API.
         
         Returns:
             List of position dictionaries
         """
-        logger.warning("Zerodha implementation is a placeholder only. Positions retrieval not implemented.")
-        return []
+        try:
+            if not self.kite:
+                logger.error("Kite client not initialized. Please login first.")
+                return [{"error": "Kite client not initialized"}]
+            loop = asyncio.get_event_loop()
+            positions = await loop.run_in_executor(None, self.kite.positions)
+            # Flatten the positions dict to a list of all positions (day + net)
+            all_positions = []
+            for segment in ("day", "net"):
+                segment_positions = positions.get(segment, [])
+                if isinstance(segment_positions, list):
+                    all_positions.extend(segment_positions)
+            return all_positions
+        except Exception as e:
+            logger.error(f"Failed to fetch Zerodha positions: {e}")
+            return [{"error": str(e)}]
         
     async def get_history(self, symbol: str, **kwargs: Any) -> Any:
         """
@@ -158,10 +172,17 @@ class ZerodhaWrapper(BrokerInterface):
         
     async def get_profile(self) -> Dict[str, Any]:
         """
-        Retrieve user profile from Zerodha.
-        
+        Retrieve user profile from Zerodha using the Kite Connect API.
         Returns:
             Dict containing profile data
         """
-        logger.warning("Zerodha implementation is a placeholder only. Profile retrieval not implemented.")
-        return {"name": "Placeholder", "status": "Not implemented"}
+        try:
+            if not self.kite:
+                logger.error("Kite client not initialized. Please login first.")
+                return {"error": "Kite client not initialized"}
+            loop = asyncio.get_event_loop()
+            profile = await loop.run_in_executor(None, self.kite.profile)
+            return profile
+        except Exception as e:
+            logger.error(f"Failed to fetch Zerodha profile: {e}")
+            return {"error": str(e)}

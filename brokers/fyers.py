@@ -179,7 +179,7 @@ class FyersWrapper(BrokerInterface):
             credentials = full_config.get("credentials")
         if not credentials or not isinstance(credentials, dict):
             logger.error("No Fyers credentials found in database or credentials are invalid")
-            return None
+            return False
 
         # Use can_reuse_token utility for token validation
         if (
@@ -197,7 +197,7 @@ class FyersWrapper(BrokerInterface):
                 FyersWrapper.token = credentials["access_token"]
                 FyersWrapper.appId = credentials["api_key"]
                 logger.info("Successfully authenticated using existing token.")
-                return
+                return True
             except Exception as e:
                 logger.exception("Token validation exception while checking reuse")
 
@@ -220,7 +220,7 @@ class FyersWrapper(BrokerInterface):
         )
 
         if not auth_code:
-            raise Exception("Authentication failed.")
+            return False
 
         session.set_token(auth_code)
         response = session.generate_token()
@@ -239,6 +239,7 @@ class FyersWrapper(BrokerInterface):
         FyersWrapper.token = credentials["access_token"]
         FyersWrapper.appId = credentials["api_key"]
         logger.info(f"Successfully authenticated with new token.")
+        return True
 
     @staticmethod
     async def login():
@@ -354,15 +355,17 @@ class FyersWrapper(BrokerInterface):
             if not FyersWrapper.fyers:
                 logger.error("Fyers client not initialized, please call login() first")
                 return {}
-                
-            # Use asyncio.to_thread to run the sync method in a separate thread
-            loop = asyncio.get_event_loop()
-            profile_data = await loop.run_in_executor(None, FyersWrapper.fyers.get_profile)
-            
+
+            # Dispatch to sync or async based on mode
+            if FyersWrapper.is_async:
+                profile_data = await FyersWrapper.get_profile_async()
+            else:
+                profile_data = FyersWrapper.get_profile_sync()
+
             if profile_data and profile_data.get("code") == 200 and profile_data.get("s") == "ok":
                 return profile_data.get("data", {})
             else:
-                logger.error(f"Failed to get profile: {profile_data.get('message', 'Unknown error')}")
+                logger.error(f"Failed to get profile: {profile_data.get('message', 'Unknown error') if isinstance(profile_data, dict) else profile_data}")
                 return {}
         except Exception as e:
             logger.error(f"Error getting profile: {e}", exc_info=True)
