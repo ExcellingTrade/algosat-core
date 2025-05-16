@@ -1,0 +1,1 @@
+"""StrategyConfig Pydantic schema."""

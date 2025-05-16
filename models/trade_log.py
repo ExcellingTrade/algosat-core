@@ -1,0 +1,1 @@
+"""TradeLog Pydantic schema."""

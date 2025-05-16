@@ -1,0 +1,22 @@
+fastapi
+uvicorn[standard]
+sqlalchemy[asyncio]
+asyncpg
+pydantic
+python-dotenv    # to load your .env
+backtrader       # for backtesting later
+pandas           # for data manipulation
+numpy            # for numerical operations
+nest_asyncio
+pyotp
+requests
+asyncio-limiter
+fyers_apiv3
+selenium
+webdriver-manager
+beautifulsoup4
+seleniumbase
+colorlog
+pyvirtualdisplay
+smartapi-python
+logzero
