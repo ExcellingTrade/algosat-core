@@ -42,13 +42,11 @@ class TelegramBot:
                 updates = response_data.get("result", [])
                 if updates:
                     logger.info(f"Received {len(updates)} updates.")
-                    print(f"{updates} received")
                     # Extract the first valid chat_id from updates
                     for update in updates:
                         if "message" in update and "chat" in update["message"]:
                             self.chat_id = update["message"]["chat"]["id"]
                             logger.info(f"Chat ID found: {self.chat_id}")
-                            print(f"Chat ID found: {self.chat_id}")
                             break  # Stop after getting first valid chat ID
 
                 else:

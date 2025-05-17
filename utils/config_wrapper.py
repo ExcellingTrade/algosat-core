@@ -179,8 +179,6 @@ def get_log_config() -> dict:
                 # Convert log level strings to logging constants
                 log_level = getattr(logging, value.upper(), logging.INFO)
                 log_config[key] = log_level
-        else:
-            print("Log section not found in the configuration file. Using default log levels.")
     except Exception as e:
         raise ValueError(f"Error reading log configuration: {e}")
 

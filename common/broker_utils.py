@@ -124,7 +124,7 @@ def get_nse_holiday_list():
                 with open(HOLIDAY_FILE, 'r') as f:
                     return json.load(f)  # Return holidays from the cached file
             except Exception as err:
-                print(f"Error reading holiday file: {err}. Re-fetching holidays...")
+                logger.error(f"Error reading holiday file: {err}. Re-fetching holidays...")
 
     # Fetch holidays from NSE API
     tries = 1
@@ -142,11 +142,11 @@ def get_nse_holiday_list():
 
             return holidays
         except Exception as err:
-            print(f"Error fetching holidays from NSE API (Attempt {tries}/{max_retries}): {err}")
+            logger.error(f"Error fetching holidays from NSE API (Attempt {tries}/{max_retries}): {err}")
             tries += 1
 
     # Return an empty list if all attempts fail
-    print("Failed to fetch NSE holiday list after multiple attempts.")
+    logger.error("Failed to fetch NSE holiday list after multiple attempts.")
     return []
 
 
