@@ -39,7 +39,7 @@ def calculate_first_candle_details(current_date, first_candle_time, interval_min
     try:
         first_candle_start = datetime.combine(current_date,
                                               datetime.strptime(first_candle_time, "%H:%M").time())
-        first_candle_close = first_candle_start + timedelta(minutes=interval_minutes)
+        first_candle_close = first_candle_start #+ timedelta(minutes=interval_minutes)
         from_date = first_candle_start
         to_date = first_candle_close
         return {

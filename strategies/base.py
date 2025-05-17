@@ -17,33 +17,19 @@ class StrategyBase(ABC):
         self.dp = data_provider
         self.em = execution_manager
 
-        # Extract common parameters from config.params (or config['params'])
-        params = None
-        try:
-            if hasattr(config, "params"):
-                params = getattr(config, "params", {})
-            elif isinstance(config, dict):
-                params = config.get("params", {})
-            else:
-                params = {}
-        except Exception as e:
-            import logging
-
-            logging.error(f"Error extracting params from config: {e}")
-            params = {}
-        self.params = params
-        # Timeframe for candles, e.g. '1m', '5m', etc.
-        self.timeframe: str = params.get("timeframe", "1m")
-        # Poll interval in seconds between run_tick calls (overrides strategy_manager if set)
-        self.poll_interval: int = params.get("poll_interval", 60)
-        # Strategy symbol(s)
-        # Accepts either a list of symbols or a single symbol (from DB schema)
-        if "symbols" in params and isinstance(params["symbols"], list):
-            self.symbols = params["symbols"]
-        elif "symbol" in params:
-            self.symbols = [params["symbol"]]
-        else:
-            self.symbols = []
+        # Extract top-level fields
+        self.exchange = getattr(config, "exchange", None) or config.get("exchange")
+        self.instrument = getattr(config, "instrument", None) or config.get("instrument")
+        self.trade = getattr(config, "trade", None) or config.get("trade", {})
+        self.indicators = getattr(config, "indicators", None) or config.get("indicators", {})
+        # Compute symbol from config fields
+        trade_symbol = self.trade.get("symbol") or getattr(config, "symbol", None) or config.get("symbol")
+        self.symbol = None
+        if self.exchange and trade_symbol and self.instrument:
+            self.symbol = f"{self.exchange}:{trade_symbol}-{self.instrument}"
+        # Timeframe and poll_interval can be in trade dict
+        self.timeframe: str = self.trade.get("timeframe", "1m")
+        self.poll_interval: int = self.trade.get("poll_interval", 60)
 
     async def setup(self) -> None:
         """

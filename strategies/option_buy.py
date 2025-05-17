@@ -28,32 +28,22 @@ class OptionBuyStrategy(StrategyBase):
         dp = get_data_provider()
         em = get_execution_manager()
         super().__init__(config, dp, em)
-        params = self.params  # Use the unified param extraction from base class
-        # Time window for entries (HH:MM strings)
+        # Use trade dict for time window and other trade params
+        trade = self.trade
         self.start_time = None
         self.end_time = None
         try:
-            if params.get("start_time"):
-                self.start_time = datetime.strptime(params.get("start_time"), "%H:%M").time()
-            if params.get("end_time"):
-                self.end_time = datetime.strptime(params.get("end_time"), "%H:%M").time()
+            if trade.get("start_time"):
+                self.start_time = datetime.strptime(trade.get("start_time"), "%H:%M").time()
+            if trade.get("end_time"):
+                self.end_time = datetime.strptime(trade.get("end_time"), "%H:%M").time()
         except Exception as e:
             logger.error(f"Error parsing start_time/end_time: {e}")
             self.start_time = None
             self.end_time = None
-        # Premium threshold to select strikes
-        self.premium    = params.get("premium", 100)
-        # Number of lots / quantity per order
-        self.quantity   = params.get("quantity", 1)
-        # How many strikes to fetch from chain (if needed)
-        self.strike_count = params.get("strike_count", 20)
-
-        # Symbol comes from config, not params
-        self.symbols = []
-        symbol = getattr(config, "symbol", None)
-        if symbol:
-            self.symbols = [symbol]
-
+        self.premium = trade.get("premium", 100)
+        self.quantity = trade.get("quantity", 1)
+        self.strike_count = trade.get("strike_count", 20)
         # Internal state
         self._strikes = []         # Selected strikes after setup()
         self._position = None      # Track current open position, if any
@@ -62,12 +52,12 @@ class OptionBuyStrategy(StrategyBase):
         """One-time setup: modular workflow for OptionBuy."""
         if self._strikes:
             return
-        params = getattr(self.config, "params", {})
-        interval_minutes = params.get("interval_minutes", 5)
-        first_candle_time = params.get("first_candle_time", "09:15")
-        max_strikes = params.get("max_strikes", 40)
-        max_premium = params.get("max_premium", 200)
-        symbol = params.get("symbol", self.symbols[0] if self.symbols else None)
+        trade = self.trade
+        interval_minutes = trade.get("interval_minutes", 5)
+        first_candle_time = trade.get("first_candle_time", "09:15")
+        max_strikes = trade.get("max_strikes", 40)
+        max_premium = trade.get("max_premium", 200)
+        symbol = self.symbol
         if not symbol:
             logger.error("No symbol configured for OptionBuy strategy.")
             return
@@ -80,16 +70,22 @@ class OptionBuyStrategy(StrategyBase):
         to_date = candle_times["to_date"]
         # 3. Fetch option chain and first candle history
         broker = self.dp._broker or await self.dp._ensure_broker() or self.dp._broker
+        logger.info(
+            f"Fetching option chain and history with params: "
+            f"symbol={symbol}, interval_minutes={interval_minutes}, "
+            f"max_strikes={max_strikes}, from_date={from_date}, to_date={to_date}, "
+            f"max_premium={max_premium}"
+        )
         history_data = await fetch_option_chain_and_first_candle_history(
             broker, symbol, interval_minutes, max_strikes, from_date, to_date, bot_name="OptionBuy"
         )
         # 4. Identify strike prices
         ce_strike, pe_strike = identify_strike_price_combined(history_data=history_data, max_premium=max_premium)
         self._strikes = []
-        if ce_strike is not None and not ce_strike.empty:
-            self._strikes.append(ce_strike.iloc[0]["symbol"])
-        if pe_strike is not None and not pe_strike.empty:
-            self._strikes.append(pe_strike.iloc[0]["symbol"])
+        if ce_strike is not None:
+            self._strikes.append(ce_strike)
+        if pe_strike is not None:
+            self._strikes.append(pe_strike)
         logger.info(f"Selected strikes for entry: {self._strikes}")
 
     async def run_tick(self) -> None:
@@ -129,12 +125,10 @@ class OptionBuyStrategy(StrategyBase):
         Define entry condition.
         Return order payload if conditions met, else None.
         """
-        # TODO: implement your signal logic based on 'data'
-        # Example placeholder:
         last_price = data[-1].get("close") if data else None
         if last_price and last_price > 0:  # replace with real condition
             return {
-                "symbol": self.config.params["symbol"],
+                "symbol": self.symbol,
                 "strike": self._strikes[0],
                 "transaction_type": "BUY",
                 "quantity": self.quantity,
@@ -146,8 +140,6 @@ class OptionBuyStrategy(StrategyBase):
         Define exit condition.
         Return order payload if exit conditions met, else None.
         """
-        # TODO: implement your exit logic
-        # Example placeholder: exit after one candle
         return {
             "symbol": position["symbol"],
             "strike": position["strike"],

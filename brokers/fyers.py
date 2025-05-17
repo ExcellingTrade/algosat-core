@@ -95,7 +95,7 @@ class FyersWrapper(BrokerInterface):
     - Use the provided methods to perform trading operations.
     """
     fyers = None
-    is_async = False  # Default to synchronous mode
+    is_async = True  # Default to asynchronous mode
     token = None
     appId = None
 
@@ -274,7 +274,7 @@ class FyersWrapper(BrokerInterface):
                     FyersWrapper.token = access_token
                     FyersWrapper.appId = fyers_creds.get("api_key")
                     FyersWrapper.fyers = fyersModel.FyersModel(
-                        client_id = fyers_creds.get("api_key"),
+                        client_id=fyers_creds.get("api_key"),
                         is_async=FyersWrapper.is_async,
                         token=access_token,
                         log_path=constants.FYER_LOG_DIR

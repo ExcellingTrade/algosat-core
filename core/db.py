@@ -7,6 +7,8 @@ from sqlalchemy import inspect, Table, MetaData, update, select, delete  # Modif
 from config import settings
 from core.dbschema import metadata
 from core.dbschema import broker_credentials, strategy_configs, strategies  # Importing the new tables
+from datetime import datetime  # moved to top
+from common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
 
 # 1) Create the Async Engine
 engine = create_async_engine(
@@ -235,3 +237,118 @@ async def get_strategy_name_by_id(session, strategy_id):
     return row[0] if row else None
 
 
+# New: Insert only default strategies (no configs)
+async def insert_default_strategies(conn, default_strategy_configs) -> bool:
+    """
+    Insert default strategies into the DB without configs.
+    """
+    now = datetime.now()
+    for key, default_cfg in default_strategy_configs.items():
+        ins = strategies.insert().values(
+            key=key,
+            name=key,
+            enabled=True,
+            created_at=now,
+            updated_at=now,
+        )
+        await conn.execute(ins)
+    return True
+
+async def insert_default_strategy_configs(conn, default_strategy_configs) -> bool:
+    """
+    Insert default strategy_configs for existing strategies.
+    Handles missing keys robustly and logs errors for incomplete configs.
+    """
+    import logging
+    now = datetime.now()
+    strategy_key_to_id = {}
+    for key in default_strategy_configs:
+        result = await conn.execute(
+            select(strategies.c.id).where(strategies.c.key == key)
+        )
+        strategy_id = result.scalar_one_or_none()
+        if strategy_id:
+            strategy_key_to_id[key] = strategy_id
+
+    for key, default_cfg in default_strategy_configs.items():
+        strategy_id = strategy_key_to_id.get(key)
+        if not strategy_id:
+            continue
+        # Provide defaults for missing fields
+        symbol = default_cfg.get("symbol", "")
+        exchange = default_cfg.get("exchange", "")
+        instrument = default_cfg.get("instrument")
+        trade = default_cfg.get("trade", {})
+        indicators = default_cfg.get("indicators", {})
+        is_default = default_cfg.get("is_default", True)
+        enabled = default_cfg.get("enabled", True)
+        if not symbol or not exchange:
+            logging.warning(f"Skipping config for strategy '{key}' due to missing symbol or exchange.")
+            continue
+        ins_cfg = strategy_configs.insert().values(
+            strategy_id=strategy_id,
+            symbol=symbol,
+            exchange=exchange,
+            instrument=instrument,
+            trade=trade,
+            indicators=indicators,
+            is_default=is_default,
+            enabled=enabled,
+            created_at=now,
+            updated_at=now,
+        )
+        await conn.execute(ins_cfg)
+    return True
+
+async def has_any_strategies(conn) -> bool:
+    """
+    Return True if the strategies table has any rows, else False.
+    """
+    result = await conn.execute(select(strategies))
+    return result.first() is not None
+
+async def has_any_strategy_configs() -> bool:
+    """
+    Return True if the strategy_configs table has any rows, else False.
+    """
+    from core.dbschema import strategy_configs
+    from core.db import engine
+    async with engine.begin() as conn:
+        result = await conn.execute(select(strategy_configs))
+        return result.first() is not None
+
+
+async def seed_default_strategies_and_configs() -> bool:
+    """
+    Seed default strategies and/or configs if tables are empty.
+    Also resets the sequence for strategies and strategy_configs tables if seeding is performed.
+    """
+    seeded = False
+    async with engine.begin() as conn:
+        has_strats = await has_any_strategies(conn)
+        has_cfgs = await has_any_strategy_configs()
+
+        # If no strategies, insert them and reset sequence
+        if not has_strats:
+            await insert_default_strategies(conn, DEFAULT_STRATEGY_CONFIGS)
+            await reset_table_sequence(conn, 'strategies', 'strategies_id_seq')
+            seeded = True
+
+        # If no configs, insert only configs (requires strategies to exist) and reset sequence
+        if not has_cfgs:
+            await insert_default_strategy_configs(conn, DEFAULT_STRATEGY_CONFIGS)
+            await reset_table_sequence(conn, 'strategy_configs', 'strategy_configs_id_seq')
+            seeded = True
+
+    return seeded
+
+async def reset_table_sequence(conn, table_name: str, sequence_name: str, restart_with: int = 1):
+    """
+    Reset the sequence for a table's autoincrementing primary key (PostgreSQL).
+    """
+    await conn.execute(f"ALTER SEQUENCE {sequence_name} RESTART WITH {restart_with};")
+
+
+# Example usage in your seeding/init logic (call after dropping and recreating tables):
+# await reset_table_sequence(conn, 'strategies', 'strategies_id_seq')
+# await reset_table_sequence(conn, 'strategy_configs', 'strategy_configs_id_seq')

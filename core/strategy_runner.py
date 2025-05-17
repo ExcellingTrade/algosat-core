@@ -44,11 +44,11 @@ async def run_strategy_config(config_row):
         logger.error(f"Error during setup of '{strategy_name}': {e}", exc_info=True)
         return
 
-    # Main loop: run_tick every poll_interval seconds
-    poll_interval = getattr(strategy, "poll_interval", config_row.params.get("poll_interval", 60))
-    while True:
-        try:
-            await strategy.run_tick()
-        except Exception as e:
-            logger.error(f"Error in run_tick for '{strategy_name}': {e}", exc_info=True)
-        await asyncio.sleep(poll_interval)
+    # # Main loop: run_tick every poll_interval seconds
+    # poll_interval = getattr(strategy, "poll_interval", getattr(config_row, "trade", {{}}).get("poll_interval", 60))
+    # while True:
+    #     try:
+    #         await strategy.run_tick()
+    #     except Exception as e:
+    #         logger.error(f"Error in run_tick for '{strategy_name}': {e}", exc_info=True)
+    #     await asyncio.sleep(poll_interval)

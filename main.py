@@ -2,6 +2,7 @@
 
 import asyncio
 from core.db import init_db, engine
+from core.db import seed_default_strategies_and_configs
 from core.dbschema import strategies, strategy_configs, broker_credentials
 from core.strategy_manager import run_poll_loop
 from brokers.factory import get_broker
@@ -115,50 +116,6 @@ async def prompt_for_missing_credentials():
             
     return results
 
-async def seed_strategies_and_configs():
-    """
-    Seed the strategies and strategy_configs tables with default strategies and configs if empty.
-    """
-    async with engine.begin() as conn:
-        # Check if strategies table is empty
-        result = await conn.execute(select(strategies))
-        existing = result.first()
-        if existing:
-            logger.info("Strategies table already populated. Skipping seeding.")
-            return
-        logger.info("Seeding default strategies and configs...")
-        # Insert strategies
-        strategy_key_to_id = {}
-        now = datetime.now()
-        for key, default_cfg in DEFAULT_STRATEGY_CONFIGS.items():
-            ins = strategies.insert().values(
-                key=key,
-                name=key,
-                enabled=True,
-                created_at=now,
-                updated_at=now,
-            )
-            res = await conn.execute(ins)
-            # SQLAlchemy 1.4+ returns inserted_primary_key
-            strategy_id = res.inserted_primary_key[0] if hasattr(res, 'inserted_primary_key') else None
-            strategy_key_to_id[key] = strategy_id
-        # Insert strategy configs for OptionBuy and OptionSell only
-        for key in ["OptionBuy", "OptionSell"]:
-            cfg = DEFAULT_STRATEGY_CONFIGS[key]
-            if not cfg:
-                continue
-            ins_cfg = strategy_configs.insert().values(
-                strategy_id=strategy_key_to_id[key],
-                symbol=cfg["symbol"],
-                exchange=cfg["exchange"],
-                params=cfg["params"],
-                is_default=True,
-                enabled=True,
-                created_at=now,
-                updated_at=now,
-            )
-            await conn.execute(ins_cfg)
-        logger.info("Default strategies and configs seeded.")
 
 if __name__ == "__main__":
     import asyncio
@@ -169,7 +126,7 @@ if __name__ == "__main__":
         await init_db()
 
         # 2) Seed default strategies and configs
-        await seed_strategies_and_configs()
+        await seed_default_strategies_and_configs()
 
         # 3) Initialize broker configurations
         await initialize_brokers()

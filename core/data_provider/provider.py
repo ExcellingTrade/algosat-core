@@ -4,6 +4,16 @@ from core.db import AsyncSessionLocal
 from core.dbschema import broker_credentials
 from sqlalchemy import select
 import inspect
+import asyncio
+from typing import Dict
+from common.strategy_utils import fetch_multiple_strikes_history
+
+# Per-broker rate limit settings: requests per second
+_RATE_LIMITS = {
+    "fyers": 10,
+    "angel": 5,
+    "zerodha": 5,
+}
 
 class DataProvider:
     """
@@ -15,6 +25,7 @@ class DataProvider:
     def __init__(self, cache_manager=None):
         self.cache = cache_manager
         self._broker = None  # Cache the broker instance after first lookup
+        self._limiters: Dict[str, asyncio.Semaphore] = {}
 
     async def _ensure_broker(self):
         """
@@ -40,6 +51,10 @@ class DataProvider:
             if self.cache:
                 self.cache.set("data_provider_broker_name", broker_name, ttl=60)
         self._broker = get_broker(broker_name)
+        # Initialize semaphore for this broker if not already done
+        if broker_name not in self._limiters:
+            rps = _RATE_LIMITS.get(broker_name, 1)
+            self._limiters[broker_name] = asyncio.Semaphore(rps)
 
     async def get_option_chain(self, symbol: str, strike_count: int = 20):
         """Fetch the option chain for a given symbol asynchronously from the data provider broker."""
@@ -55,14 +70,32 @@ class DataProvider:
     async def get_history(self, symbol: str, strike: float, interval: str):
         """Fetch historical data for a given symbol, strike, and interval asynchronously from the data provider broker."""
         await self._ensure_broker()
+        broker_name = self._broker.name
+        limiter = self._limiters.get(broker_name)
         try:
-            result = self._broker.get_history(symbol, strike=strike, interval=interval)
-            history = await result if inspect.isawaitable(result) else result
-            return history
+            async with limiter:
+                result = self._broker.get_history(symbol, strike=strike, interval=interval)
+                history = await result if inspect.isawaitable(result) else result
+                # enforce simple rate limit spacing
+                await asyncio.sleep(1 / _RATE_LIMITS.get(broker_name, 1))
+                return history
         except Exception as e:
             raise DataFetchError(
                 f"Failed to fetch history for symbol='{symbol}', strike={strike}, interval='{interval}': {e}"
             ) from e
+
+    async def get_multiple_strikes_history(self, symbol: str, strikes: list, interval: str):
+        """Fetch historical data for multiple strikes of a given symbol asynchronously."""
+        await self._ensure_broker()
+        broker_name = self._broker.name
+        limiter = self._limiters.get(broker_name)
+        # Define a wrapper for the fetch operation to be used with the progress bar
+        async def fetch_history_func(strike):
+            return await self.get_history(symbol, strike, interval)
+
+        # Using the utility function to fetch multiple strikes' history with a progress bar
+        histories = fetch_multiple_strikes_history(strikes, fetch_history_func, max_workers=5)
+        return histories
 
 # Singleton instance for application-wide use
 _data_provider_instance: DataProvider = None

@@ -5,9 +5,13 @@ from datetime import datetime
 
 # Default config for OptionBuy strategy
 OPTION_BUY_DEFAULT_CONFIG = {
+    # Top‐level identity
     "symbol": "NIFTY50",
     "exchange": "NSE",
-    "params": {
+    "instrument": "INDEX",
+
+    # Trade-specific parameters
+    "trade": {
         "start_date": "2024-12-17",
         "end_date": "2024-12-17",
         "max_range": 15,
@@ -48,13 +52,16 @@ OPTION_BUY_DEFAULT_CONFIG = {
         "atr_trailing_stop_buffer": 3.0,
         "check_margin": False,
         "telegram_message_interval": 60,
-        "instrument": "INDEX",
-        # indicators
+    },
+
+    # Indicator-specific parameters
+    "indicators": {
         "supertrend_period": 7,
         "supertrend_multiplier": 3,
         "sma_period": 14,
         "atr_multiplier": 14,
     },
+
     "is_default": True,
     "enabled": True,
 }
@@ -65,8 +72,16 @@ OPTION_SELL_DEFAULT_CONFIG = {
     # You can override or add OptionSell-specific params here
 }
 
-# Default config for SwingHighLow (leave blank for now)
-SWING_HIGH_LOW_DEFAULT_CONFIG = {}
+# Default config for SwingHighLow (now with required keys and empty/placeholder values)
+SWING_HIGH_LOW_DEFAULT_CONFIG = {
+    "symbol": "",  # Placeholder, update as needed
+    "exchange": "",  # Placeholder, update as needed
+    "instrument": None,
+    "trade": {},
+    "indicators": {},
+    "is_default": True,
+    "enabled": True,
+}
 
 DEFAULT_STRATEGY_CONFIGS = {
     "OptionBuy": OPTION_BUY_DEFAULT_CONFIG,

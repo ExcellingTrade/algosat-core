@@ -23,7 +23,9 @@ async def run_poll_loop():
             try:
                 configs = await get_enabled_default_strategy_configs(session)
                 if configs:
-                    logger.info(f"Found configs: {[row.id for row in configs]}")
+                    # Only print found configs the first time
+                    if not running_tasks:
+                        logger.info(f"Found configs: {[row.id for row in configs]}")
                     current_ids = {row.id for row in configs}
 
                     # Cancel tasks for configs no longer present as default
