@@ -2,9 +2,9 @@ from datetime import datetime, time
 from typing import Any, Optional
 
 from .base import StrategyBase
-from core.data_provider.provider import DataProvider
-from core.execution_manager import ExecutionManager
 from common.logger import get_logger
+from core.data_provider.provider import get_data_provider
+from core.execution_manager import get_execution_manager
 from core.dbschema import strategy_configs
 from common.strategy_utils import (
     wait_for_first_candle_completion,
@@ -12,6 +12,7 @@ from common.strategy_utils import (
     fetch_option_chain_and_first_candle_history,
     identify_strike_price_combined,
 )
+from common.broker_utils import get_trade_day
 
 logger = get_logger(__name__)
 
@@ -22,23 +23,36 @@ class OptionBuyStrategy(StrategyBase):
     then on each tick evaluates entry and exit signals.
     """
 
-    def __init__(
-        self,
-        config: Any,
-        data_provider: DataProvider,
-        execution_manager: ExecutionManager
-    ):
-        super().__init__(config, data_provider, execution_manager)
-        params = getattr(config, "params", {})
+    def __init__(self, config: Any):
+        # Obtain shared service instances
+        dp = get_data_provider()
+        em = get_execution_manager()
+        super().__init__(config, dp, em)
+        params = self.params  # Use the unified param extraction from base class
         # Time window for entries (HH:MM strings)
-        self.start_time = datetime.strptime(params.get("start_time"), "%H:%M").time()
-        self.end_time   = datetime.strptime(params.get("end_time"), "%H:%M").time()
+        self.start_time = None
+        self.end_time = None
+        try:
+            if params.get("start_time"):
+                self.start_time = datetime.strptime(params.get("start_time"), "%H:%M").time()
+            if params.get("end_time"):
+                self.end_time = datetime.strptime(params.get("end_time"), "%H:%M").time()
+        except Exception as e:
+            logger.error(f"Error parsing start_time/end_time: {e}")
+            self.start_time = None
+            self.end_time = None
         # Premium threshold to select strikes
         self.premium    = params.get("premium", 100)
         # Number of lots / quantity per order
         self.quantity   = params.get("quantity", 1)
         # How many strikes to fetch from chain (if needed)
         self.strike_count = params.get("strike_count", 20)
+
+        # Symbol comes from config, not params
+        self.symbols = []
+        symbol = getattr(config, "symbol", None)
+        if symbol:
+            self.symbols = [symbol]
 
         # Internal state
         self._strikes = []         # Selected strikes after setup()
@@ -59,8 +73,9 @@ class OptionBuyStrategy(StrategyBase):
             return
         # 1. Wait for first candle completion
         await wait_for_first_candle_completion(interval_minutes, first_candle_time)
-        # 2. Calculate first candle data
-        candle_times = calculate_first_candle_details(datetime.now().date(), first_candle_time)
+        # 2. Calculate first candle data using the correct trade day
+        trade_day = get_trade_day(datetime.now())
+        candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
         from_date = candle_times["from_date"]
         to_date = candle_times["to_date"]
         # 3. Fetch option chain and first candle history
@@ -82,9 +97,10 @@ class OptionBuyStrategy(StrategyBase):
         await self.setup()
 
         now_time = datetime.now().time()
-        # Skip ticks outside active window
-        if not (self.start_time <= now_time <= self.end_time):
-            return
+        # Only check time window if both are set
+        if self.start_time and self.end_time:
+            if not (self.start_time <= now_time <= self.end_time):
+                return
 
         for symbol in self.symbols:
             for strike in self._strikes:

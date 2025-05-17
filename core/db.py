@@ -212,4 +212,26 @@ async def get_strategy_configs_by_strategy_id(session, strategy_id):
     result = await session.execute(select(strategy_configs).where(strategy_configs.c.strategy_id == strategy_id))
     return [dict(row._mapping) for row in result.fetchall()]
 
+async def get_enabled_default_strategy_configs(session):
+    """
+    Fetch all default configs for enabled strategies.
+    """
+    stmt = (
+        select(strategy_configs)
+        .join(strategies, strategy_configs.c.strategy_id == strategies.c.id)
+        .where(strategies.c.enabled == True)
+        .where(strategy_configs.c.is_default == True)
+    )
+    result = await session.execute(stmt)
+    return result.fetchall()
+
+async def get_strategy_name_by_id(session, strategy_id):
+    """
+    Fetch the strategy name for a given strategy_id.
+    """
+    stmt = select(strategies.c.name).where(strategies.c.id == strategy_id)
+    result = await session.execute(stmt)
+    row = result.first()
+    return row[0] if row else None
+
 

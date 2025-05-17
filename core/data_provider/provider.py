@@ -63,3 +63,16 @@ class DataProvider:
             raise DataFetchError(
                 f"Failed to fetch history for symbol='{symbol}', strike={strike}, interval='{interval}': {e}"
             ) from e
+
+# Singleton instance for application-wide use
+_data_provider_instance: DataProvider = None
+
+def get_data_provider(cache_manager=None) -> DataProvider:
+    """
+    Return a shared DataProvider instance. 
+    If not already created, initializes one with the optional cache_manager.
+    """
+    global _data_provider_instance
+    if _data_provider_instance is None:
+        _data_provider_instance = DataProvider(cache_manager)
+    return _data_provider_instance
