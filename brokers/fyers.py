@@ -156,8 +156,12 @@ class FyersWrapper(BrokerInterface):
             return FyersWrapper.check_margin_sync(data)
 
     @staticmethod
-    async def setup_auth(is_async=False):
-        """Authenticate and initialize the Fyers API with async or sync mode."""
+    async def setup_auth(is_async=True):
+        """
+        Authenticate and initialize the Fyers API.
+        By default, operates in async mode (is_async=True).
+        Set is_async=False to use synchronous mode.
+        """
         FyersWrapper.is_async = is_async
         if FyersWrapper.is_async:
             return await FyersWrapper._setup_auth_async()
@@ -283,7 +287,7 @@ class FyersWrapper(BrokerInterface):
             # Use the existing setup_auth method for now
             # This maintains backward compatibility while still using the new interface
             logger.info("Obtaining new Fyers access token")
-            result = await FyersWrapper.setup_auth(is_async=True)
+            result = await FyersWrapper.setup_auth()
             return result is not None  # Return True if we got a result
         except Exception as e:
             logger.error(f"Fyers authentication failed: {e}", exc_info=True)
@@ -387,7 +391,7 @@ class FyersWrapper(BrokerInterface):
             return None
 
     @staticmethod
-    def get_option_chain_sync(symbol, strike_count):
+    def get_option_chain_sync(symbol, strike_count=20):
         """
         Fetch the option chain synchronously.
 

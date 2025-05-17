@@ -7,32 +7,34 @@ from config import settings
 from common.logger import get_logger
 from sqlalchemy import select
 from core.dbschema import strategy_configs
+from core.strategy_runner import run_strategy_config
 
 logger = get_logger("strategy_manager")
 
 async def run_poll_loop():
     """
     Poll the strategy_configs table forever.
-    If any enabled config exists, log its IDs.
-    Otherwise, just say 'no configs' (and never crash).
+    For each enabled config, launch a runner (OptionBuy only for now).
     """
     async for session in get_session():
         while True:
             try:
-                # Fetch enabled strategy config IDs via SQLAlchemy Core
-                stmt = select(strategy_configs.c.id).where(strategy_configs.c.enabled == True)
+                stmt = select(strategy_configs).where(strategy_configs.c.enabled == True)
                 result = await session.execute(stmt)
-                ids = result.scalars().all()
-                if ids:
-                    logger.info(f"Found configs: {ids}")
+                configs = result.fetchall()
+                if configs:
+                    logger.info(f"Found configs: {[row.id for row in configs]}")
+                    # For now, only run OptionBuy strategies
+                    for row in configs:
+                        # Fetch strategy key from joined strategies table if needed
+                        # For now, assume OptionBuy only
+                        # TODO: Add deduplication/avoid duplicate runners
+                        await run_strategy_config(row)
                 else:
                     logger.info("No configs found")
             except ProgrammingError as pe:
-                # Either the table or column doesn't exist yet
                 logger.warning(f"DB schema not ready: {pe}")
             except Exception as e:
-                # Any other DB error
                 logger.error(f"Unexpected DB error: {e}")
-            # Sleep for the specified interval before polling again
             logger.debug(f"Sleeping for {settings.poll_interval} seconds...")
             await asyncio.sleep(settings.poll_interval)

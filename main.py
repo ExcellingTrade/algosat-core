@@ -12,6 +12,8 @@ from common.default_broker_configs import DEFAULT_BROKER_CONFIGS # Import the de
 from common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
 from sqlalchemy import select
 from datetime import datetime
+# from core.data_manager import CacheManager
+from core.data_provider.provider import DataProvider
 
 logger = get_logger(__name__)
 
@@ -191,6 +193,16 @@ if __name__ == "__main__":
 
         # 6) Start the strategy polling loop
         logger.info("🚀 All brokers processed. Entering poll loop...")
-        await run_poll_loop()
+        # await run_poll_loop()
+        # Example: using CacheManager if you want, else just call DataProvider with no broker
+        # from core.data_manager import CacheManager
+        # cache = CacheManager()
+        dp = DataProvider()  # Don't pass a broker—let DataProvider pick from DB config
+        try:
+            test_chain = await dp.get_option_chain("NSE:NIFTYBANK-INDEX", 40)
+            print(test_chain['data']['optionsChain'])
+            logger.info(f"Test fetch via DataProvider: retrieved {len(test_chain['data']['optionsChain'])} entries")
+        except Exception as e:
+            logger.error(f"DataProvider test failed: {e}", exc_info=True)
 
     asyncio.run(main())
