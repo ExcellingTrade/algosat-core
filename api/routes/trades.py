@@ -1,15 +1,17 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from api.schemas import TradeLogResponse, PnLResponse
 from typing import List
+from api.dependencies import get_db
 
 router = APIRouter()
 
 # (For future: you can add get_all_trades, get_trade_by_id, get_aggregate_pnl, etc. to core/db.py)
 
 @router.get("/", response_model=List[TradeLogResponse])
-async def list_trades():
+async def list_trades(db=Depends(get_db)):
     # TODO: Query trade_logs table
-    return []
+    trades = []
+    return sorted(trades, key=lambda t: getattr(t, 'id', 0))
 
 @router.get("/{trade_id}", response_model=TradeLogResponse)
 async def get_trade(trade_id: int):

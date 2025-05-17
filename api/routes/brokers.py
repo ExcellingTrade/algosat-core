@@ -3,12 +3,14 @@ from core.db import get_all_brokers, get_broker_by_name, add_broker, update_brok
 from api.schemas import BrokerResponse, BrokerCreate, BrokerUpdate, BrokerListResponse, BrokerDetailResponse
 from api.dependencies import get_db
 from typing import List
+from sqlalchemy import update
 
 router = APIRouter()
 
 @router.get("/", response_model=List[BrokerListResponse])
 async def list_brokers(db=Depends(get_db)):
-    return [BrokerListResponse(**row) for row in await get_all_brokers(db)]
+    brokers = [BrokerListResponse(**row) for row in await get_all_brokers(db)]
+    return sorted(brokers, key=lambda b: b.id)
 
 @router.get("/{broker_name}", response_model=BrokerDetailResponse)
 async def get_broker(broker_name: str, db=Depends(get_db)):
@@ -39,6 +41,12 @@ async def disable_broker(broker_name: str, db=Depends(get_db)):
 
 @router.put("/{broker_name}/enable-data-provider")
 async def enable_data_provider(broker_name: str, db=Depends(get_db)):
+    # Set is_data_provider=False for all brokers first using db.py logic
+    brokers = await get_all_brokers(db)
+    for broker in brokers:
+        if broker["broker_name"] != broker_name and broker["is_data_provider"]:
+            await update_broker(db, broker["broker_name"], {"is_data_provider": False})
+    # Set is_data_provider=True for the selected broker
     row = await update_broker(db, broker_name, {"is_data_provider": True})
     return {"status": "data_provider_enabled", "broker_name": broker_name}
 
