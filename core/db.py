@@ -9,6 +9,7 @@ from core.dbschema import metadata
 from core.dbschema import broker_credentials, strategy_configs, strategies  # Importing the new tables
 from datetime import datetime  # moved to top
 from common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
+from core.time_utils import get_ist_now
 
 # 1) Create the Async Engine
 engine = create_async_engine(
@@ -242,7 +243,7 @@ async def insert_default_strategies(conn, default_strategy_configs) -> bool:
     """
     Insert default strategies into the DB without configs.
     """
-    now = datetime.now()
+    now = get_ist_now()
     for key, default_cfg in default_strategy_configs.items():
         ins = strategies.insert().values(
             key=key,
@@ -260,7 +261,7 @@ async def insert_default_strategy_configs(conn, default_strategy_configs) -> boo
     Handles missing keys robustly and logs errors for incomplete configs.
     """
     import logging
-    now = datetime.now()
+    now = get_ist_now()
     strategy_key_to_id = {}
     for key in default_strategy_configs:
         result = await conn.execute(

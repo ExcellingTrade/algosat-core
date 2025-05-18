@@ -41,16 +41,16 @@ class TelegramBot:
             if response.status_code == 200 and response_data.get("ok"):
                 updates = response_data.get("result", [])
                 if updates:
-                    logger.info(f"Received {len(updates)} updates.")
+                    logger.debug(f"Received {len(updates)} updates.")
                     # Extract the first valid chat_id from updates
                     for update in updates:
                         if "message" in update and "chat" in update["message"]:
                             self.chat_id = update["message"]["chat"]["id"]
-                            logger.info(f"Chat ID found: {self.chat_id}")
+                            logger.debug(f"Chat ID found: {self.chat_id}")
                             break  # Stop after getting first valid chat ID
 
                 else:
-                    logger.info("No new updates found.")
+                    logger.debug("No new updates found.")
                 return updates
             else:
                 logger.error(f"Failed to fetch updates. Response: {response.text}")

@@ -32,6 +32,7 @@ from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from core.db import AsyncSessionLocal
 from core.dbschema import broker_credentials
+from core.time_utils import get_ist_now
 
 from common import constants
 from utils.config_wrapper import get_config, get_trade_config
@@ -119,7 +120,7 @@ def get_nse_holiday_list():
     # Check if the cached holiday file exists and is recent
     if os.path.exists(HOLIDAY_FILE):
         file_modified_time = datetime.fromtimestamp(os.path.getmtime(HOLIDAY_FILE))
-        if datetime.now() - file_modified_time < timedelta(days=30):
+        if get_ist_now() - file_modified_time < timedelta(days=30):
             try:
                 with open(HOLIDAY_FILE, 'r') as f:
                     return json.load(f)  # Return holidays from the cached file
@@ -230,7 +231,7 @@ async def wait_for_next_candle(interval_minutes):
     ).replace(second=0, microsecond=0)
     wait_time = math.ceil((localize_to_ist(next_candle_start) - current_time).total_seconds())
 
-    logger.info(f"Waiting {wait_time} seconds for the next candle.")
+    logger.debug(f"Waiting {wait_time} seconds for the next candle.")
 
     console = Console(width=150)
 
@@ -258,7 +259,7 @@ async def wait_for_next_candle(interval_minutes):
 def save_order_book(order_book, bot_name):
     """Persist the order book to a JSON file."""
     order_book_file = os.path.join(constants.ORDER_BOOK_DIR,
-                                   f"{bot_name}_order_book_{datetime.now().strftime('%Y-%m-%d')}.json")
+                                   f"{bot_name}_order_book_{get_ist_now().strftime('%Y-%m-%d')}.json")
     with open(order_book_file, "w") as f:
         # noinspection PyTypeChecker
         json.dump(order_book, f, indent=4, default=str)
@@ -271,7 +272,7 @@ def load_order_book(bot_name):
     :return: A dictionary with `open_trades` and `closed_trades` lists.
     """
     order_book_file = os.path.join(constants.ORDER_BOOK_DIR,
-                                   f"{bot_name}_order_book_{datetime.now().strftime('%Y-%m-%d')}.json")
+                                   f"{bot_name}_order_book_{get_ist_now().strftime('%Y-%m-%d')}.json")
     if os.path.exists(order_book_file):
         try:
             with open(order_book_file, "r") as f:
@@ -641,7 +642,7 @@ async def square_off_all_trades(broker, open_trades, latest_candle: pd.DataFrame
         exit_price = None
     for trade in open_trades:
         trade[constants.TRADE_KEY_EXIT_PRICE] = exit_price
-        trade[constants.TRADE_KEY_EXIT_TIME] = str(get_square_off_time(datetime.now().date()))
+        trade[constants.TRADE_KEY_EXIT_TIME] = str(get_square_off_time(get_ist_now().date()))
         trade[constants.TRADE_KEY_STATUS] = constants.TRADE_STATUS_EXIT_EOD
         trade[constants.TRADE_KEY_REASON] = "Square off"
         if trade[constants.TRADE_KEY_SIDE] == -1:
@@ -743,7 +744,7 @@ async def check_loss_and_square_off(broker, trade_config, open_trades, latest_ca
             exit_price = latest_candle[constants.COLUMN_CLOSE]
             for trade in open_trades:
                 trade[constants.TRADE_KEY_EXIT_PRICE] = exit_price
-                trade[constants.TRADE_KEY_EXIT_TIME] = str(get_square_off_time(datetime.now().date()))
+                trade[constants.TRADE_KEY_EXIT_TIME] = str(get_square_off_time(get_ist_now().date()))
                 trade[constants.TRADE_KEY_STATUS] = constants.TRADE_STATUS_EXIT_MAX_LOSS
                 trade[constants.TRADE_KEY_REASON] = "Square off max loss"
             await shutdown_gracefully("Exiting: Max Loss Reached")

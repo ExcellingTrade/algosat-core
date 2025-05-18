@@ -29,12 +29,10 @@ async def initialize_brokers():
     Returns:
         bool: True if initialization was successful
     """
-    logger.info("Initializing broker configurations...")
-    
-    
+    logger.debug("Initializing broker configurations...")
     # Initialize each broker configuration
     for broker_key in BROKERS_TO_SETUP:
-        logger.info(f"Setting up broker configuration: {broker_key}")
+        logger.debug(f"Setting up broker configuration: {broker_key}")
         full_config = await get_broker_credentials(broker_key)
         needs_initial_save = False
 
@@ -60,7 +58,7 @@ async def initialize_brokers():
             
         # If a save is needed, save the config
         if needs_initial_save:
-            logger.info(f"Saving initial configuration for {broker_key}")
+            logger.debug(f"Saving initial configuration for {broker_key}")
             await upsert_broker_credentials(broker_key, full_config)
             
     logger.info("Broker configurations initialized")
@@ -77,7 +75,7 @@ async def prompt_for_missing_credentials():
     results = {}
     
     for broker_key in BROKERS_TO_SETUP:
-        logger.info(f"Checking credentials for broker: {broker_key}")
+        logger.debug(f"Checking credentials for broker: {broker_key}")
         full_config = await get_broker_credentials(broker_key)
         
         if not full_config:
@@ -111,7 +109,7 @@ async def prompt_for_missing_credentials():
             logger.info(f"Credentials updated for {broker_key}")
             results[broker_key] = True
         else:
-            logger.info(f"No credential updates needed for {broker_key}")
+            logger.debug(f"No credential updates needed for {broker_key}")
             results[broker_key] = False
             
     return results
@@ -126,6 +124,7 @@ if __name__ == "__main__":
         await init_db()
 
         # 2) Seed default strategies and configs
+        logger.debug("Seeding default strategies and configs...")
         await seed_default_strategies_and_configs()
 
         # 3) Initialize broker configurations

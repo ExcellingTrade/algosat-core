@@ -13,6 +13,7 @@ from common.strategy_utils import (
     identify_strike_price_combined,
 )
 from common.broker_utils import get_trade_day
+from utils.utils import get_ist_datetime
 
 logger = get_logger(__name__)
 
@@ -64,7 +65,7 @@ class OptionBuyStrategy(StrategyBase):
         # 1. Wait for first candle completion
         await wait_for_first_candle_completion(interval_minutes, first_candle_time)
         # 2. Calculate first candle data using the correct trade day
-        trade_day = get_trade_day(datetime.now())
+        trade_day = get_trade_day(get_ist_datetime())
         candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
         from_date = candle_times["from_date"]
         to_date = candle_times["to_date"]
@@ -86,13 +87,13 @@ class OptionBuyStrategy(StrategyBase):
             self._strikes.append(ce_strike)
         if pe_strike is not None:
             self._strikes.append(pe_strike)
-        logger.info(f"Selected strikes for entry: {self._strikes}")
+        logger.debug(f"Selected strikes for entry: {self._strikes}")
 
     async def run_tick(self) -> None:
         """Called each polling interval: evaluate entry and exit."""
         await self.setup()
 
-        now_time = datetime.now().time()
+        now_time = get_ist_datetime().time()
         # Only check time window if both are set
         if self.start_time and self.end_time:
             if not (self.start_time <= now_time <= self.end_time):
@@ -107,17 +108,17 @@ class OptionBuyStrategy(StrategyBase):
                     # No open position—check for entry
                     order = self.evaluate_signal(data)
                     if order:
-                        logger.info(f"Placing entry order: {order}")
+                        logger.debug(f"Placing entry order: {order}")
                         results = await self.em.execute(self.config, order)
-                        logger.info(f"Entry results: {results}")
+                        logger.debug(f"Entry results: {results}")
                         self._position = {"symbol": symbol, "strike": strike}
                 else:
                     # Position open—check for exit
                     order = self.evaluate_exit(data, self._position)
                     if order:
-                        logger.info(f"Placing exit order: {order}")
+                        logger.debug(f"Placing exit order: {order}")
                         results = await self.em.execute(self.config, order)
-                        logger.info(f"Exit results: {results}")
+                        logger.debug(f"Exit results: {results}")
                         self._position = None
 
     def evaluate_signal(self, data: Any) -> Optional[dict]:

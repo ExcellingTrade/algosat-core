@@ -4,11 +4,11 @@ import json
 import asyncio
 from datetime import datetime, timedelta
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
 from utils.utils import localize_to_ist, get_ist_datetime
-from core.time_utils import wait_for_first_candle_completion, calculate_first_candle_details
-import pandas as pd
 from common.logger import get_logger
+import logging
+
 logger = get_logger("strategy_utils")
 
 async def fetch_multiple_strikes_history_async(strikes, fetch_history_coro_func, *args, **kwargs):
@@ -23,7 +23,7 @@ async def fetch_multiple_strikes_history_async(strikes, fetch_history_coro_func,
     """
     from rich.console import Console
     import asyncio
-    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
+    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
     console = Console()
     results = [None] * len(strikes)
     total = len(strikes)
@@ -184,3 +184,64 @@ def fetch_multiple_strikes_history(strikes, fetch_history_func, *args, **kwargs)
             results[strike] = fetch_history_func(strike, *args, **kwargs)
             progress.advance(task)
     return results
+
+async def wait_for_first_candle_completion(interval_minutes, first_candle_time):
+    current_time = get_ist_datetime()
+    first_candle_start = datetime.combine(current_time.date(),
+                                          datetime.strptime(first_candle_time, "%H:%M").time())
+    first_candle_start = localize_to_ist(first_candle_start)
+    first_candle_close = first_candle_start + timedelta(minutes=interval_minutes)
+    if current_time >= first_candle_close:
+        logger.info("⏰ First candle has already completed.")
+        return
+    wait_time = (first_candle_close - current_time).total_seconds()
+    human_readable_time = str(timedelta(seconds=wait_time)).split(".")[0]
+    logger.info(f"Waiting for the first candle to complete. Estimated time remaining: {human_readable_time}.")
+    # Disable all logging below CRITICAL to prevent log noise during progress display
+    logging.disable(logging.CRITICAL)
+
+    from rich.console import Console as _Console
+    console = _Console(stderr=False)
+    with Progress(
+        TextColumn("[blue bold]{task.description}[/]"),
+        BarColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        transient=True,  # Progress bar disappears after completion
+        refresh_per_second=1,
+        auto_refresh=True,
+        console=console,
+    ) as progress:
+        task = progress.add_task(
+            description="Waiting for first candle completion",
+            total=wait_time
+        )
+        start = current_time
+        while not progress.finished:
+            await asyncio.sleep(1)
+            now = get_ist_datetime()
+            elapsed = (now - start).total_seconds()
+            progress.update(task, completed=elapsed, refresh=True)
+    logger.info("✓ First candle completed. Waiting additional 20 seconds...")
+    await asyncio.sleep(20)
+
+    # Re-enable logging after progress
+    logging.disable(logging.NOTSET)
+
+def calculate_first_candle_details(current_date, first_candle_time, interval_minutes):
+    try:
+        first_candle_start = datetime.combine(current_date,
+                                              datetime.strptime(first_candle_time, "%H:%M").time())
+        first_candle_start = localize_to_ist(first_candle_start)
+        first_candle_close = first_candle_start
+        # + timedelta(minutes=interval_minutes)
+        from_date = first_candle_start
+        to_date = first_candle_close
+        return {
+            "first_candle_start": first_candle_start,
+            "first_candle_close": first_candle_close,
+            "from_date": from_date,
+            "to_date": to_date,
+        }
+    except Exception as error:
+        raise ValueError(f"Error calculating first candle details: {error}")

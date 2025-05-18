@@ -31,6 +31,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 
 from common import constants
+from core.time_utils import get_ist_now 
 
 # Constants for logging configuration
 MAX_LOG_FILE_SIZE = int(2.3 * 1024 * 1024)  # 2.3 MB
@@ -45,13 +46,38 @@ _ROOT_LOGGER_CONFIGURED = False
 
 console = Console()
 
-# Configure root logger to use RichHandler for beautiful console output
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-    handlers=[RichHandler(console=console, rich_tracebacks=True)]
+class ISTFormatter(logging.Formatter):
+    """
+    Logging formatter that always uses IST (Asia/Kolkata) for timestamps.
+    """
+    def converter(self, timestamp):
+        import pytz
+        ist = pytz.timezone("Asia/Kolkata")
+        dt = datetime.fromtimestamp(timestamp, ist)
+        return dt.timetuple()
+    def formatTime(self, record, datefmt=None):
+        ct = self.converter(record.created)
+        if datefmt:
+            s = time.strftime(datefmt, ct)
+        else:
+            s = time.strftime("%Y-%m-%d %H:%M:%S", ct)
+        return s
+
+
+# Configure root logger with a RichHandler that uses ISTFormatter for timestamps
+console_handler = RichHandler(console=console, rich_tracebacks=True, show_time=False)
+# Use ISTFormatter to format console logs in IST timezone
+console_formatter = ISTFormatter(
+    "%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
 )
+console_handler.setFormatter(console_formatter)
+
+# Only add the handler if not already present
+if not any(isinstance(h, RichHandler) for h in logging.getLogger().handlers):
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(console_handler)
 
 # Suppress unwanted logs from external modules in the console (e.g., SmartAPI/angel/zerodha/fyers)
 logging.getLogger("smartConnect").setLevel(logging.WARNING)
@@ -70,22 +96,9 @@ def get_log_file():
     """
     Return the single daily log file for the whole project.
     """
-    today_date = datetime.now().strftime("%Y-%m-%d")
+    today_date = get_ist_now().strftime("%Y-%m-%d")
     log_file = os.path.join(constants.LOG_DIR, f"algosat-{today_date}.log")
     return log_file
-
-
-class ISTFormatter(logging.Formatter):
-    def converter(self, timestamp):
-        dt = datetime.fromtimestamp(timestamp)
-        return dt.timetuple()
-    def formatTime(self, record, datefmt=None):
-        ct = self.converter(record.created)
-        if datefmt:
-            s = time.strftime(datefmt, ct)
-        else:
-            s = time.strftime("%Y-%m-%d %H:%M:%S", ct)
-        return s
 
 
 def configure_root_logger():
@@ -127,7 +140,7 @@ def get_logger(module_name: str) -> logging.Logger:
         import os
         log_dir = os.path.join(os.path.dirname(__file__), '../../logs')
         os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, f"algosat-{datetime.now().strftime('%Y-%m-%d')}.log")
+        log_file = os.path.join(log_dir, f"algosat-{get_ist_now().strftime('%Y-%m-%d')}.log")
         file_handler = RotatingFileHandler(log_file, maxBytes=2*1024*1024, backupCount=7, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         file_formatter = logging.Formatter(
@@ -136,7 +149,7 @@ def get_logger(module_name: str) -> logging.Logger:
         )
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
-    logger.propagate = False
+    # logger.propagate = False
     return logger
 
 

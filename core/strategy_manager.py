@@ -29,7 +29,8 @@ async def run_poll_loop():
                     current_ids = {row.id for row in configs}
 
                     # Cancel tasks for configs no longer present as default
-                    for cfg_id in list(running_tasks):
+                    for cfg_id in running_tasks:
+                        logger.debug(f"Cancelling runner for config {cfg_id}")
                         if cfg_id not in current_ids:
                             logger.info(f"Cancelling runner for config {cfg_id}")
                             running_tasks[cfg_id].cancel()
@@ -39,6 +40,7 @@ async def run_poll_loop():
                     for row in configs:
                         cfg_id = row.id
                         if cfg_id not in running_tasks:
+                            logger.debug(f"Starting runner for config {cfg_id}")
                             logger.info(f"Starting runner for config {cfg_id}")
                             task = asyncio.create_task(run_strategy_config(row))
                             running_tasks[cfg_id] = task
