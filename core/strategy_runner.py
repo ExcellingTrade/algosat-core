@@ -35,7 +35,7 @@ async def run_strategy_config(config_row):
 
     # Instantiate strategy (it will fetch its own DataProvider and ExecutionManager)
     strategy = StrategyClass(config_row)
-    logger.info(f"Starting strategy '{strategy_name}' for config {config_row.id}")
+    logger.info(f"Starting strategy '{strategy_name}' for config {config_row.symbol}")
 
     # One-time setup
     try:

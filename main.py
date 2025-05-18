@@ -29,19 +29,19 @@ async def initialize_brokers():
     Returns:
         bool: True if initialization was successful
     """
-    logger.debug("Initializing broker configurations...")
+    logger.debug("🔄 Initializing broker configurations...")
     # Initialize each broker configuration
     for broker_key in BROKERS_TO_SETUP:
-        logger.debug(f"Setting up broker configuration: {broker_key}")
+        logger.debug(f"🔄 Setting up broker configuration: {broker_key}")
         full_config = await get_broker_credentials(broker_key)
         needs_initial_save = False
 
         # If no configuration exists, use default
         if not full_config:
-            logger.info(f"No configuration found for {broker_key}. Initializing with default settings.")
+            logger.info(f"🟡 No configuration found for {broker_key}. Initializing with default settings.")
             full_config = DEFAULT_BROKER_CONFIGS.get(broker_key)
             if not full_config:
-                logger.error(f"No default configuration available for broker: {broker_key}. Skipping.")
+                logger.error(f"🔴 No default configuration available for broker: {broker_key}. Skipping.")
                 continue
                 
             # Ensure 'credentials' exists
@@ -58,10 +58,10 @@ async def initialize_brokers():
             
         # If a save is needed, save the config
         if needs_initial_save:
-            logger.debug(f"Saving initial configuration for {broker_key}")
+            logger.debug(f"🔄 Saving initial configuration for {broker_key}")
             await upsert_broker_credentials(broker_key, full_config)
             
-    logger.info("Broker configurations initialized")
+    logger.info("🟢 Broker configurations initialized")
     return True
 
 async def prompt_for_missing_credentials():
@@ -72,14 +72,15 @@ async def prompt_for_missing_credentials():
     Returns:
         dict: A dictionary of broker names and whether their credentials were updated
     """
+    logger.debug("🔑 Prompting for any missing broker credentials...")
     results = {}
     
     for broker_key in BROKERS_TO_SETUP:
-        logger.debug(f"Checking credentials for broker: {broker_key}")
+        logger.debug(f"🔄 Checking credentials for broker: {broker_key}")
         full_config = await get_broker_credentials(broker_key)
         
         if not full_config:
-            logger.warning(f"No configuration found for {broker_key}. Skipping credential check.")
+            logger.warning(f"🟡 No configuration found for {broker_key}. Skipping credential check.")
             results[broker_key] = False
             continue
             
@@ -88,7 +89,7 @@ async def prompt_for_missing_credentials():
         required_fields = full_config.get("required_auth_fields", [])
         
         if not required_fields:
-            logger.warning(f"No required authentication fields defined for {broker_key}. Skipping.")
+            logger.warning(f"🟡 No required authentication fields defined for {broker_key}. Skipping.")
             results[broker_key] = False
             continue
             
@@ -106,10 +107,10 @@ async def prompt_for_missing_credentials():
         if credentials_updated:
             full_config["credentials"] = current_credentials
             await upsert_broker_credentials(broker_key, full_config)
-            logger.info(f"Credentials updated for {broker_key}")
+            logger.info(f"🟢 Credentials updated for {broker_key}")
             results[broker_key] = True
         else:
-            logger.debug(f"No credential updates needed for {broker_key}")
+            logger.debug(f"🟢 No credential updates needed for {broker_key}")
             results[broker_key] = False
             
     return results
@@ -124,7 +125,7 @@ if __name__ == "__main__":
         await init_db()
 
         # 2) Seed default strategies and configs
-        logger.debug("Seeding default strategies and configs...")
+        logger.debug("🔄 Seeding default strategies and configs...")
         await seed_default_strategies_and_configs()
 
         # 3) Initialize broker configurations
@@ -134,21 +135,25 @@ if __name__ == "__main__":
         await prompt_for_missing_credentials()
 
         # 5) Authenticate all enabled brokers
-        logger.info("Authenticating enabled brokers...")
+        logger.info("🟢 Authenticating enabled brokers...")
         auth_results = await auth_all_enabled_brokers()
         for broker_name, (success, message, broker) in auth_results.items():
             if success:
-                logger.info(f"Authentication successful for {broker_name}: {message}")
+                logger.info(f"🟢 Authentication successful for {broker_name}")
                 # Use the already-authenticated instance:
                 profile = await broker.get_profile()
-                logger.info(f"Profile for {broker_name}: {profile}")
+                logger.debug(f"🟢 Profile for {broker_name}: {profile}")
                 positions = await broker.get_positions()
-                logger.info(f"Positions for {broker_name}: {positions}")
+                logger.debug(f"🟢 Positions for {broker_name}: {positions}")
             else:
-                logger.warning(f"Authentication failed for {broker_name}: {message}")
+                logger.warning(f"🟡 Authentication failed for {broker_name}: {message}")
 
         # 6) Start the strategy polling loop
-        logger.info("🚀 All brokers processed. Entering poll loop...")
+        logger.info("🚀 All brokers authenticated. Starting strategy engine...")
         await run_poll_loop()
 
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.warning("🔴 Program interrupted by user. Exited cleanly...")
+        # All async tasks will be cancelled by asyncio.run automatically.

@@ -63,7 +63,7 @@ class OptionBuyStrategy(StrategyBase):
             logger.error("No symbol configured for OptionBuy strategy.")
             return
         # 1. Wait for first candle completion
-        await wait_for_first_candle_completion(interval_minutes, first_candle_time)
+        await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
         # 2. Calculate first candle data using the correct trade day
         trade_day = get_trade_day(get_ist_datetime())
         candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
@@ -71,7 +71,7 @@ class OptionBuyStrategy(StrategyBase):
         to_date = candle_times["to_date"]
         # 3. Fetch option chain and first candle history
         broker = self.dp._broker or await self.dp._ensure_broker() or self.dp._broker
-        logger.info(
+        logger.debug(
             f"Fetching option chain and history with params: "
             f"symbol={symbol}, interval_minutes={interval_minutes}, "
             f"max_strikes={max_strikes}, from_date={from_date}, to_date={to_date}, "
@@ -87,7 +87,7 @@ class OptionBuyStrategy(StrategyBase):
             self._strikes.append(ce_strike)
         if pe_strike is not None:
             self._strikes.append(pe_strike)
-        logger.debug(f"Selected strikes for entry: {self._strikes}")
+        logger.info(f"Selected strikes for entry: {self._strikes}")
 
     async def run_tick(self) -> None:
         """Called each polling interval: evaluate entry and exit."""
@@ -99,27 +99,26 @@ class OptionBuyStrategy(StrategyBase):
             if not (self.start_time <= now_time <= self.end_time):
                 return
 
-        for symbol in self.symbols:
-            for strike in self._strikes:
-                # Fetch history for this strike
-                data = await self.dp.get_history(symbol, strike=strike, interval=self.timeframe)
+        for strike in self._strikes:
+            # Fetch history for the configured symbol
+            data = await self.dp.get_history(self.symbol, strike=strike, interval=self.timeframe)
 
-                if not self._position:
-                    # No open position—check for entry
-                    order = self.evaluate_signal(data)
-                    if order:
-                        logger.debug(f"Placing entry order: {order}")
-                        results = await self.em.execute(self.config, order)
-                        logger.debug(f"Entry results: {results}")
-                        self._position = {"symbol": symbol, "strike": strike}
-                else:
-                    # Position open—check for exit
-                    order = self.evaluate_exit(data, self._position)
-                    if order:
-                        logger.debug(f"Placing exit order: {order}")
-                        results = await self.em.execute(self.config, order)
-                        logger.debug(f"Exit results: {results}")
-                        self._position = None
+            if not self._position:
+                # No open position—check for entry
+                order = self.evaluate_signal(data)
+                if order:
+                    logger.debug(f"Placing entry order: {order}")
+                    results = await self.em.execute(self.config, order)
+                    logger.debug(f"Entry results: {results}")
+                    self._position = {"symbol": self.symbol, "strike": strike}
+            else:
+                # Position open—check for exit
+                order = self.evaluate_exit(data, self._position)
+                if order:
+                    logger.debug(f"Placing exit order: {order}")
+                    results = await self.em.execute(self.config, order)
+                    logger.debug(f"Exit results: {results}")
+                    self._position = None
 
     def evaluate_signal(self, data: Any) -> Optional[dict]:
         """

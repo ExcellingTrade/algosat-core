@@ -26,14 +26,6 @@ AsyncSessionLocal = sessionmaker(
     expire_on_commit=False,  # keep objects alive after commit
 )
 
-async def get_session() -> AsyncSession:
-    """
-    Async generator that yields a DB session, then closes it.
-    Use this as a FastAPI dependency or call directly in core code.
-    """
-    async with AsyncSessionLocal() as session:
-        yield session
-
 async def has_table(table_name: str) -> bool:
     """
     Check if a table exists in the database.

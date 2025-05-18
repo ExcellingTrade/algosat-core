@@ -47,7 +47,7 @@ def get_broker(name: str) -> BrokerInterface:
         raise ValueError(f"Unknown broker '{name}'. Valid options: {valid}")
 
     # Instantiate, cache, and return
-    logger.info(f"Creating new broker instance for {key}")
+    logger.debug(f"Creating new broker instance for {key}")
     
     # Check if the class has a __init__ method that accepts broker_name
     if hasattr(BrokerClass, "__init__"):

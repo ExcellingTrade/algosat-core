@@ -64,7 +64,7 @@ def grace_exit():
     """
     Perform any cleanup operations before exiting the program.
     """
-    logger.debug("Performing graceful shutdown...")
+    logger.info("🔄 Performing graceful shutdown...")
 
 
 def get_trade_day(date_val: datetime):
@@ -83,6 +83,7 @@ def get_trade_day(date_val: datetime):
     """
     holiday_list = get_nse_holiday_list()
     if holiday_list is None:
+        logger.warning("🟡 NSE holiday list unavailable, assuming no holidays.")
         holiday_list = []  # Default to an empty list if no holidays are provided
 
     no_of_days = 0
@@ -119,13 +120,14 @@ def get_nse_holiday_list():
 
     # Check if the cached holiday file exists and is recent
     if os.path.exists(HOLIDAY_FILE):
-        file_modified_time = datetime.fromtimestamp(os.path.getmtime(HOLIDAY_FILE))
+        file_modified_time = localize_to_ist(datetime.fromtimestamp(os.path.getmtime(HOLIDAY_FILE)))
         if get_ist_now() - file_modified_time < timedelta(days=30):
             try:
                 with open(HOLIDAY_FILE, 'r') as f:
+                    logger.debug("Loaded NSE holiday list from cache.")
                     return json.load(f)  # Return holidays from the cached file
             except Exception as err:
-                logger.error(f"Error reading holiday file: {err}. Re-fetching holidays...")
+                logger.error(f"🔴 Error reading holiday file: {err}. Re-fetching holidays...")
 
     # Fetch holidays from NSE API
     tries = 1
@@ -136,18 +138,17 @@ def get_nse_holiday_list():
             response.raise_for_status()  # Raise an exception for HTTP errors
             data = response.json()
             holidays = [d['tradingDate'] for d in data['CM']]
-
             # Cache the holidays in a local JSON file
             with open(HOLIDAY_FILE, 'w') as f:
                 json.dump(holidays, f, indent=2)
-
+            logger.info("🟢 NSE holiday list updated from API.")
             return holidays
         except Exception as err:
-            logger.error(f"Error fetching holidays from NSE API (Attempt {tries}/{max_retries}): {err}")
+            logger.warning(f"🟡 Error fetching holidays from NSE API (Attempt {tries}/{max_retries}): {err}")
             tries += 1
 
     # Return an empty list if all attempts fail
-    logger.error("Failed to fetch NSE holiday list after multiple attempts.")
+    logger.error("🔴 Failed to fetch NSE holiday list after multiple attempts.")
     return []
 
 
@@ -182,7 +183,7 @@ async def pre_market_check():
         localized_market_close_time = localize_to_ist(datetime.combine(now.date(), market_close_time))
         # Check if the script triggered after market close
         if now >= localized_market_close_time:
-            console.print("[yellow bold]Market is closed. Script triggered after market close. Exiting script.[/]")
+            logger.info("🟡 Market is closed. Script triggered after market close. Exiting script.")
             shutdown_gracefully("Marker is closed")
 
         # Wait until 9:15 AM if triggered before the market open
@@ -190,10 +191,7 @@ async def pre_market_check():
         if now < localized_market_open_time:
             wait_time = (localized_market_open_time - now).total_seconds()
             total_time = str(timedelta(seconds=wait_time)).split(".")[0]  # Human-readable total time
-            console.print(
-                f"[blue]Waiting until market opens at {localized_market_open_time.strftime('%H:%M:%S')}. "
-                f"Estimated wait time: {total_time}.[/]"
-            )
+            logger.info("⏳ Waiting until market opens at %s. Estimated wait time: %s.", localized_market_open_time.strftime('%H:%M:%S'), total_time)
 
             with Progress(
                     TextColumn("[cyan]{task.description}[/]"),
@@ -211,10 +209,9 @@ async def pre_market_check():
                     await asyncio.sleep(1)
                     progress.update(task, advance=1)
 
-        console.print("[green bold]Market is open. Proceeding with the script.[/]")
-
+        logger.info("🟢 Market is open. Proceeding with the script.")
     except Exception as error:
-        logger.error(f"[red bold]Error during pre-market check: {error}[/]")
+        logger.error(f"🔴 Error during pre-market check: {error}")
         exit(1)
 
 
@@ -253,7 +250,7 @@ async def wait_for_next_candle(interval_minutes):
             await asyncio.sleep(1)
             progress.update(task, advance=1)
 
-    console.print("[green bold]✓ Next candle is starting...[/]")
+    logger.info("⏳ Next candle is starting...")
 
 
 def save_order_book(order_book, bot_name):
@@ -287,7 +284,7 @@ def load_order_book(bot_name):
             logger.debug(f"Order book file '{order_book_file}' is corrupted. Resetting order book.")
             return {"open_trades": [], "closed_trades": []}
         except Exception as error:
-            logger.error(f"Unexpected error loading order book: {error}")
+            logger.error(f"🔴 Unexpected error loading order book: {error}")
             return {"open_trades": [], "closed_trades": []}
 
     # If the file doesn't exist, return an empty order book
@@ -595,14 +592,13 @@ async def check_margin_availability(broker, total_qty, *order_params_list):
 
         # Log margin details
         logger.info(
-            f"Margin Check: Required: {margin_required}, Available: {margin_avail}, "
-            f"Orders: {[order['symbol'] for order in margin_request_data['data']]}"
+            f"💸 Margin Check: Required: {margin_required}, Available: {margin_avail}, Orders: {[order['symbol'] for order in margin_request_data['data']]}"
         )
 
         # Return whether a sufficient margin is available
         return margin_required <= margin_avail
     except Exception as error:
-        logger.error(f"Error checking margin: {error}")
+        logger.error(f"🔴 Error checking margin: {error}")
         return False
 
 
@@ -736,8 +732,7 @@ async def check_loss_and_square_off(broker, trade_config, open_trades, latest_ca
         # Check if loss exceeds the maximum allowed percentage
         if total_p_l < 0 and loss_percentage >= max_loss_percentage:
             logger.warning(
-                f"Loss percentage {loss_percentage:.2f}% exceeds max limit of {max_loss_percentage}%. "
-                f"Initiating square off..."
+                f"🟡 Loss percentage {loss_percentage:.2f}% exceeds max limit of {max_loss_percentage}%. Initiating square off..."
             )
             # Call the square_off_positions method
             await square_off_all_trades(broker, open_trades=open_trades, latest_candle=latest_candle)
@@ -750,9 +745,8 @@ async def check_loss_and_square_off(broker, trade_config, open_trades, latest_ca
             await shutdown_gracefully("Exiting: Max Loss Reached")
         else:
             logger.debug("Loss percentage within limit. No action required.")
-
     except Exception as error:
-        logger.error(f"Error in check_loss_and_square_off: {error}")
+        logger.error(f"🔴 Error in check_loss_and_square_off: {error}")
 
 
 def calculate_new_target(trade, history_df, trade_config):

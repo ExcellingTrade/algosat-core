@@ -52,15 +52,15 @@ async def auth_broker(broker_name: str) -> Tuple[bool, str, Optional[Any]]:
             return False, f"Failed to initialize broker instance for {broker_name}", None
         
         # Perform login
-        logger.info(f"Authenticating broker: {broker_name}")
+        logger.debug(f"Authenticating broker: {broker_name}")
         login_successful = await broker_instance.login()
         
         if login_successful:
-            logger.info(f"Authentication successful for broker: {broker_name}")
+            logger.debug(f"Authentication successful for broker: {broker_name}")
             # Store the successful broker instance for future use
             return True, f"Successfully authenticated {broker_name}", broker_instance
         else:
-            logger.error(f"Authentication failed for broker: {broker_name}")
+            logger.debug(f"Authentication failed for broker: {broker_name}")
             return False, f"Authentication failed for {broker_name}", None
             
     except Exception as e:
@@ -79,7 +79,7 @@ async def auth_all_enabled_brokers() -> Dict[str, Tuple[bool, str, Optional[Any]
     
     # Get all available broker names from the registry
     broker_names = list(BROKER_REGISTRY.keys())
-    logger.info(f"Found {len(broker_names)} broker(s) in registry: {', '.join(broker_names)}")
+    logger.debug(f"Found {len(broker_names)} broker(s) in registry: {', '.join(broker_names)}")
     
     # First, identify which brokers are enabled
     for broker_name in broker_names:
@@ -87,7 +87,7 @@ async def auth_all_enabled_brokers() -> Dict[str, Tuple[bool, str, Optional[Any]
         if broker_config and broker_config.get("is_enabled", False):
             enabled_brokers.append(broker_name)
     
-    logger.info(f"Found {len(enabled_brokers)} enabled broker(s): {', '.join(enabled_brokers) if enabled_brokers else 'None'}")
+    logger.debug(f"Found {len(enabled_brokers)} enabled broker(s): {', '.join(enabled_brokers) if enabled_brokers else 'None'}")
     
     # Authenticate only enabled brokers
     for broker_name in enabled_brokers:
@@ -99,9 +99,9 @@ async def auth_all_enabled_brokers() -> Dict[str, Tuple[bool, str, Optional[Any]
     failed = [name for name, (success, _, _) in results.items() if not success]
     
     if successful:
-        logger.info(f"Successfully authenticated brokers: {', '.join(successful)}")
+        logger.debug(f"🟢 Successfully authenticated brokers: {', '.join(successful)}")
     if failed:
-        logger.warning(f"Failed to authenticate brokers: {', '.join(failed)}")
+        logger.warning(f"🟡 Failed to authenticate brokers: {', '.join(failed)}")
         
     return results
 
@@ -110,6 +110,6 @@ if __name__ == "__main__":
     async def test():
         # Test auth_all_enabled_brokers
         results = await auth_all_enabled_brokers()
-        print("Authentication results:", results)
+        print("Authentication results:", results)  # This print is for test script only, not production
         
     asyncio.run(test())

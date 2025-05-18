@@ -3,6 +3,10 @@ import pyotp
 from datetime import datetime
 import pytz
 from SmartApi.smartConnect import SmartConnect
+import logging
+import logzero
+# Suppress logzero (and SmartApi) noisy info/debug logs to keep console output clean
+logzero.loglevel(logging.ERROR)
 from brokers.base import BrokerInterface
 from common.broker_utils import get_broker_credentials, upsert_broker_credentials
 from common.logger import get_logger
@@ -53,7 +57,7 @@ class AngelWrapper(BrokerInterface):
                 return False
 
             # Always generate a new Angel access token with retry
-            logger.info("Generating a new Angel access token.")
+            logger.debug("Generating a new Angel access token.")
 
             # Validate required fields
             api_key = creds_json.get("api_key")
@@ -117,7 +121,7 @@ class AngelWrapper(BrokerInterface):
 
             full_config["credentials"] = creds_json
             await upsert_broker_credentials(self.broker_name, full_config)
-            logger.info(f"Angel login successful for '{username}' and new tokens updated in DB.")
+            logger.debug(f"Angel login successful for '{username}' and new tokens updated in DB.")
 
             return True
 

@@ -200,13 +200,13 @@ class FyersWrapper(BrokerInterface):
                 )
                 FyersWrapper.token = credentials["access_token"]
                 FyersWrapper.appId = credentials["api_key"]
-                logger.info("Successfully authenticated using existing token.")
+                logger.debug("Successfully authenticated using existing token.")
                 return True
             except Exception as e:
                 logger.exception("Token validation exception while checking reuse")
 
         # Perform re-authentication
-        logger.info("Generating a new access token.")
+        logger.debug("Generating a new access token.")
         session = fyersModel.SessionModel(
             client_id=credentials["api_key"],
             secret_key=credentials["api_secret"],
@@ -242,7 +242,7 @@ class FyersWrapper(BrokerInterface):
         )
         FyersWrapper.token = credentials["access_token"]
         FyersWrapper.appId = credentials["api_key"]
-        logger.info(f"Successfully authenticated with new token.")
+        logger.debug(f"Successfully authenticated with new token.")
         return True
 
     @staticmethod
@@ -279,14 +279,14 @@ class FyersWrapper(BrokerInterface):
                         token=access_token,
                         log_path=constants.FYER_LOG_DIR
                     )
-                    logger.info("Reusing existing Fyers access token (generated today after 6AM or before 6AM and still before 6AM)")
+                    logger.debug("Reusing existing Fyers access token (generated today after 6AM or before 6AM and still before 6AM)")
                     return True
                 except Exception as e:
                     logger.warning(f"Token reuse check failed: {e}, will generate new token")
 
             # Use the existing setup_auth method for now
             # This maintains backward compatibility while still using the new interface
-            logger.info("Obtaining new Fyers access token")
+            logger.debug("Obtaining new Fyers access token")
             result = await FyersWrapper.setup_auth()
             return result is not None  # Return True if we got a result
         except Exception as e:
@@ -406,7 +406,7 @@ class FyersWrapper(BrokerInterface):
                 "strikecount": strike_count,
                 "timestamp": "",
             }
-            logger.info(f"Fetching option chain for {symbol} with strike count {strike_count}")
+            logger.debug(f"Fetching option chain for {symbol} with strike count {strike_count}")
 
             # Call the sync method and get the response
             response = FyersWrapper.fyers.optionchain(data)
@@ -416,7 +416,7 @@ class FyersWrapper(BrokerInterface):
                 logger.error(f"Error fetching option chain: {response.get('message', 'Unknown error')}")
                 return None
 
-            logger.info("Successfully fetched option chain.")
+            logger.debug("Successfully fetched option chain.")
             return response
 
         except Exception as e:
@@ -544,7 +544,7 @@ class FyersWrapper(BrokerInterface):
                     "cont_flag": 1,
                 }
 
-                logger.info(
+                logger.debug(
                     f"Fetching sync history for {symbol} from {from_date} to {to_date}... (Attempt {attempt + 1})")
                 response = FyersWrapper.fyers.history(params)
 
@@ -560,7 +560,7 @@ class FyersWrapper(BrokerInterface):
                         ist_timezone)
                     df["timestamp"] = df["timestamp"].dt.tz_localize(None)
 
-                    logger.info(f"Successfully fetched sync historical data for {symbol}.")
+                    logger.debug(f"Successfully fetched sync historical data for {symbol}.")
                     return df
                 else:
                     logger.warning(
@@ -871,7 +871,6 @@ class FyersWrapper(BrokerInterface):
         """
         try:
             data = {"id": order_id}
-            print(data)
             response = await FyersWrapper.fyers.cancel_order(data=data)
             return response
         except Exception as e:

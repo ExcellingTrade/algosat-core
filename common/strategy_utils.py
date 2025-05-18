@@ -62,6 +62,7 @@ async def fetch_option_chain_and_first_candle_history(broker, symbol, interval_m
     strike_symbols = option_chain_df[constants.COLUMN_SYMBOL].unique()
     strike_symbols = [s for s in strike_symbols if (s.endswith(constants.OPTION_TYPE_CALL)
                                                     or s.endswith(constants.OPTION_TYPE_PUT)) and "INDEX" not in s]
+    logger.debug(f"⏳ Strike symbols filtered for calls and puts (excluding INDEX): {strike_symbols}")
     # Fetch history for all strikes in parallel, with progress bar
     async def fetch_history(strike_symbol):
         try:
@@ -73,10 +74,13 @@ async def fetch_option_chain_and_first_candle_history(broker, symbol, interval_m
                 ins_type=""
             )
         except Exception as e:
-            # Optionally log error here
+            logger.error(f"🔴 Error fetching history for strike {strike_symbol}: {e}")
             return None
+    logger.info("⏳ Starting to fetch history for all strikes asynchronously...")
     history_data = await fetch_multiple_strikes_history_async(strike_symbols, fetch_history)
     # Filter out None results (failed fetches)
+    filtered_count = len([res for res in history_data if res is not None])
+    logger.info(f"🟢 Completed fetching history. Successful fetches: {filtered_count}/{len(history_data)}")
     history_data = [res for res in history_data if res is not None]
     return history_data
 
@@ -124,16 +128,17 @@ def identify_strike_price_combined(option_chain_df=None, history_data=None, max_
                 & (option_chain_df[constants.COLUMN_PRICE] <= max_premium)]
 
             # Debug: list all CE candidates under max_premium
-            logger.info(
-                "[STRIKE DEBUG] CE candidates (symbol, price):\n%s",
+            logger.debug(
+                "🟢 [STRIKE DEBUG] CE candidates (symbol, price):\n%s",
                 ce_data[[constants.COLUMN_SYMBOL, constants.COLUMN_PRICE]].to_string(index=False)
             )
             # Debug: list all PE candidates under max_premium
-            logger.info(
-                "[STRIKE DEBUG] PE candidates (symbol, price):\n%s",
+            logger.debug(
+                "🟢 [STRIKE DEBUG] PE candidates (symbol, price):\n%s",
                 pe_data[[constants.COLUMN_SYMBOL, constants.COLUMN_PRICE]].to_string(index=False)
             )
         else:
+            logger.warning("🟡 No option_chain_df or history_data provided to identify strikes.")
             return None, None
 
         from common import constants
@@ -155,6 +160,7 @@ def identify_strike_price_combined(option_chain_df=None, history_data=None, max_
 
         return ce_strike, pe_strike
     except Exception as error:
+        logger.error(f"🔴 Error in identify_strike_price_combined: {error}")
         return None, None
 
 def fetch_multiple_strikes_history(strikes, fetch_history_func, *args, **kwargs):
@@ -183,22 +189,22 @@ def fetch_multiple_strikes_history(strikes, fetch_history_func, *args, **kwargs)
         for strike in strikes:
             results[strike] = fetch_history_func(strike, *args, **kwargs)
             progress.advance(task)
+    logger.info(f"🟢 Completed fetching history for {len(strikes)} strikes.")
     return results
 
-async def wait_for_first_candle_completion(interval_minutes, first_candle_time):
+async def wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol=None):
     current_time = get_ist_datetime()
     first_candle_start = datetime.combine(current_time.date(),
                                           datetime.strptime(first_candle_time, "%H:%M").time())
     first_candle_start = localize_to_ist(first_candle_start)
     first_candle_close = first_candle_start + timedelta(minutes=interval_minutes)
+    symbol_str = f" for {symbol}" if symbol else ""
     if current_time >= first_candle_close:
-        logger.info("⏰ First candle has already completed.")
+        logger.info(f"⏳ First candle has already completed{symbol_str} at {first_candle_time}.")
         return
     wait_time = (first_candle_close - current_time).total_seconds()
     human_readable_time = str(timedelta(seconds=wait_time)).split(".")[0]
-    logger.info(f"Waiting for the first candle to complete. Estimated time remaining: {human_readable_time}.")
-    # Disable all logging below CRITICAL to prevent log noise during progress display
-    logging.disable(logging.CRITICAL)
+    logger.info(f"⏳ Waiting for the first candle to complete{symbol_str} at {first_candle_time}. Estimated time remaining: {human_readable_time}.")
 
     from rich.console import Console as _Console
     console = _Console(stderr=False)
@@ -213,7 +219,7 @@ async def wait_for_first_candle_completion(interval_minutes, first_candle_time):
         console=console,
     ) as progress:
         task = progress.add_task(
-            description="Waiting for first candle completion",
+            description=f"Waiting for first candle completion{symbol_str} at {first_candle_time}",
             total=wait_time
         )
         start = current_time
@@ -222,11 +228,8 @@ async def wait_for_first_candle_completion(interval_minutes, first_candle_time):
             now = get_ist_datetime()
             elapsed = (now - start).total_seconds()
             progress.update(task, completed=elapsed, refresh=True)
-    logger.info("✓ First candle completed. Waiting additional 20 seconds...")
+    logger.info(f"🟢 First candle completed{symbol_str} at {first_candle_time}. Waiting additional 20 seconds...")
     await asyncio.sleep(20)
-
-    # Re-enable logging after progress
-    logging.disable(logging.NOTSET)
 
 def calculate_first_candle_details(current_date, first_candle_time, interval_minutes):
     try:
@@ -237,6 +240,7 @@ def calculate_first_candle_details(current_date, first_candle_time, interval_min
         # + timedelta(minutes=interval_minutes)
         from_date = first_candle_start
         to_date = first_candle_close
+        logger.debug(f"🚀 Calculated first candle details: start={first_candle_start}, close={first_candle_close}")
         return {
             "first_candle_start": first_candle_start,
             "first_candle_close": first_candle_close,
@@ -244,4 +248,5 @@ def calculate_first_candle_details(current_date, first_candle_time, interval_min
             "to_date": to_date,
         }
     except Exception as error:
+        logger.error(f"🔴 Error calculating first candle details: {error}")
         raise ValueError(f"Error calculating first candle details: {error}")

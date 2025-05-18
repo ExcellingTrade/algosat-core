@@ -44,35 +44,44 @@ _LOGGERS = {}
 # Root logger configuration (done once)
 _ROOT_LOGGER_CONFIGURED = False
 
+
+# --- Console Handler Improvements: RichHandler with custom colors and minimal output ---
 console = Console()
 
-class ISTFormatter(logging.Formatter):
-    """
-    Logging formatter that always uses IST (Asia/Kolkata) for timestamps.
-    """
-    def converter(self, timestamp):
-        import pytz
-        ist = pytz.timezone("Asia/Kolkata")
-        dt = datetime.fromtimestamp(timestamp, ist)
-        return dt.timetuple()
-    def formatTime(self, record, datefmt=None):
-        ct = self.converter(record.created)
-        if datefmt:
-            s = time.strftime(datefmt, ct)
-        else:
-            s = time.strftime("%Y-%m-%d %H:%M:%S", ct)
-        return s
+# Custom log level styles for RichHandler
+level_styles = {
+    "DEBUG": "cyan",
+    "INFO": "green",
+    "WARNING": "yellow",
+    "ERROR": "bold red",
+    "CRITICAL": "bold magenta"
+}
 
+class ColorfulLogFormatter(logging.Formatter):
+    def format(self, record):
+        levelname = record.levelname
+        color = level_styles.get(levelname, "")
+        record.levelname = f"[{color}]{levelname}[/{color}]"
+        return super().format(record)
 
-# Configure root logger with a RichHandler that uses ISTFormatter for timestamps
-console_handler = RichHandler(console=console, rich_tracebacks=True, show_time=False)
-# Use ISTFormatter to format console logs in IST timezone
-console_formatter = ISTFormatter(
-    "%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
+# Use RichHandler for pretty, minimal, colored console output
+console_handler = RichHandler(
+    console=console,
+    show_time=True,      # Show HH:MM:SS (local/IST)
+    show_level=True,     # Colored log level
+    show_path=False,     # Hide module/file in console for clarity
+    markup=True,         # Allow color markup in log messages
+    rich_tracebacks=True
+)
+console_handler.setLevel(logging.INFO)  # Only show INFO and above in console
+
+# Optional: attach custom formatter for color (RichHandler already styles, but for extra control)
+console_formatter = logging.Formatter(
+    "%(message)s"
 )
 console_handler.setFormatter(console_formatter)
 
+# Remove ISTFormatter usage for console (let RichHandler handle time nicely)
 # Only add the handler if not already present
 if not any(isinstance(h, RichHandler) for h in logging.getLogger().handlers):
     root_logger = logging.getLogger()
@@ -149,6 +158,7 @@ def get_logger(module_name: str) -> logging.Logger:
         )
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
+        logger.setLevel(logging.DEBUG)  # Ensure logger emits DEBUG logs
     # logger.propagate = False
     return logger
 

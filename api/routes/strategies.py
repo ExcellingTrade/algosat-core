@@ -52,6 +52,8 @@ async def get_strategy_config_detail_for_strategy(strategy_id: int, config_id: i
         raise HTTPException(status_code=404, detail="Strategy config not found")
     if hasattr(row, "_mapping"):
         row = dict(row._mapping)
+    if "params" not in row or row["params"] is None:
+        row["params"] = {}
     if row.get("strategy_id") != strategy_id:
         raise HTTPException(status_code=404, detail="Strategy config does not belong to this strategy")
     return StrategyConfigDetailResponse(**row)

@@ -55,7 +55,7 @@ class ZerodhaWrapper(BrokerInterface):
                     self.kite = KiteConnect(api_key=api_key)
                     self.kite.set_access_token(access_token)
                     self.access_token = access_token
-                    logger.info("Reusing existing Zerodha access token.")
+                    logger.debug("Reusing existing Zerodha access token.")
                     return True
                 except Exception as e:
                     logger.warning(f"Token reuse check failed: {e}, will generate new token")
@@ -110,7 +110,7 @@ class ZerodhaWrapper(BrokerInterface):
                 self.kite = kite
                 self.kite.set_access_token(access_token)
                 self.access_token = access_token
-                logger.info("Successfully authenticated and stored new Zerodha access token.")
+                logger.debug("Successfully authenticated and stored new Zerodha access token.")
                 return True
             except Exception as e:
                 logger.error(f"Failed to generate Zerodha session: {e}")
