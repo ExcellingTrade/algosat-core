@@ -14,7 +14,7 @@ from common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
 from sqlalchemy import select
 from datetime import datetime
 # from core.data_manager import CacheManager
-from core.data_provider.provider import DataProvider
+from core.data_provider.provider import DataProvider, get_data_provider
 
 logger = get_logger(__name__)
 
@@ -140,7 +140,6 @@ if __name__ == "__main__":
         for broker_name, (success, message, broker) in auth_results.items():
             if success:
                 logger.info(f"🟢 Authentication successful for {broker_name}")
-                # Use the already-authenticated instance:
                 profile = await broker.get_profile()
                 logger.debug(f"🟢 Profile for {broker_name}: {profile}")
                 positions = await broker.get_positions()
@@ -148,10 +147,16 @@ if __name__ == "__main__":
             else:
                 logger.warning(f"🟡 Authentication failed for {broker_name}: {message}")
 
-        # 6) Start the strategy polling loop
-        logger.info("🚀 All brokers authenticated. Starting strategy engine...")
-        await run_poll_loop()
-
+        # 6) Initialize a single DataProvider and ExecutionManager, then start the strategy polling loop
+        from core.data_provider.provider import DataProvider
+        from core.execution_manager import get_execution_manager
+        data_provider = get_data_provider()
+        execution_manager = get_execution_manager()
+        logger.info("🚦 All brokers authenticated. Starting strategy engine...")
+        await run_poll_loop(data_provider, execution_manager)
+    # 7) Close the database connection
+        await engine.dispose()
+        logger.info("🟢 Database connection closed.")
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

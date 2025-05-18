@@ -3,17 +3,18 @@ from typing import Any, Optional
 
 from .base import StrategyBase
 from common.logger import get_logger
-from core.data_provider.provider import get_data_provider
-from core.execution_manager import get_execution_manager
+from core.execution_manager import ExecutionManager
+from core.data_provider.provider import DataProvider
 from core.dbschema import strategy_configs
 from common.strategy_utils import (
     wait_for_first_candle_completion,
     calculate_first_candle_details,
     fetch_option_chain_and_first_candle_history,
     identify_strike_price_combined,
+    fetch_strikes_history,
 )
 from common.broker_utils import get_trade_day
-from utils.utils import get_ist_datetime
+from utils.utils import get_ist_datetime  # Use get_data_provider for type hints if needed
 
 logger = get_logger(__name__)
 
@@ -24,30 +25,23 @@ class OptionBuyStrategy(StrategyBase):
     then on each tick evaluates entry and exit signals.
     """
 
-    def __init__(self, config: Any):
-        # Obtain shared service instances
-        dp = get_data_provider()
-        em = get_execution_manager()
-        super().__init__(config, dp, em)
-        # Use trade dict for time window and other trade params
+    def __init__(self, config: dict, data_provider: DataProvider, execution_manager: ExecutionManager):
+        super().__init__(config, data_provider, execution_manager)
         trade = self.trade
         self.start_time = None
         self.end_time = None
-        try:
-            if trade.get("start_time"):
-                self.start_time = datetime.strptime(trade.get("start_time"), "%H:%M").time()
-            if trade.get("end_time"):
-                self.end_time = datetime.strptime(trade.get("end_time"), "%H:%M").time()
-        except Exception as e:
-            logger.error(f"Error parsing start_time/end_time: {e}")
-            self.start_time = None
-            self.end_time = None
+        self.broker = None  # Will hold the initialized broker instance
         self.premium = trade.get("premium", 100)
         self.quantity = trade.get("quantity", 1)
         self.strike_count = trade.get("strike_count", 20)
         # Internal state
         self._strikes = []         # Selected strikes after setup()
         self._position = None      # Track current open position, if any
+
+    async def ensure_broker(self):
+        if self.broker is None:
+            await self.dp._ensure_broker()
+            self.broker = self.dp._broker
 
     async def setup(self) -> None:
         """One-time setup: modular workflow for OptionBuy."""
@@ -69,16 +63,11 @@ class OptionBuyStrategy(StrategyBase):
         candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
         from_date = candle_times["from_date"]
         to_date = candle_times["to_date"]
+        # Ensure broker is initialized only once
+        await self.ensure_broker()
         # 3. Fetch option chain and first candle history
-        broker = self.dp._broker or await self.dp._ensure_broker() or self.dp._broker
-        logger.debug(
-            f"Fetching option chain and history with params: "
-            f"symbol={symbol}, interval_minutes={interval_minutes}, "
-            f"max_strikes={max_strikes}, from_date={from_date}, to_date={to_date}, "
-            f"max_premium={max_premium}"
-        )
         history_data = await fetch_option_chain_and_first_candle_history(
-            broker, symbol, interval_minutes, max_strikes, from_date, to_date, bot_name="OptionBuy"
+            self.broker, symbol, interval_minutes, max_strikes, from_date, to_date, bot_name="OptionBuy"
         )
         # 4. Identify strike prices
         ce_strike, pe_strike = identify_strike_price_combined(history_data=history_data, max_premium=max_premium)
@@ -91,6 +80,7 @@ class OptionBuyStrategy(StrategyBase):
 
     async def run_tick(self) -> None:
         """Called each polling interval: evaluate entry and exit."""
+        await self.ensure_broker()
         await self.setup()
 
         now_time = get_ist_datetime().time()
@@ -99,10 +89,25 @@ class OptionBuyStrategy(StrategyBase):
             if not (self.start_time <= now_time <= self.end_time):
                 return
 
-        for strike in self._strikes:
-            # Fetch history for the configured symbol
-            data = await self.dp.get_history(self.symbol, strike=strike, interval=self.timeframe)
+        # Use strategy_utils.fetch_strikes_history to fetch all strikes' history in batch
+        if not self._strikes:
+            return
+        # Fetch all strike histories in parallel with progress bar
+        history_data_list = await fetch_strikes_history(
+            self.broker,  # Use the initialized broker
+            self._strikes,
+            from_date=None,  # You may want to pass correct from/to/interval here
+            to_date=None,
+            interval_minutes=self.config.get('interval_minutes', 5),
+            ins_type="EQ"
+        )
+        # Map strike to its history for easy lookup
+        strike_to_history = dict(zip(self._strikes, history_data_list))
 
+        for strike in self._strikes:
+            data = strike_to_history.get(strike)
+            if not data:
+                continue
             if not self._position:
                 # No open position—check for entry
                 order = self.evaluate_signal(data)

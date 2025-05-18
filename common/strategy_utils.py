@@ -4,7 +4,10 @@ import json
 import asyncio
 from datetime import datetime, timedelta
 from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+from rich.progress import (
+    Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn,
+    TimeRemainingColumn, TaskProgressColumn
+)
 from utils.utils import localize_to_ist, get_ist_datetime
 from common.logger import get_logger
 import logging
@@ -49,6 +52,84 @@ async def fetch_multiple_strikes_history_async(strikes, fetch_history_coro_func,
             progress.advance(task_id)
     return results
 
+async def fetch_strikes_history(broker, strike_symbols, from_date, to_date, interval_minutes, ins_type=""):
+    """
+    Fetch history for multiple strikes asynchronously with a super stylish progress bar.
+    Args:
+        broker: Broker instance with async get_history method.
+        strike_symbols (list): List of strike symbols.
+        from_date, to_date: Date range for history.
+        interval_minutes: OHLC interval in minutes.
+        ins_type: Instrument type (default: "").
+    Returns:
+        list: List of fetched history data (order matches strike_symbols).
+    """
+    from rich.console import Console
+    console = Console()
+    results = [None] * len(strike_symbols)
+    success_count = 0
+    fail_count = 0
+
+    async def fetch_history(strike_symbol):
+        nonlocal success_count, fail_count
+        try:
+            data = await broker.get_history(
+                strike_symbol,
+                from_date,
+                to_date,
+                ohlc_interval=interval_minutes,
+                ins_type=ins_type
+            )
+            if data is not None:
+                success_count += 1
+            else:
+                fail_count += 1
+            return data
+        except Exception as e:
+            fail_count += 1
+            logger.error(f"🔴 Error fetching history for strike {strike_symbol}: {e}")
+            return None
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold blue]Fetching:[/] {task.fields[strike]}", justify="right"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        TimeRemainingColumn(),
+        TextColumn("[green]✔ {task.fields[success]}[/] [red]✖ {task.fields[fail]}[/]", justify="right"),
+        console=console,
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task(
+            "Fetching strike history...",
+            total=len(strike_symbols),
+            strike="",
+            success=0,
+            fail=0,
+        )
+        tasks = []
+        strike_map = {}
+        for idx, strike in enumerate(strike_symbols):
+            coro = fetch_history(strike)
+            tasks.append(asyncio.create_task(coro))
+            strike_map[idx] = strike
+        for idx, coro in enumerate(asyncio.as_completed(tasks)):
+            res = await coro
+            results[idx] = res
+            # Update the current strike being completed
+            progress.update(
+                task_id,
+                advance=1,
+                strike=strike_map[idx],
+                success=success_count,
+                fail=fail_count,
+            )
+    filtered_count = success_count
+    logger.info(f"🟢 Completed fetching history. Successful fetches: {filtered_count}/{len(strike_symbols)}")
+    history_data = [res for res in results if res is not None]
+    return history_data
+
 # --- MOVED FROM broker_utils.py ---
 
 async def fetch_option_chain_and_first_candle_history(broker, symbol, interval_minutes, max_strikes, from_date, to_date, bot_name):
@@ -64,24 +145,9 @@ async def fetch_option_chain_and_first_candle_history(broker, symbol, interval_m
                                                     or s.endswith(constants.OPTION_TYPE_PUT)) and "INDEX" not in s]
     logger.debug(f"⏳ Strike symbols filtered for calls and puts (excluding INDEX): {strike_symbols}")
     # Fetch history for all strikes in parallel, with progress bar
-    async def fetch_history(strike_symbol):
-        try:
-            return await broker.get_history(
-                strike_symbol,
-                from_date,
-                to_date,
-                ohlc_interval=interval_minutes,
-                ins_type=""
-            )
-        except Exception as e:
-            logger.error(f"🔴 Error fetching history for strike {strike_symbol}: {e}")
-            return None
-    logger.info("⏳ Starting to fetch history for all strikes asynchronously...")
-    history_data = await fetch_multiple_strikes_history_async(strike_symbols, fetch_history)
-    # Filter out None results (failed fetches)
-    filtered_count = len([res for res in history_data if res is not None])
-    logger.info(f"🟢 Completed fetching history. Successful fetches: {filtered_count}/{len(history_data)}")
-    history_data = [res for res in history_data if res is not None]
+    history_data = await fetch_strikes_history(
+        broker, strike_symbols, from_date, to_date, interval_minutes, ins_type=""
+    )
     return history_data
 
 def identify_strike_price_combined(option_chain_df=None, history_data=None, max_premium=200):

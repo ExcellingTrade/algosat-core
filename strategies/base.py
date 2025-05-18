@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional
+from core.data_provider.provider import DataProvider
 
 
 class StrategyBase(ABC):
@@ -7,7 +8,7 @@ class StrategyBase(ABC):
     Abstract base class for trading strategies.
     """
 
-    def __init__(self, config: Any, data_provider: Any, execution_manager: Any):
+    def __init__(self, config: Any, data_provider: DataProvider, execution_manager: Any):
         """
         :param config: StrategyConfig object or dict containing 'params' JSON and other settings.
         :param data_provider: DataProvider instance for market data access.

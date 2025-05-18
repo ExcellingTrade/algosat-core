@@ -8,6 +8,7 @@ from core.execution_manager import get_execution_manager
 from strategies.option_buy import OptionBuyStrategy
 # from strategies.option_sell import OptionSellStrategy
 # from strategies.swing_highlow import SwingHighLowStrategy
+from core.data_provider.provider import DataProvider
 
 logger = get_logger("strategy_runner")
 
@@ -18,7 +19,7 @@ STRATEGY_MAP = {
     # "swing_highlow": SwingHighLowStrategy,
 }
 
-async def run_strategy_config(config_row):
+async def run_strategy_config(config_row, data_provider: DataProvider, execution_manager):
     """
     Given a strategy config row, identify and run the correct strategy.
     """
@@ -30,11 +31,11 @@ async def run_strategy_config(config_row):
             strategy_name = await get_strategy_name_by_id(session, config_row.strategy_id)
     StrategyClass = STRATEGY_MAP.get(strategy_name)
     if not StrategyClass:
-        logger.error(f"No strategy class found for '{strategy_name}'")
+        logger.debug(f"No strategy class found for '{strategy_name}'")
         return
 
-    # Instantiate strategy (it will fetch its own DataProvider and ExecutionManager)
-    strategy = StrategyClass(config_row)
+    # Instantiate strategy with injected DataProvider and ExecutionManager
+    strategy = StrategyClass(config_row, data_provider, execution_manager)
     logger.info(f"Starting strategy '{strategy_name}' for config {config_row.symbol}")
 
     # One-time setup
