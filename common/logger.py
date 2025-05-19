@@ -23,7 +23,7 @@ import os
 import sys
 import time
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
@@ -96,6 +96,24 @@ logging.getLogger("zerodha").setLevel(logging.WARNING)
 logging.getLogger("fyers").setLevel(logging.WARNING)
 
 
+def _ensure_all_directories():
+    """Ensure all required directories exist and remove unwanted ones."""
+    wanted_dirs = [
+        constants.LOG_DIR,
+        constants.CACHE_DIR,
+        getattr(constants, 'BACKTEST_RESULTS_DIR', None),
+        getattr(constants, 'FYER_LOG_DIR', None),
+    ]
+    for d in wanted_dirs:
+        if d:
+            os.makedirs(d, exist_ok=True)
+    # Optionally, remove unwanted/legacy folders here if you have a list
+    # Example: remove old temp folders, etc.
+    # for old_dir in ["/opt/algosat/old_logs", ...]:
+    #     if os.path.exists(old_dir):
+    #         shutil.rmtree(old_dir)
+
+
 def _ensure_log_directories():
     """Ensure only the logs directory exists."""
     os.makedirs(constants.LOG_DIR, exist_ok=True)
@@ -110,12 +128,25 @@ def get_log_file():
     return log_file
 
 
+class ISTFormatter(logging.Formatter):
+    """Custom formatter to display log times in IST (Asia/Kolkata)."""
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=timezone.utc).astimezone(
+            timezone(timedelta(hours=5, minutes=30))
+        )
+        if datefmt:
+            s = dt.strftime(datefmt)
+        else:
+            s = dt.strftime("%Y-%m-%d %H:%M:%S")
+        return s
+
+
 def configure_root_logger():
     """Configure the root logger with a single daily rotating file handler and color console handler."""
     global _ROOT_LOGGER_CONFIGURED
     if _ROOT_LOGGER_CONFIGURED:
         return
-    _ensure_log_directories()
+    _ensure_all_directories()
     root_logger = logging.getLogger()
     root_logger.setLevel(logging.DEBUG)
 
@@ -131,6 +162,27 @@ def configure_root_logger():
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(file_formatter)
     root_logger.addHandler(file_handler)
+
+    # Console handler: INFO+ with ISTFormatter
+    console_formatter = ISTFormatter(
+        "%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    for handler in root_logger.handlers:
+        if isinstance(handler, RichHandler):
+            handler.setFormatter(console_formatter)
+
+    # --- Auto cleanup of old logs (7 days) ---
+    try:
+        from core.time_utils import get_ist_datetime
+        now = get_ist_datetime()
+        for log_file in glob.glob(os.path.join(constants.LOG_DIR, "*.log*")):
+            file_time = datetime.fromtimestamp(os.path.getmtime(log_file)).astimezone(now.tzinfo).date()
+            if (now.date() - file_time).days > 7:
+                os.remove(log_file)
+                root_logger.debug(f"Deleted old log file: {log_file}")
+    except Exception as e:
+        root_logger.error(f"Error during log auto-cleanup: {e}", exc_info=True)
 
     _ROOT_LOGGER_CONFIGURED = True
 
@@ -152,7 +204,7 @@ def get_logger(module_name: str) -> logging.Logger:
         log_file = os.path.join(log_dir, f"algosat-{get_ist_now().strftime('%Y-%m-%d')}.log")
         file_handler = RotatingFileHandler(log_file, maxBytes=2*1024*1024, backupCount=7, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
-        file_formatter = logging.Formatter(
+        file_formatter = ISTFormatter(
             "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
@@ -179,14 +231,14 @@ def cleanup_logs_and_cache():
     """
     Clean up old logs and cache files based on specified criteria.
     - Logs in Fyer folder: Retain files for 3 days.
-    - General logs: Retain files for 3 days.
+    - General logs: Retain files for 7 days (updated from 3).
     - Cache files: Retain files for 15 days.
     - Backtest files: Retain files for 15 days.
     """
     logger = get_logger("logger_cleanup")
     
     try:
-        from utils.utils import get_ist_datetime
+        from core.time_utils import get_ist_datetime
         now = get_ist_datetime()
         
         # Cleanup logs in Fyer folder (keep 3-day files)
@@ -196,10 +248,10 @@ def cleanup_logs_and_cache():
                 os.remove(log_file)
                 logger.debug(f"Deleted old log file: {log_file}")
         
-        # Cleanup general logs (keep 3-day files)
+        # Cleanup general logs (keep 7-day files)
         for log_file in glob.glob(os.path.join(constants.LOG_DIR, "*.log*")):
             file_time = datetime.fromtimestamp(os.path.getmtime(log_file)).astimezone(now.tzinfo).date()
-            if (now.date() - file_time).days > 3:
+            if (now.date() - file_time).days > 7:
                 os.remove(log_file)
                 logger.debug(f"Deleted old log file: {log_file}")
         

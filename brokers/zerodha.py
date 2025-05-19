@@ -13,6 +13,7 @@ from selenium.webdriver.common.by import By
 from seleniumbase import SB
 from pyvirtualdisplay import Display
 from urllib.parse import urlparse, parse_qs
+from core.time_utils import get_ist_datetime
 
 logger = get_logger("zerodha_wrapper")
 
@@ -103,7 +104,6 @@ class ZerodhaWrapper(BrokerInterface):
                 data = kite.generate_session(request_token, api_secret=api_secret)
                 access_token = data["access_token"]
                 credentials["access_token"] = access_token
-                from utils.utils import get_ist_datetime
                 credentials["generated_on"] = get_ist_datetime().strftime("%d/%m/%Y %H:%M:%S")
                 full_config["credentials"] = credentials
                 await upsert_broker_credentials(self.broker_name, full_config)

@@ -8,55 +8,25 @@ from rich.progress import (
     Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn,
     TimeRemainingColumn, TaskProgressColumn
 )
-from utils.utils import localize_to_ist, get_ist_datetime
+from core.time_utils import localize_to_ist, get_ist_datetime
 from common.logger import get_logger
 import logging
+import cachetools
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from core.data_provider.provider import DataProvider
 
 logger = get_logger("strategy_utils")
 
-async def fetch_multiple_strikes_history_async(strikes, fetch_history_coro_func, *args, **kwargs):
-    """
-    Fetch history for multiple strikes asynchronously with a progress bar.
-    Args:
-        strikes (list): List of strike symbols or identifiers.
-        fetch_history_coro_func (callable): Async function to fetch history for a single strike.
-        *args, **kwargs: Additional arguments to pass to fetch_history_coro_func.
-    Returns:
-        list: List of fetched history data (order matches strikes).
-    """
-    from rich.console import Console
-    import asyncio
-    from rich.progress import Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
-    console = Console()
-    results = [None] * len(strikes)
-    total = len(strikes)
-    if total == 0:
-        return results
-    tasks = [
-        asyncio.create_task(fetch_history_coro_func(strike, *args, **kwargs))
-        for strike in strikes
-    ]
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
-        TimeElapsedColumn(),
-        console=console,
-        transient=True,
-    ) as progress:
-        task_id = progress.add_task("Fetching strike history...", total=total)
-        for idx, coro in enumerate(asyncio.as_completed(tasks)):
-            res = await coro
-            results[idx] = res
-            progress.advance(task_id)
-    return results
+# In-memory cache for history fetches (TTL: 1 day, maxsize: 128)
+_history_cache = cachetools.TTLCache(maxsize=128, ttl=60*60*24)
 
-async def fetch_strikes_history(broker, strike_symbols, from_date, to_date, interval_minutes, ins_type=""):
+async def fetch_strikes_history(broker: 'DataProvider', strike_symbols, from_date, to_date, interval_minutes, ins_type=""):
     """
-    Fetch history for multiple strikes asynchronously with a super stylish progress bar.
+    Fetch history for multiple strikes asynchronously with a super stylish progress bar and in-memory cache.
     Args:
-        broker: Broker instance with async get_history method.
+        broker: DataProvider instance with async get_history method.
         strike_symbols (list): List of strike symbols.
         from_date, to_date: Date range for history.
         interval_minutes: OHLC interval in minutes.
@@ -70,8 +40,18 @@ async def fetch_strikes_history(broker, strike_symbols, from_date, to_date, inte
     success_count = 0
     fail_count = 0
 
-    async def fetch_history(strike_symbol):
+    async def fetch_history(strike_symbol, idx):
         nonlocal success_count, fail_count
+        # Normalize cache key: always use ISO format for dates
+        def _to_iso(val):
+            if hasattr(val, 'isoformat'):
+                return val.isoformat()
+            return str(val)
+        cache_key = (strike_symbol, _to_iso(from_date), _to_iso(to_date), interval_minutes, ins_type)
+        if cache_key in _history_cache:
+            logger.info(f"Loaded history for {strike_symbol} from cache.")
+            success_count += 1
+            return _history_cache[cache_key]
         try:
             data = await broker.get_history(
                 strike_symbol,
@@ -81,13 +61,14 @@ async def fetch_strikes_history(broker, strike_symbols, from_date, to_date, inte
                 ins_type=ins_type
             )
             if data is not None:
+                _history_cache[cache_key] = data
                 success_count += 1
             else:
                 fail_count += 1
             return data
         except Exception as e:
             fail_count += 1
-            logger.error(f"🔴 Error fetching history for strike {strike_symbol}: {e}")
+            logger.debug(f"Error fetching history for strike {strike_symbol}: {e}")
             return None
 
     with Progress(
@@ -111,13 +92,12 @@ async def fetch_strikes_history(broker, strike_symbols, from_date, to_date, inte
         tasks = []
         strike_map = {}
         for idx, strike in enumerate(strike_symbols):
-            coro = fetch_history(strike)
+            coro = fetch_history(strike, idx)
             tasks.append(asyncio.create_task(coro))
             strike_map[idx] = strike
         for idx, coro in enumerate(asyncio.as_completed(tasks)):
             res = await coro
             results[idx] = res
-            # Update the current strike being completed
             progress.update(
                 task_id,
                 advance=1,
@@ -126,13 +106,13 @@ async def fetch_strikes_history(broker, strike_symbols, from_date, to_date, inte
                 fail=fail_count,
             )
     filtered_count = success_count
-    logger.info(f"🟢 Completed fetching history. Successful fetches: {filtered_count}/{len(strike_symbols)}")
+    logger.info(f"🟢 Completed fetching history. Successful fetches: {filtered_count}/{len(strike_symbols)} | Failures: {fail_count}")
     history_data = [res for res in results if res is not None]
     return history_data
 
 # --- MOVED FROM broker_utils.py ---
 
-async def fetch_option_chain_and_first_candle_history(broker, symbol, interval_minutes, max_strikes, from_date, to_date, bot_name):
+async def fetch_option_chain_and_first_candle_history(broker: 'DataProvider', symbol, interval_minutes, max_strikes, from_date, to_date, bot_name):
     # This is a simplified version; adapt as needed
     option_chain_response = await broker.get_option_chain(symbol, int(max_strikes))
     if not option_chain_response.get('data') or not option_chain_response['data'].get('optionsChain'):
@@ -229,36 +209,26 @@ def identify_strike_price_combined(option_chain_df=None, history_data=None, max_
         logger.error(f"🔴 Error in identify_strike_price_combined: {error}")
         return None, None
 
-def fetch_multiple_strikes_history(strikes, fetch_history_func, *args, **kwargs):
-    """
-    Fetch history for multiple strikes with a progress bar.
-    Args:
-        strikes (list): List of strike symbols or identifiers.
-        fetch_history_func (callable): Function to fetch history for a single strike.
-        *args, **kwargs: Additional arguments to pass to fetch_history_func.
-    Returns:
-        dict: Mapping of strike to its fetched history.
-    """
-    from rich.console import Console
-    console = Console()
-    results = {}
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TextColumn("{task.completed}/{task.total}"),
-        TimeElapsedColumn(),
-        console=console,
-        transient=True,
-    ) as progress:
-        task = progress.add_task("Fetching strike history...", total=len(strikes))
-        for strike in strikes:
-            results[strike] = fetch_history_func(strike, *args, **kwargs)
-            progress.advance(task)
-    logger.info(f"🟢 Completed fetching history for {len(strikes)} strikes.")
-    return results
+async def evaluate_signals(candle_data, history_df, trade_config, strike_symbol):
+    # ...strategy logic for signal evaluation...
+    pass
+
+async def evaluate_trade_signal(candle, history_upto_candle, trade_config, strike_symbol):
+    signal = await evaluate_signals(candle, history_upto_candle, trade_config, strike_symbol)
+    if signal:
+        # ...construct trade dict...
+        return signal  # or trade dict
+    return None
+
+async def evaluate_exit_conditions(trade, candle, current_signal_direction):
+    # ...strategy logic for exit conditions...
+    pass
 
 async def wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol=None):
+    from datetime import datetime, timedelta
+    from core.time_utils import get_ist_datetime, localize_to_ist
+    from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
+    import asyncio
     current_time = get_ist_datetime()
     first_candle_start = datetime.combine(current_time.date(),
                                           datetime.strptime(first_candle_time, "%H:%M").time())
@@ -316,3 +286,35 @@ def calculate_first_candle_details(current_date, first_candle_time, interval_min
     except Exception as error:
         logger.error(f"🔴 Error calculating first candle details: {error}")
         raise ValueError(f"Error calculating first candle details: {error}")
+    
+    
+def calculate_backdate_days(interval_minutes):
+    """
+    Calculate the number of days to fetch history based on the interval.
+
+    :param interval_minutes: Interval duration in minutes.
+    :return: Number of days to fetch history.
+    """
+    if interval_minutes >= 60:  # Hourly or more
+        return 20  # Fetch 10 days for larger intervals
+    elif interval_minutes >= 15:
+        return 15  # Fetch 5 days for 15-minute intervals
+    else:
+        return 10  # Fetch 3 days for smaller intervals
+    
+
+# Calculate end_date for fetching historical data
+def calculate_end_date(current_date, interval_minutes):
+    """
+    Calculate the end date/time to fetch historical data, ensuring no incomplete candles are included.
+
+    :param current_date:
+    :param interval_minutes: Candle interval in minutes.
+    :return: Adjusted datetime object for the end date.
+    """
+    # current_time = current_date.replace(hour=10, minute=30)
+    current_time = current_date
+    end_date = (
+            current_time - timedelta(minutes=interval_minutes)
+    ).replace(second=0, microsecond=0)
+    return end_date

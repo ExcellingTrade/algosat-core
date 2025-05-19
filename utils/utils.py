@@ -5,8 +5,6 @@ This module contains utility functions that provide common functionality
 to be reused across different parts of the application.
 
 Features:
-- Date and Time Utilities: Provides functions to handle date and time operations,
-  including fetching the current datetime in Indian Standard Time (IST).
 - General Utility Methods: Includes reusable helper methods to keep the codebase DRY (Don't Repeat Yourself).
 
 Usage:
@@ -14,17 +12,14 @@ Usage:
 - Use it to simplify complex or repetitive operations.
 
 Example:
-    from common.utils import get_ist_datetime
+    from common.utils import some_utility_function
 
-    Current_time = get_ist_datetime()
-    print(f "Current IST time: {current_time}")
+    result = some_utility_function(args)
+    print(f"Result: {result}")
 
 Functions:
-- get_ist_datetime: Returns the current datetime in IST.
+- some_utility_function: Description of what the function does.
 """
-from datetime import datetime, timedelta
-
-import pytz
 
 from common import constants
 from common.constants import EOD_EXIT_ICON
@@ -48,48 +43,6 @@ ACTION_ICONS = {
     constants.EOD_EXIT_ACTION: EOD_EXIT_ICON,
     constants.TRADE_SQUARE_OFF_ACTION: constants.TRADE_SQUARE_OFF_ICON
 }
-
-
-def get_ist_datetime():
-    """
-    Get the current datetime in Indian Standard Time (IST).
-
-    :return: A datetime object in IST.
-    """
-    ist_timezone = pytz.timezone("Asia/Kolkata")
-    return datetime.now(ist_timezone)
-
-
-def localize_to_ist(input_datetime: datetime) -> datetime:
-    """
-    Localize a naive datetime object to IST or ensure an aware datetime is in IST.
-
-    :param input_datetime: A naive or aware datetime object.
-    :return: A datetime object localized to IST timezone.
-    """
-    ist_timezone = pytz.timezone("Asia/Kolkata")
-
-    if input_datetime.tzinfo is None:  # If the datetime is naive
-        return ist_timezone.localize(input_datetime)
-    else:  # If the datetime is already aware, convert to IST
-        return input_datetime.astimezone(ist_timezone)
-
-
-# Calculate end_date for fetching historical data
-def calculate_end_date(current_date, interval_minutes):
-    """
-    Calculate the end date/time to fetch historical data, ensuring no incomplete candles are included.
-
-    :param current_date:
-    :param interval_minutes: Candle interval in minutes.
-    :return: Adjusted datetime object for the end date.
-    """
-    # current_time = current_date.replace(hour=10, minute=30)
-    current_time = current_date
-    end_date = (
-            current_time - timedelta(minutes=interval_minutes)
-    ).replace(second=0, microsecond=0)
-    return end_date
 
 
 def get_action_icon(action: str) -> str:

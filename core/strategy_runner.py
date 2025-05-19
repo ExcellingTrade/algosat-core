@@ -35,15 +35,35 @@ async def run_strategy_config(config_row, data_provider: DataProvider, execution
         return
 
     # Instantiate strategy with injected DataProvider and ExecutionManager
-    strategy = StrategyClass(config_row, data_provider, execution_manager)
-    logger.info(f"Starting strategy '{strategy_name}' for config {config_row.symbol}")
-
-    # One-time setup
     try:
-        await strategy.setup()
+        logger.debug(f"Instantiating strategy class {StrategyClass} with config_row type: {type(config_row)}")
+        logger.debug(f"config_row: {repr(config_row)}")
+        strategy = StrategyClass(config_row, data_provider, execution_manager)
     except Exception as e:
-        logger.error(f"Error during setup of '{strategy_name}': {e}", exc_info=True)
+        logger.error(f"Exception during strategy instantiation: {e}", exc_info=True)
         return
+    logger.info(f"Starting strategy '{strategy_name}' for config {getattr(config_row, 'symbol', None)}")
+
+    # One-time setup with infinite exponential backoff retry if setup fails
+    backoff = 5  # initial seconds
+    max_backoff = 600  # max 10 minutes
+    while True:
+        try:
+            await strategy.setup()
+        except Exception as e:
+            logger.error(f"Error during setup of '{strategy_name}': {e}", exc_info=True)
+            # Always retry on any setup error
+            logger.info(f"Retrying setup for '{strategy_name}' after {backoff} seconds (exception)...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+            continue
+        # Check for OptionBuyStrategy._setup_failed or similar flag
+        if getattr(strategy, '_setup_failed', False):
+            logger.warning(f"Setup failed for '{strategy_name}' (e.g., could not identify strikes). Retrying after {backoff} seconds...")
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, max_backoff)
+            continue
+        break  # setup succeeded
 
     # # Main loop: run_tick every poll_interval seconds
     # poll_interval = getattr(strategy, "poll_interval", getattr(config_row, "trade", {{}}).get("poll_interval", 60))

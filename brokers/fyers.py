@@ -45,7 +45,7 @@ from brokers.base import BrokerInterface
 from common import constants
 from common.broker_utils import shutdown_gracefully, get_broker_credentials, upsert_broker_credentials, can_reuse_token
 from common.logger import get_logger
-from utils.utils import get_ist_datetime
+from core.time_utils import get_ist_datetime
 from pyvirtualdisplay import Display
 
 nest_asyncio.apply()
@@ -434,7 +434,7 @@ class FyersWrapper(BrokerInterface):
     @staticmethod
     async def get_history_async(symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
         """
-        Fetch historical OHLC data asynchronously with retry logic.
+        Fetch historical OHLC data asynchronously.
 
         :param symbol: Trading symbol (e.g., "NSE:SBIN-EQ").
         :param from_date: Start timestamp (epoch seconds or date).
@@ -443,81 +443,70 @@ class FyersWrapper(BrokerInterface):
         :param ins_type: Instrument type (default is "EQ").
         :return: DataFrame containing OHLC data or None on failure.
         """
-        retries = 3
-        base_delay = 2
-        for attempt in range(retries):
-            try:
-                # Rate limiter to adhere to API limits
-                await rate_limiter_per_second.wait()
-                await rate_limiter_per_minute.wait()
+        try:
+            # Rate limiter to adhere to API limits
+            await rate_limiter_per_second.wait()
+            await rate_limiter_per_minute.wait()
 
-                exchange = "MCX" if "MCX" in ins_type else "NSE"
-                if not symbol.startswith("NSE:") and not symbol.startswith("MCX:"):
-                    symbol = f"{exchange}:{symbol}"
+            exchange = "MCX" if "MCX" in ins_type else "NSE"
+            if not symbol.startswith("NSE:") and not symbol.startswith("MCX:"):
+                symbol = f"{exchange}:{symbol}"
 
-                from_date_epoch = convert_to_epoch(from_date)
-                to_date_epoch = convert_to_epoch(to_date)
-                formatted_symbol = f"{symbol}-{ins_type}" if ins_type else symbol
+            from_date_epoch = convert_to_epoch(from_date)
+            to_date_epoch = convert_to_epoch(to_date)
+            formatted_symbol = f"{symbol}-{ins_type}" if ins_type else symbol
 
-                params = {
-                    "symbol": formatted_symbol,
-                    "resolution": ohlc_interval,
-                    "range_from": from_date_epoch,
-                    "range_to": to_date_epoch,
-                    "date_format": "0",
-                    "cont_flag": 1,
-                }
+            params = {
+                "symbol": formatted_symbol,
+                "resolution": ohlc_interval,
+                "range_from": from_date_epoch,
+                "range_to": to_date_epoch,
+                "date_format": "0",
+                "cont_flag": 1,
+            }
 
+            logger.debug(
+                f"Fetching async history for {formatted_symbol} from {from_date} to {to_date}... ")
+
+            response = await FyersWrapper.fyers.history(params)
+
+            if isinstance(response, dict) and response.get("code") == 200 and response.get("s") == "ok":
+                candles = response.get("candles", [])
+                if not candles:  # Safe check for empty or None candles
+                    logger.debug(f"No historical data found for {formatted_symbol}.")
+                    return None
+
+                # Process the candle data
+                df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                ist_timezone = pytz.timezone("Asia/Kolkata")
+                df["timestamp"] = (
+                    pd.to_datetime(df["timestamp"], unit="s")
+                    .dt.tz_localize("UTC")
+                    .dt.tz_convert(ist_timezone)
+                )
+                df["timestamp"] = df["timestamp"].dt.tz_localize(None)  # Remove timezone info if needed
+                df.attrs[constants.COLUMN_SYMBOL] = formatted_symbol
+
+                logger.debug(f"Successfully fetched historical data for {formatted_symbol}.")
+                return df
+            else:
+                error_message = response.get("message", "Unknown error") if isinstance(response, dict) else str(
+                    response)
                 logger.debug(
-                    f"Fetching async history for {formatted_symbol} from {from_date} to {to_date}... "
-                    f"(Attempt {attempt + 1})")
+                    f"Failed to fetch history for {formatted_symbol}: {error_message}")
+                if "request limit reached" in error_message.lower():
+                    logger.debug("Getting 'request limit reached' error. Waiting 10 seconds before retrying...")
+                    await asyncio.sleep(10)
 
-                response = await FyersWrapper.fyers.history(params)
+        except Exception as e:
+            logger.error(f"Exception while fetching async history for {symbol}: {e}")
 
-                if isinstance(response, dict) and response.get("code") == 200 and response.get("s") == "ok":
-                    candles = response.get("candles", [])
-                    if not candles:  # Safe check for empty or None candles
-                        logger.debug(f"No historical data found for {formatted_symbol}.")
-                        return None
-
-                    # Process the candle data
-                    df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
-                    ist_timezone = pytz.timezone("Asia/Kolkata")
-                    df["timestamp"] = (
-                        pd.to_datetime(df["timestamp"], unit="s")
-                        .dt.tz_localize("UTC")
-                        .dt.tz_convert(ist_timezone)
-                    )
-                    df["timestamp"] = df["timestamp"].dt.tz_localize(None)  # Remove timezone info if needed
-                    df.attrs[constants.COLUMN_SYMBOL] = formatted_symbol
-
-                    logger.debug(f"Successfully fetched historical data for {formatted_symbol}.")
-                    return df
-                else:
-                    error_message = response.get("message", "Unknown error") if isinstance(response, dict) else str(
-                        response)
-                    logger.debug(
-                        f"Failed to fetch history for {formatted_symbol}: {error_message}")
-                    if "request limit reached" in error_message.lower():
-                        logger.debug("Getting 'request limit reached' error. Waiting 10 seconds before retrying...")
-                        await asyncio.sleep(10)
-
-            except Exception as e:
-                logger.error(f"Exception while fetching async history for {symbol}: {e}")
-
-            # Retry logic with exponential backoff
-            if attempt < retries - 1:
-                delay = base_delay * (2 ** attempt)  # Exponential backoff: 2, 4, 8 seconds
-                logger.debug(f"Retrying {symbol} history fetching in {delay} seconds...")
-                await asyncio.sleep(delay)
-
-        logger.debug(f"Exhausted retries for async history fetch for {symbol}. ")
         return None
 
     @staticmethod
     def get_history_sync(symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
         """
-        Fetch historical OHLC data synchronously with retry logic.
+        Fetch historical OHLC data synchronously.
 
         :param symbol: Trading symbol (e.g., "NSE:SBIN-EQ").
         :param from_date: Start timestamp (epoch seconds or date).
@@ -526,52 +515,45 @@ class FyersWrapper(BrokerInterface):
         :param ins_type: Instrument type (default is "EQ").
         :return: DataFrame containing OHLC data or None on failure.
         """
-        retries = 3
-        delay = 2
-        for attempt in range(retries):
-            try:
-                exchange = "MCX" if "MCX" in ins_type else "NSE"
-                from_date_epoch = convert_to_epoch(from_date)
-                to_date_epoch = convert_to_epoch(to_date)
-                formatted_symbol = f"{exchange}:{symbol}-{ins_type}" if ins_type else f"{exchange}:{symbol}"
+        try:
+            exchange = "MCX" if "MCX" in ins_type else "NSE"
+            from_date_epoch = convert_to_epoch(from_date)
+            to_date_epoch = convert_to_epoch(to_date)
+            formatted_symbol = f"{exchange}:{symbol}-{ins_type}" if ins_type else f"{exchange}:{symbol}"
 
-                params = {
-                    "symbol": formatted_symbol,
-                    "resolution": ohlc_interval,
-                    "range_from": from_date_epoch,
-                    "range_to": to_date_epoch,
-                    "date_format": "0",
-                    "cont_flag": 1,
-                }
+            params = {
+                "symbol": formatted_symbol,
+                "resolution": ohlc_interval,
+                "range_from": from_date_epoch,
+                "range_to": to_date_epoch,
+                "date_format": "0",
+                "cont_flag": 1,
+            }
 
-                logger.debug(
-                    f"Fetching sync history for {symbol} from {from_date} to {to_date}... (Attempt {attempt + 1})")
-                response = FyersWrapper.fyers.history(params)
+            logger.debug(
+                f"Fetching sync history for {symbol} from {from_date} to {to_date}... ")
+            response = FyersWrapper.fyers.history(params)
 
-                if response.get("code") == 200 and response.get("s") == "ok":
-                    candles = response.get("candles", [])
-                    if not candles:
-                        logger.warning(f"No historical data found for {symbol}.")
-                        return None
+            if response.get("code") == 200 and response.get("s") == "ok":
+                candles = response.get("candles", [])
+                if not candles:
+                    logger.warning(f"No historical data found for {symbol}.")
+                    return None
 
-                    df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
-                    ist_timezone = pytz.timezone("Asia/Kolkata")
-                    df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s").dt.tz_localize("UTC").dt.tz_convert(
-                        ist_timezone)
-                    df["timestamp"] = df["timestamp"].dt.tz_localize(None)
+                df = pd.DataFrame(candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+                ist_timezone = pytz.timezone("Asia/Kolkata")
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s").dt.tz_localize("UTC").dt.tz_convert(
+                    ist_timezone)
+                df["timestamp"] = df["timestamp"].dt.tz_localize(None)
 
-                    logger.debug(f"Successfully fetched sync historical data for {symbol}.")
-                    return df
-                else:
-                    logger.warning(
-                        f"Failed to fetch history for {symbol}: {response.get('message', 'Unknown error')}")
-            except Exception as e:
-                logger.error(f"Exception while fetching sync history for {symbol}: {e}")
+                logger.debug(f"Successfully fetched sync historical data for {symbol}.")
+                return df
+            else:
+                logger.warning(
+                    f"Failed to fetch history for {symbol}: {response.get('message', 'Unknown error')}")
+        except Exception as e:
+            logger.error(f"Exception while fetching sync history for {symbol}: {e}")
 
-            if attempt < retries - 1:
-                time.sleep(delay)  # Backoff before retrying
-
-        logger.debug(f"Exhausted retries for sync history fetch for {symbol}.")
         return None
 
     @staticmethod

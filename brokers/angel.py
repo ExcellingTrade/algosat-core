@@ -11,7 +11,7 @@ from brokers.base import BrokerInterface
 from common.broker_utils import get_broker_credentials, upsert_broker_credentials
 from common.logger import get_logger
 from typing import Dict, Any, List
-from utils.utils import get_ist_datetime
+from core.time_utils import get_ist_datetime
 
 logger = get_logger("angel_wrapper")
 
@@ -76,25 +76,19 @@ class AngelWrapper(BrokerInterface):
             # Generate TOTP code
             totp_code = pyotp.TOTP(totp_secret).now()
 
-            # Perform login using SmartConnect with retry
+            # Perform login using SmartConnect
             loop = asyncio.get_running_loop()
             def _sync_login():
                 sc = SmartConnect(api_key)
                 session_data = sc.generateSession(username, password, totp_code)
                 return sc, session_data
 
-            # Attempt login with retry
-            max_retries = 3
-            for attempt in range(1, max_retries + 1):
-                try:
-                    self.smart_api, login_data = await loop.run_in_executor(None, _sync_login)
-                    break
-                except Exception as e:
-                    logger.error(f"Angel SmartConnect login attempt {attempt} failed: {e}", exc_info=True)
-                    if attempt < max_retries:
-                        await asyncio.sleep(2)
-                    else:
-                        return False
+            # Attempt login
+            try:
+                self.smart_api, login_data = await loop.run_in_executor(None, _sync_login)
+            except Exception as e:
+                logger.error(f"Angel SmartConnect login failed: {e}", exc_info=True)
+                return False
 
             # Validate login response
             if not login_data or not login_data.get("status") or login_data.get("message", "").upper() != "SUCCESS":

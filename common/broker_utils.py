@@ -32,7 +32,7 @@ from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from core.db import AsyncSessionLocal
 from core.dbschema import broker_credentials
-from core.time_utils import get_ist_now
+from core.time_utils import get_ist_now, get_ist_datetime, localize_to_ist
 
 from common import constants
 from utils.config_wrapper import get_config, get_trade_config
@@ -40,13 +40,7 @@ from utils.indicators import calculate_atr
 from common.logger import get_logger
 from utils.rich_utils import ProgressHandler
 from utils.telegram_bot import TelegramBot
-from utils.utils import get_action_icon, get_ist_datetime, localize_to_ist
-from common.strategy_utils import (
-    wait_for_first_candle_completion,
-    calculate_first_candle_details,
-    fetch_option_chain_and_first_candle_history,
-    identify_strike_price_combined,
-)
+from utils.utils import get_action_icon
 
 logger = get_logger("broker_utils")
 progress_handler = ProgressHandler.get_instance()
@@ -1500,3 +1494,5 @@ def can_reuse_token(generated_on_str, ist_timezone=None):
     except Exception as e:
         logger.error(f"Error in can_reuse_token: {e}")
         return False
+
+
