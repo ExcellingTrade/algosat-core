@@ -45,7 +45,7 @@ from brokers.base import BrokerInterface
 from common import constants
 from common.broker_utils import shutdown_gracefully, get_broker_credentials, upsert_broker_credentials, can_reuse_token
 from common.logger import get_logger
-from core.time_utils import get_ist_datetime
+from core.time_utils import get_ist_datetime, localize_to_ist
 from pyvirtualdisplay import Display
 
 nest_asyncio.apply()
@@ -308,7 +308,6 @@ class FyersWrapper(BrokerInterface):
             logger.error(f"Failed to fetch balance asynchronously: {e}")
             return None
 
-    @staticmethod
     def get_balance_sync():
         """Fetch account balance synchronously."""
         try:
@@ -1044,7 +1043,14 @@ class FyersWrapper(BrokerInterface):
 
 # Assuming from_date and to_date are in 'YYYY-MM-DD HH:MM:SS' format or datetime objects
 def convert_to_epoch(date_value):
-    """Convert a datetime or string date to epoch timestamp."""
+    """
+    Convert a datetime, or string in '%d/%m/%Y %H:%M:%S' format, to IST epoch timestamp (seconds).
+    Always localizes to IST before conversion.
+
+    :param date_value: Can be a datetime object or string date/time.
+    :return: Epoch seconds (int) in IST.
+    """
     if isinstance(date_value, str):
-        date_value = datetime.strptime(date_value, "%d/%m/%Y %H:%M:%S")  # Adjust the format if needed
-    return int(date_value.timestamp())  # Convert to epoch (seconds)
+        date_value = datetime.strptime(date_value, "%d/%m/%Y %H:%M:%S")
+    ist_aware_dt = localize_to_ist(date_value)
+    return int(ist_aware_dt.timestamp())

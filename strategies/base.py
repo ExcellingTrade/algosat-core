@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional
-from core.data_provider.provider import DataProvider
+from core.data_manager import DataManager
 
 
 class StrategyBase(ABC):
@@ -8,14 +8,14 @@ class StrategyBase(ABC):
     Abstract base class for trading strategies.
     """
 
-    def __init__(self, config: Any, data_provider: DataProvider, execution_manager: Any):
+    def __init__(self, config: Any, data_manager: DataManager, execution_manager: Any):
         """
         :param config: StrategyConfig object or dict containing 'params' JSON and other settings.
-        :param data_provider: DataProvider instance for market data access.
+        :param data_manager: DataManager instance for market data access.
         :param execution_manager: ExecutionManager instance for order placement.
         """
         self.config = config
-        self.dp = data_provider
+        self.dp = data_manager
         self.em = execution_manager
 
         # Extract top-level fields
@@ -41,7 +41,7 @@ class StrategyBase(ABC):
         pass
 
     @abstractmethod
-    async def run_tick(self) -> None:
+    async def process_cycle(self) -> None:
         """
         Called once per candle (per poll interval).
         Should:

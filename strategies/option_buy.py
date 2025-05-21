@@ -4,7 +4,7 @@ from typing import Any, Optional
 from .base import StrategyBase
 from common.logger import get_logger
 from core.execution_manager import ExecutionManager
-from core.data_provider.provider import DataProvider
+from core.data_manager import DataManager
 from core.dbschema import strategy_configs
 from common.strategy_utils import (
     calculate_end_date,
@@ -16,13 +16,17 @@ from common.strategy_utils import (
     # evaluate_signals, evaluate_trade_signal  # removed, now in-class
     calculate_backdate_days,
     localize_to_ist,
+    calculate_trade,
+)
+from utils.indicators import (
     calculate_supertrend,
     calculate_atr,
     calculate_sma,
+    calculate_vwap,
 )
 from core.time_utils import get_ist_datetime
 from common.broker_utils import get_trade_day
-
+from common import constants
 import json
 import os
 
@@ -71,8 +75,8 @@ class OptionBuyStrategy(StrategyBase):
     then on each tick evaluates entry and exit signals.
     """
 
-    def __init__(self, config: dict, data_provider: DataProvider, execution_manager: ExecutionManager):
-        super().__init__(config, data_provider, execution_manager)
+    def __init__(self, config: dict, data_manager: DataManager, execution_manager: Any):
+        super().__init__(config, data_manager, execution_manager)
         trade = self.trade
         self.start_time = None
         self.end_time = None
@@ -102,21 +106,22 @@ class OptionBuyStrategy(StrategyBase):
             logger.error("No symbol configured for OptionBuy strategy.")
             return
         # 1. Wait for first candle completion
-        await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
+        # await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
         # 2. Calculate first candle data using the correct trade day
-        trade_day = get_trade_day(get_ist_datetime())
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=1)
+        # 3. Fetch option chain and identify strikes
         cache = load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
         cleanup_old_strike_cache(cache, days=1)
         if cache_key in cache:
             self._strikes = cache[cache_key]
-            logger.info(f"Loaded identified strikes from persistent cache: {self._strikes}")
+            logger.debug(f"Loaded identified strikes from persistent cache: {self._strikes}")
             save_identified_strikes_cache(cache)
             return
         candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
         from_date = candle_times["from_date"]
         to_date = candle_times["to_date"]
-        await self.ensure_broker()  # Only for order placement, not for data fetch
+        # await self.ensure_broker()  # Only for order placement, not for data fetch
         history_data = await fetch_option_chain_and_first_candle_history(
             self.dp, symbol, interval_minutes, max_strikes, from_date, to_date, bot_name="OptionBuy"
         )
@@ -142,136 +147,164 @@ class OptionBuyStrategy(StrategyBase):
     async def process_cycle(self) -> None:
         """
         Main signal evaluation cycle for OptionBuyStrategy.
-        1. If setup failed or no strikes, do not proceed.
-        2. If strikes available, fetch history for those strikes for the correct date range.
-        3. Calculate indicators and evaluate trade signals for each strike.
+        Refactored for clarity: 1) Fetch history, 2) Compute indicators, 3) Evaluate signal, 4) Place order.
         """
         if getattr(self, '_setup_failed', False) or not self._strikes:
             logger.warning("process_cycle aborted: setup failed or no strikes available.")
             return
-        if 'trade' not in self.config:
-            logger.error("Missing 'trade' section in config. Aborting process_cycle.")
-            return
-        trade_config = self.config['trade']
+        trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
-        trade_day = get_trade_day(get_ist_datetime())
-        # Use fetch_live_candle_data to get history for all strikes
-        history_data_list = await self.fetch_live_candle_data(
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=1)
+        # 1. Fetch history for all strikes
+        history_data = await self.fetch_history_data(
             self.dp, self._strikes, trade_day, trade_config
         )
-        if not history_data_list or all(h is None for h in history_data_list):
+        if not history_data or all(h is None or getattr(h, 'empty', False) for h in history_data.values()):
             logger.warning("No history data received for strikes. Skipping signal evaluation.")
             return
-        # Map strike to its history for easy lookup
-        strike_to_history = dict(zip(self._strikes, history_data_list))
-        for strike in self._strikes:
-            data = strike_to_history.get(strike)
-            if data is None or data.empty:
-                logger.warning(f"No data for strike {strike}, skipping.")
-                continue
-            # Calculate indicators: supertrend, atr, ema
+        # 2. Compute indicators for each strike
+        indicator_data = {
+            strike: self.compute_indicators(data, trade_config, strike)
+            for strike, data in history_data.items()
+            if data is not None and not getattr(data, 'empty', False)
+        }
+        # 3. Evaluate trade signal for each strike
+        for strike, data in indicator_data.items():
             try:
-                data = calculate_supertrend(data, trade_config.get('supertrend_period', 10), trade_config.get('supertrend_multiplier', 3))
-                data = calculate_atr(data, trade_config.get('atr_multiplier', 1.5))
-                data = calculate_sma(data, trade_config.get('ema_period', 21))
+                signal_payload = self.evaluate_trade_signal(data, trade_config, strike)
+                # 4. Place order if signal
+                await self.place_order(signal_payload, data, strike)
             except Exception as e:
-                logger.error(f"Error calculating indicators for {strike}: {e}")
-                continue
-            # Generate entry/exit signal for this candle
-            try:
-                signal_payload = self.evaluate_trade_signal(latest_candle := data.iloc[-1], data, trade_config, strike)
-                if signal_payload:
-                    ts = latest_candle.get('timestamp', 'N/A')
-                    logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
-                    await self.em.execute(self.config, signal_payload)
-                else:
-                    logger.debug(f"No signal for {strike} at {latest_candle.get('timestamp', 'N/A')}")
-            except Exception as e:
-                logger.error(f"Error during signal evaluation for {strike}: {e}")
+                logger.error(f"Error during signal evaluation or order for {strike}: {e}")
 
-    async def fetch_live_candle_data(self, broker, strike_symbols, current_date, trade_config: dict):
+    async def fetch_history_data(self, broker, strike_symbols, current_date, trade_config: dict):
         """
-        Fetch live candle data for the given strike symbols.
-
-        :param current_date: The date for which the trade gonna processed
-        :param trade_config: Dict containing trade configuration details
-        :param broker: Broker instance.
-        :param strike_symbols: List of strike symbols to fetch data for.
-        :return: List of DataFrames with live candle data.
+        Fetch candle data for the given strike symbols.
+        Split out for clarity and easier backtest override.
         """
         try:
-            # Calculate start and end dates for history fetch
             back_days = calculate_backdate_days(trade_config['interval_minutes'])
             trade_day = get_trade_day(current_date - timedelta(days=back_days))
             start_date = datetime.combine(trade_day, time(9, 15))
             current_end_date = datetime.combine(localize_to_ist(current_date),
                                                 get_ist_datetime().time())
             end_date = calculate_end_date(current_end_date,
-                                          trade_config['interval_minutes'])  # Current trading day until the market close
-
-            # Fetch history for all necessary dates
-            logger.info(f"Fetching history for strike symbols {strike_symbols}...")
-        
+                                          trade_config['interval_minutes'])
+            end_date = end_date.replace(hour=10, minute=20, second=0, microsecond=0)
+            logger.info(f"Fetching history for strike symbols {', '.join(str(strike) for strike in strike_symbols)}...")
             history_data = await fetch_strikes_history(
-            self.dp,
-            self._strikes,
-            from_date=start_date,
-            to_date=end_date,
-            interval_minutes=trade_config['interval_minutes'],
-            ins_type="EQ"
-        )
-
+                self.dp,
+                self._strikes,
+                from_date=start_date,
+                to_date=end_date,
+                interval_minutes=trade_config['interval_minutes'],
+                ins_type="",
+                cache=False
+            )
             return history_data
         except Exception as error:
-            logger.error(f"Error fetching live candle data: {error}")
-            return []
+            logger.error(f"Error fetching candle data: {error}")
+            return {}
 
-    def evaluate_trade_signal(self, latest_candle: dict, data, config: dict, strike: str) -> Optional[dict]:
+    def compute_indicators(self, data, trade_config, strike):
+        """
+        Compute all indicators on the DataFrame for a given strike.
+        Returns the updated DataFrame.
+        """
+        try:
+            data = calculate_supertrend(data, trade_config.get('supertrend_period', 10), trade_config.get('supertrend_multiplier', 2))
+            data = calculate_atr(data, trade_config.get('atr_multiplier', 10))
+            data = calculate_sma(data, trade_config.get('sma_period', 25))
+            data = calculate_vwap(data)
+        except Exception as e:
+            logger.error(f"Error calculating indicators for {strike}: {e}")
+        return data
+
+    async def place_order(self, signal_payload, data, strike):
+        """
+        Place order using execution manager if there is a valid signal.
+        Overridable for live or backtest order manager.
+        """
+        if signal_payload:
+            ts = data.iloc[-1].get('timestamp', 'N/A')
+            logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
+            await self.em.execute(self.config, signal_payload)
+        else:
+            logger.debug(f"No signal for {strike} at {data.iloc[-1].get('timestamp', 'N/A')}")
+
+    def evaluate_trade_signal(self, data, config: dict, strike: str) -> Optional[dict]:
         """
         Decide whether to enter, exit, or do nothing based on the latest candle.
         Returns a trade payload dict when a signal is generated, otherwise None.
         """
         # If not in a position, check entry conditions
         if self._position is None:
-            return self.evaluate_signal(latest_candle, data, config, strike)
+            return self.evaluate_signal(data, config, strike)
         # If in a position, check exit conditions
         else:
-            return self.evaluate_exit(latest_candle, data, config, strike)
+            return self.evaluate_exit(data, config, strike)
 
-    def evaluate_signal(self, latest_candle, data, config: dict, strike: str) -> Optional[dict]:
+    def evaluate_signal(self, data, config: dict, strike: str) -> Optional[dict]:
         """
-        Entry logic: trigger when Supertrend flips from down to up.
+        Entry logic: Only enter on BUY signal if not immediately after a SELL-to-BUY reversal.
+        Skips entry if previous candle was SELL and current is BUY (fresh reversal).
         """
         if self._position is not None:
             return None
         try:
             prev = data.iloc[-2]
             curr = data.iloc[-1]
-            # Supertrend uptrend flag (assumes calculate_supertrend added 'in_uptrend')
-            if not prev['in_uptrend'] and curr['in_uptrend']:
-                entry_price = curr['close']
-                # Record position details
+
+            # Calculate candle range and check max_range
+            candle_range = round(curr['high'] - curr['low'], 2)
+            max_range = config.get('max_range', 100)  # Default to 100 if not set
+            if candle_range > max_range:
+                logger.debug(
+                    f"No valid signal for {strike} at {curr.get('timestamp')}: Candle range {candle_range} exceeds max {max_range}."
+                )
+                return None
+
+            # Cool-off logic: skip entry on fresh SELL-to-BUY reversal
+            if (
+                prev["supertrend_signal"] == constants.TRADE_DIRECTION_SELL
+                and curr["supertrend_signal"] == constants.TRADE_DIRECTION_BUY
+            ):
+                logger.info(
+                    f"Signal reversed from SELL to BUY, skipping entry due to cool-off. {strike} at {curr.get('timestamp')}"
+                )
+                return None
+
+            # Only enter if current and previous candle are both BUY
+            if (
+                curr["supertrend_signal"] == constants.TRADE_DIRECTION_BUY
+                and prev["supertrend_signal"] == constants.TRADE_DIRECTION_BUY
+                and curr['close'] > curr['vwap']
+                and curr['close'] > curr['sma']
+                and curr['high'] < 500
+            ):
+                trade_dict = calculate_trade(curr, data, strike, config, side=1)
                 self._position = {
                     'strike': strike,
-                    'entry_price': entry_price,
+                    'entry_price': trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
                     'timestamp': curr.get('timestamp')
                 }
-                return {
-                    'action': 'BUY',
-                    'symbol': self.symbol,
-                    'strike': strike,
-                    'quantity': self.quantity,
-                    'order_type': config.get('order_type', 'MARKET'),
-                    'product_type': config.get('product_type', 'INTRADAY'),
-                    'price': entry_price
-                }
+                logger.info(f"🟢 Signal formed for {strike} at {curr.get('timestamp')}: Entry at {trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE)}")
+                return trade_dict
+            else:
+                logger.debug(
+                    f"No valid signal formed for {strike} at candle: {curr.get('timestamp')}"
+                )
         except Exception as e:
             logger.error(f"Error in evaluate_signal for {strike}: {e}")
         return None
 
-    def evaluate_exit(self, latest_candle, data, config: dict, strike: str) -> Optional[dict]:
+    def evaluate_exit(self, data, config: dict, strike: str) -> Optional[dict]:
         """
         Exit logic: trigger on Supertrend flip down, stoploss, or target hit.
+        :param data: DataFrame with historical and latest candle data.
+        :param config: Dict containing strategy configuration.
+        :param strike: The strike identifier to evaluate.
+        :return: Trade payload dict if exit signal, else None.
         """
         if self._position is None:
             return None

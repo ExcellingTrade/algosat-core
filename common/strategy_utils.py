@@ -13,34 +13,36 @@ from common.logger import get_logger
 import logging
 import cachetools
 from typing import TYPE_CHECKING
+from utils.indicators import calculate_atr
 
 if TYPE_CHECKING:
-    from core.data_provider.provider import DataProvider
+    from core.data_provider.provider import DataManager
 
 logger = get_logger("strategy_utils")
 
 # In-memory cache for history fetches (TTL: 1 day, maxsize: 128)
 _history_cache = cachetools.TTLCache(maxsize=128, ttl=60*60*24)
 
-async def fetch_strikes_history(broker: 'DataProvider', strike_symbols, from_date, to_date, interval_minutes, ins_type=""):
+async def fetch_strikes_history(broker: 'DataManager', strike_symbols, from_date, to_date, interval_minutes, ins_type="", cache=True):
     """
     Fetch history for multiple strikes asynchronously with a super stylish progress bar and in-memory cache.
     Args:
-        broker: DataProvider instance with async get_history method.
+        broker: DataManager instance with async get_history method.
         strike_symbols (list): List of strike symbols.
         from_date, to_date: Date range for history.
         interval_minutes: OHLC interval in minutes.
         ins_type: Instrument type (default: "").
+        cache: Whether to use cache (default True).
     Returns:
-        list: List of fetched history data (order matches strike_symbols).
+        dict: Dict of strike_symbol -> history data.
     """
     from rich.console import Console
     console = Console()
-    results = [None] * len(strike_symbols)
+    results = {}
     success_count = 0
     fail_count = 0
 
-    async def fetch_history(strike_symbol, idx):
+    async def fetch_history(strike_symbol):
         nonlocal success_count, fail_count
         # Normalize cache key: always use ISO format for dates
         def _to_iso(val):
@@ -48,28 +50,31 @@ async def fetch_strikes_history(broker: 'DataProvider', strike_symbols, from_dat
                 return val.isoformat()
             return str(val)
         cache_key = (strike_symbol, _to_iso(from_date), _to_iso(to_date), interval_minutes, ins_type)
-        if cache_key in _history_cache:
-            logger.info(f"Loaded history for {strike_symbol} from cache.")
+        # Only check cache if cache=True
+        if cache and cache_key in _history_cache:
+            logger.debug(f"Loaded history for {strike_symbol} from cache.")
             success_count += 1
-            return _history_cache[cache_key]
+            return strike_symbol, _history_cache[cache_key]
         try:
             data = await broker.get_history(
                 strike_symbol,
                 from_date,
                 to_date,
                 ohlc_interval=interval_minutes,
-                ins_type=ins_type
+                ins_type=ins_type,
+                cache=cache
             )
             if data is not None:
-                _history_cache[cache_key] = data
+                if cache:
+                    _history_cache[cache_key] = data
                 success_count += 1
             else:
                 fail_count += 1
-            return data
+            return strike_symbol, data
         except Exception as e:
             fail_count += 1
             logger.debug(f"Error fetching history for strike {strike_symbol}: {e}")
-            return None
+            return strike_symbol, None
 
     with Progress(
         SpinnerColumn(),
@@ -89,34 +94,26 @@ async def fetch_strikes_history(broker: 'DataProvider', strike_symbols, from_dat
             success=0,
             fail=0,
         )
-        tasks = []
-        strike_map = {}
-        for idx, strike in enumerate(strike_symbols):
-            coro = fetch_history(strike, idx)
-            tasks.append(asyncio.create_task(coro))
-            strike_map[idx] = strike
-        for idx, coro in enumerate(asyncio.as_completed(tasks)):
-            res = await coro
-            results[idx] = res
+        tasks = [asyncio.create_task(fetch_history(strike)) for strike in strike_symbols]
+        for coro in asyncio.as_completed(tasks):
+            strike, res = await coro
+            results[strike] = res
             progress.update(
                 task_id,
                 advance=1,
-                strike=strike_map[idx],
+                strike=strike,
                 success=success_count,
                 fail=fail_count,
             )
-    filtered_count = success_count
-    logger.info(f"🟢 Completed fetching history. Successful fetches: {filtered_count}/{len(strike_symbols)} | Failures: {fail_count}")
-    history_data = [res for res in results if res is not None]
-    return history_data
+    logger.info(f"🟢 Completed fetching history. Successful fetches: {success_count}/{len(strike_symbols)} | Failures: {fail_count}")
+    return results
 
-# --- MOVED FROM broker_utils.py ---
 
-async def fetch_option_chain_and_first_candle_history(broker: 'DataProvider', symbol, interval_minutes, max_strikes, from_date, to_date, bot_name):
+async def fetch_option_chain_and_first_candle_history(broker: 'DataManager', symbol, interval_minutes, max_strikes, from_date, to_date, bot_name):
     # This is a simplified version; adapt as needed
     option_chain_response = await broker.get_option_chain(symbol, int(max_strikes))
     if not option_chain_response.get('data') or not option_chain_response['data'].get('optionsChain'):
-        return []
+        return {}
     import pandas as pd
     from common import constants
     option_chain_df = pd.DataFrame(option_chain_response['data']['optionsChain'])
@@ -159,11 +156,11 @@ def identify_strike_price_combined(option_chain_df=None, history_data=None, max_
 
         elif history_data is not None:
             history_combined = []
-            for strike_data in history_data:
+            for strike_symbol, strike_data in history_data.items():
                 if strike_data is not None:
                     latest_close = strike_data.iloc[-1][constants.COLUMN_CLOSE]
                     history_combined.append(
-                        {constants.COLUMN_SYMBOL: strike_data.attrs[constants.COLUMN_SYMBOL],
+                        {constants.COLUMN_SYMBOL: strike_symbol,
                          constants.COLUMN_PRICE: latest_close})
             option_chain_df = pd.DataFrame(history_combined)
             ce_data = option_chain_df[
@@ -300,8 +297,7 @@ def calculate_backdate_days(interval_minutes):
     elif interval_minutes >= 15:
         return 15  # Fetch 5 days for 15-minute intervals
     else:
-        return 10  # Fetch 3 days for smaller intervals
-    
+        return 10  # Fetch 3 days for smaller intervals    
 
 # Calculate end_date for fetching historical data
 def calculate_end_date(current_date, interval_minutes):
@@ -318,3 +314,91 @@ def calculate_end_date(current_date, interval_minutes):
             current_time - timedelta(minutes=interval_minutes)
     ).replace(second=0, microsecond=0)
     return end_date
+
+
+# --- Utility: Dynamic Buffer Calculation ---
+def get_dynamic_buffer(candle_range, threshold, small_buffer, large_buffer):
+    """
+    Calculate dynamic buffer for entry and stop-loss based on candle range.
+
+    :param candle_range: Range of the candle (high - low).
+    :param threshold: If candle range is LESS than the threshold, use large_buffer (to avoid whipsaws).
+                     If candle range is GREATER THAN OR EQUAL to the threshold, use small_buffer.
+    :param small_buffer: Buffer value for large ranges (>= threshold).
+    :param large_buffer: Buffer value for small ranges (< threshold).
+    :return: Buffer value based on candle range and threshold.
+    """
+    return large_buffer if candle_range < threshold else small_buffer
+
+
+# --- Utility: Calculate Trade Details ---
+def calculate_trade(candle, history_upto_candle, strike_symbol, trade_config, side):
+    """
+    Calculate the trade details (entry, stop loss, target) based on the given side (buy/sell).
+
+    :param candle: The current candle data.
+    :param history_upto_candle: Historical data up to the current candle.
+    :param strike_symbol: Symbol of the option being traded.
+    :param trade_config: Configuration parameters for trade calculation.
+    :param side: "1" for "buy", -1 for "sell".
+    :return: A dictionary containing trade details.
+    """
+    from common import constants
+    history_upto_candle = calculate_atr(history_upto_candle, trade_config.get('atr_multiplier',10))
+    atr_value = history_upto_candle['atr'].iloc[-1].round(2)
+    candle_range = round(candle[constants.COLUMN_HIGH] - candle[constants.COLUMN_LOW], 2)
+
+    entry_buffer = get_dynamic_buffer(
+        candle_range,
+        trade_config["range_threshold_entry"],
+        trade_config["small_entry_buffer"],
+        trade_config["large_entry_buffer"],
+    )
+    stop_loss_buffer = get_dynamic_buffer(
+        candle_range,
+        trade_config["range_threshold_stoploss"],
+        trade_config["small_sl_buffer"],
+        trade_config["large_sl_buffer"],
+    )
+    target_buffer = get_dynamic_buffer(
+        atr_value,
+        trade_config["range_threshold_target"],
+        trade_config["small_target_buffer"],
+        trade_config["large_target_buffer"],
+    )
+
+    if side == 1:
+        entry = candle[constants.COLUMN_HIGH] + entry_buffer
+        sl = candle[constants.COLUMN_LOW] - stop_loss_buffer
+        target = entry + ((atr_value * trade_config['atr_target_multiplier']) - target_buffer)
+    elif side == -1:
+        entry = candle[constants.COLUMN_LOW] - entry_buffer
+        sl = candle[constants.COLUMN_HIGH] + stop_loss_buffer
+        target = entry - ((atr_value * trade_config['atr_target_multiplier']) - target_buffer)
+    else:
+        raise ValueError("Invalid side. Use 1 for buy or -1 for sell.")
+
+    sl = round(round(sl / 0.05) * 0.05, 2)
+    target = round(round(target / 0.05) * 0.05, 2)
+
+    is_call_option = constants.OPTION_TYPE_CALL in strike_symbol
+    lot_qty = trade_config["ce_lot_qty"] if is_call_option else trade_config["pe_lot_qty"]
+
+    trade = {
+        constants.TRADE_KEY_SYMBOL: strike_symbol,
+        constants.TRADE_KEY_CANDLE_RANGE: candle_range,
+        constants.TRADE_KEY_ENTRY_PRICE: entry,
+        constants.TRADE_KEY_STOP_LOSS: sl,
+        constants.TRADE_KEY_TARGET_PRICE: target,
+        constants.TRADE_KEY_SIGNAL_TIME: candle[constants.COLUMN_TIMESTAMP],
+        constants.TRADE_KEY_EXIT_TIME: None,
+        constants.TRADE_KEY_EXIT_PRICE: 0,
+        constants.TRADE_KEY_STATUS: constants.TRADE_STATUS_AWAITING_ENTRY,
+        constants.TRADE_KEY_REASON: None,
+        constants.TRADE_KEY_ATR: atr_value,
+        constants.TRADE_KEY_SIGNAL_DIRECTION: constants.TRADE_DIRECTION_BUY
+        if side == 1 else constants.TRADE_DIRECTION_SELL,
+        constants.TRADE_KEY_LOT_QTY: lot_qty,
+        constants.TRADE_KEY_SIDE: side
+    }
+    return trade

@@ -197,6 +197,9 @@ def calculate_vwap(df_ma):
     # Calculate VWAP
     df_ma['vwap'] = df_ma['tvp'] / df_ma['tv']
 
+    # Restore timestamp as a column
+    df_ma.reset_index(inplace=True)
+
     # Clean up temporary columns
     df_ma.drop(['tp', 'vp', 'tv', 'tvp'], inplace=True, axis=1)
     pd.options.mode.chained_assignment = "warn"  # Restore default warning behavior

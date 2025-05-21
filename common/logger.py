@@ -141,6 +141,19 @@ class ISTFormatter(logging.Formatter):
         return s
 
 
+# Update all formatters to include line number
+# For file handler
+file_formatter = ISTFormatter(
+    "%(asctime)s - %(name)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+# For console handler (RichHandler)
+console_formatter = ISTFormatter(
+    "%(asctime)s | %(levelname)s | %(filename)s:%(lineno)d | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+
 def configure_root_logger():
     """Configure the root logger with a single daily rotating file handler and color console handler."""
     global _ROOT_LOGGER_CONFIGURED
@@ -152,10 +165,6 @@ def configure_root_logger():
 
     # File handler: DEBUG level, daily file, rotation by size
     log_file = get_log_file()
-    file_formatter = ISTFormatter(
-        "%(asctime)s - %(name)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
     file_handler = RotatingFileHandler(
         log_file, maxBytes=MAX_LOG_FILE_SIZE, backupCount=BACKUP_COUNT, encoding="utf-8"
     )
@@ -164,10 +173,6 @@ def configure_root_logger():
     root_logger.addHandler(file_handler)
 
     # Console handler: INFO+ with ISTFormatter
-    console_formatter = ISTFormatter(
-        "%(asctime)s | %(levelname)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
     for handler in root_logger.handlers:
         if isinstance(handler, RichHandler):
             handler.setFormatter(console_formatter)
@@ -205,7 +210,7 @@ def get_logger(module_name: str) -> logging.Logger:
         file_handler = RotatingFileHandler(log_file, maxBytes=2*1024*1024, backupCount=7, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         file_formatter = ISTFormatter(
-            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            "%(asctime)s - %(name)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
         file_handler.setFormatter(file_formatter)

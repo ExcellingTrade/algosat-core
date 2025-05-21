@@ -1,3 +1,4 @@
+from datetime import timedelta
 from sqlalchemy import select
 from core.dbschema import strategies as strategies_table
 from core.db import AsyncSessionLocal, get_strategy_name_by_id
@@ -8,7 +9,11 @@ from core.execution_manager import get_execution_manager
 from strategies.option_buy import OptionBuyStrategy
 # from strategies.option_sell import OptionSellStrategy
 # from strategies.swing_highlow import SwingHighLowStrategy
-from core.data_provider.provider import DataProvider
+from core.data_manager import DataManager
+from core.time_utils import get_ist_datetime, localize_to_ist
+import math
+from core.order_manager import OrderManager
+
 
 logger = get_logger("strategy_runner")
 
@@ -19,7 +24,7 @@ STRATEGY_MAP = {
     # "swing_highlow": SwingHighLowStrategy,
 }
 
-async def run_strategy_config(config_row, data_provider: DataProvider, execution_manager):
+async def run_strategy_config(config_row, data_manager: DataManager, order_manager: OrderManager):
     """
     Given a strategy config row, identify and run the correct strategy.
     """
@@ -34,11 +39,11 @@ async def run_strategy_config(config_row, data_provider: DataProvider, execution
         logger.debug(f"No strategy class found for '{strategy_name}'")
         return
 
-    # Instantiate strategy with injected DataProvider and ExecutionManager
+    # Instantiate strategy with injected DataManager and ExecutionManager
     try:
         logger.debug(f"Instantiating strategy class {StrategyClass} with config_row type: {type(config_row)}")
         logger.debug(f"config_row: {repr(config_row)}")
-        strategy = StrategyClass(config_row, data_provider, execution_manager)
+        strategy = StrategyClass(config_row, data_manager, order_manager)
     except Exception as e:
         logger.error(f"Exception during strategy instantiation: {e}", exc_info=True)
         return
@@ -65,11 +70,34 @@ async def run_strategy_config(config_row, data_provider: DataProvider, execution
             continue
         break  # setup succeeded
 
-    # # Main loop: run_tick every poll_interval seconds
-    # poll_interval = getattr(strategy, "poll_interval", getattr(config_row, "trade", {{}}).get("poll_interval", 60))
-    # while True:
-    #     try:
-    #         await strategy.run_tick()
-    #     except Exception as e:
-    #         logger.error(f"Error in run_tick for '{strategy_name}': {e}", exc_info=True)
-    #     await asyncio.sleep(poll_interval)
+    # Main loop: run_tick every interval_minutes candle
+    # Use self.trade if available, else fallback to config_row
+    interval_minutes = getattr(strategy, "trade", None)
+    if interval_minutes:
+        interval_minutes = interval_minutes.get("interval_minutes", 5)
+    else:
+        interval_minutes = getattr(config_row, "trade", {}) and getattr(config_row, "trade", {}).get("interval_minutes", 5)
+
+    # Only show progress bar for the first strategy instance (e.g., first symbol)
+    # For others, just log the wait time
+    async def wait_for_next_candle(interval_minutes):
+        try:
+            current_time = get_ist_datetime()
+            next_candle_start = (
+                current_time + timedelta(minutes=interval_minutes - current_time.minute % interval_minutes)
+            ).replace(second=0, microsecond=0)
+            wait_time = max(1, math.ceil((localize_to_ist(next_candle_start) - current_time).total_seconds()))
+            logger.info(f"Waiting {wait_time} seconds for the next candle ({getattr(strategy, 'symbol', 'Unknown')}).")
+            await asyncio.sleep(wait_time)
+        except Exception as e:
+            logger.error(f"Error in wait_for_next_candle: {e}", exc_info=True)
+
+    while True:
+        try:
+            await strategy.process_cycle()
+        except Exception as e:
+            logger.error(f"Error in run_tick for '{strategy_name}': {e}", exc_info=True)
+        try:
+            await wait_for_next_candle(interval_minutes)
+        except Exception as e:
+            logger.error(f"Error in wait_for_next_candle for '{strategy_name}': {e}", exc_info=True)

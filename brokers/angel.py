@@ -5,6 +5,7 @@ import pytz
 from SmartApi.smartConnect import SmartConnect
 import logging
 import logzero
+import requests  # Add this import for better error handling
 # Suppress logzero (and SmartApi) noisy info/debug logs to keep console output clean
 logzero.loglevel(logging.ERROR)
 from brokers.base import BrokerInterface
@@ -83,11 +84,20 @@ class AngelWrapper(BrokerInterface):
                 session_data = sc.generateSession(username, password, totp_code)
                 return sc, session_data
 
-            # Attempt login
+            # Attempt login with improved error handling
             try:
                 self.smart_api, login_data = await loop.run_in_executor(None, _sync_login)
+            except requests.exceptions.RequestException as e:
+                logger.error(f"Network error during Angel SmartConnect login: {e}")
+                print("\n[AngelOne] Network error: Could not connect to AngelOne API. Please check your internet connection or if the broker's API is down.\n")
+                return False
+            except ConnectionResetError as e:
+                logger.error(f"Connection reset during Angel SmartConnect login: {e}")
+                print("\n[AngelOne] Connection was reset by the server. This may be a temporary issue with AngelOne's API or your network. Please try again later.\n")
+                return False
             except Exception as e:
                 logger.error(f"Angel SmartConnect login failed: {e}", exc_info=True)
+                print("\n[AngelOne] Unexpected error during login. See logs for details.\n")
                 return False
 
             # Validate login response

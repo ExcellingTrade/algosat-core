@@ -345,3 +345,20 @@ async def reset_table_sequence(conn, table_name: str, sequence_name: str, restar
 # Example usage in your seeding/init logic (call after dropping and recreating tables):
 # await reset_table_sequence(conn, 'strategies', 'strategies_id_seq')
 # await reset_table_sequence(conn, 'strategy_configs', 'strategy_configs_id_seq')
+
+from sqlalchemy import select
+from core.dbschema import broker_credentials
+
+async def get_trade_enabled_brokers(async_session=None):
+    """
+    Return a list of broker names where trade_execution_enabled is True.
+    """
+    from core.db import AsyncSessionLocal
+    session = async_session or AsyncSessionLocal()
+    async with session as sess:
+        result = await sess.execute(
+            select(broker_credentials.c.broker_name)
+            .where(broker_credentials.c.trade_execution_enabled == True)
+            .where(broker_credentials.c.is_enabled == True)
+        )
+        return [row[0] for row in result.fetchall()]
