@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 from core.data_manager import DataManager
+from models.strategy_config import StrategyConfig
 
 
 class StrategyBase(ABC):
@@ -8,27 +9,23 @@ class StrategyBase(ABC):
     Abstract base class for trading strategies.
     """
 
-    def __init__(self, config: Any, data_manager: DataManager, execution_manager: Any):
+    def __init__(self, config: StrategyConfig, data_manager: DataManager, execution_manager: Any):
         """
-        :param config: StrategyConfig object or dict containing 'params' JSON and other settings.
+        :param config: StrategyConfig dataclass containing all config fields.
         :param data_manager: DataManager instance for market data access.
         :param execution_manager: ExecutionManager instance for order placement.
         """
-        self.config = config
+        self.cfg = config
         self.dp = data_manager
         self.em = execution_manager
 
-        # Extract top-level fields
-        self.exchange = getattr(config, "exchange", None) or config.get("exchange")
-        self.instrument = getattr(config, "instrument", None) or config.get("instrument")
-        self.trade = getattr(config, "trade", None) or config.get("trade", {})
-        self.indicators = getattr(config, "indicators", None) or config.get("indicators", {})
-        # Compute symbol from config fields
-        trade_symbol = self.trade.get("symbol") or getattr(config, "symbol", None) or config.get("symbol")
-        self.trade_symbol = trade_symbol
-        self.symbol = trade_symbol  # For backward compatibility, but do not format here
-        # Do not format symbol here; let BrokerManager/DataManager handle it
-        # Timeframe and poll_interval can be in trade dict
+        # Extract top-level fields from dataclass
+        self.exchange = config.exchange
+        self.instrument = config.instrument
+        self.trade = config.trade
+        self.indicators = config.indicators
+        self.trade_symbol = config.symbol
+        self.symbol = config.symbol
         self.timeframe: str = self.trade.get("timeframe", "1m")
         self.poll_interval: int = self.trade.get("poll_interval", 60)
 

@@ -33,6 +33,7 @@ from common import constants
 import json
 import os
 from core.signal import TradeSignal, SignalType
+from models.strategy_config import StrategyConfig
 
 logger = get_logger(__name__)
 
@@ -79,19 +80,27 @@ class OptionBuyStrategy(StrategyBase):
     then on each tick evaluates entry and exit signals.
     """
 
-    def __init__(self, config: dict, data_manager: DataManager, order_manager: Any):
-        super().__init__(config, data_manager, None)
-        trade = self.trade
+    def __init__(self, config: StrategyConfig, data_manager: DataManager, execution_manager: OrderManager):
+        super().__init__(config, data_manager, execution_manager)
+        # All config access should use self.cfg (the StrategyConfig dataclass)
+        self.symbol = self.cfg.symbol
+        self.exchange = self.cfg.exchange
+        self.instrument = self.cfg.instrument
+        self.trade = self.cfg.trade
+        self.indicators = self.cfg.indicators
+        self.trade_symbol = self.cfg.symbol
+        self.timeframe = self.trade.get("timeframe", "1m")
+        self.poll_interval = self.trade.get("poll_interval", 60)
         self.start_time = None
         self.end_time = None
-        self.premium = trade.get("premium", 100)
-        self.quantity = trade.get("quantity", 1)
-        self.strike_count = trade.get("strike_count", 20)
+        self.premium = self.trade.get("premium", 100)
+        self.quantity = self.trade.get("quantity", 1)
+        self.strike_count = self.trade.get("strike_count", 20)
         # Internal state
         self._strikes = []         # Selected strikes after setup()
         self._position = None      # Track current open position, if any
         self._setup_failed = False # Track if setup failed
-        self.order_manager = order_manager
+        self.order_manager = execution_manager  # <-- Fix: store execution_manager as order_manager
 
     async def ensure_broker(self):
         # No longer needed for data fetches, but keep for order placement if required
@@ -231,43 +240,26 @@ class OptionBuyStrategy(StrategyBase):
 
     def get_config_id(self):
         """
-        Safely extract the id from self.config, whether it's a dict, object, or tuple/list.
+        Safely extract the id from self.cfg (StrategyConfig dataclass).
         """
-        if isinstance(self.config, dict):
-            return self.config.get('id')
-        if hasattr(self.config, 'id'):
-            return self.config.id
-        if isinstance(self.config, (tuple, list)):
-            return self.config[0]
+        if hasattr(self, 'cfg') and hasattr(self.cfg, 'id'):
+            return self.cfg.id
         return None
 
     async def process_order(self, signal_payload, data, strike):
         """
         Process order using the new TradeSignal and BrokerManager logic.
+        Always pass self.cfg (StrategyConfig) as the config to order_manager.place_order for correct DB logging.
         """
-        def get_trade_config_value(key, default=None):
-            if isinstance(self.config, dict):
-                return self.config.get(key, default)
-            if hasattr(self.config, key):
-                return getattr(self.config, key, default)
-            if isinstance(self.config, (tuple, list)):
-                for item in self.config:
-                    if isinstance(item, dict) and key in item:
-                        return item[key]
-                return default
-            return default
-
         if signal_payload:
             ts = data.iloc[-1].get('timestamp', 'N/A')
             logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
-            broker_name = get_trade_config_value('broker_id', 'fyers')
-            quantity = get_trade_config_value('quantity', 1)
-            # Use BrokerManager to build OrderRequest from TradeSignal
             order_request = self.order_manager.broker_manager.build_order_request_from_signal(
-                signal_payload, broker_name, quantity
+                signal_payload, self.cfg
             )
+            # Pass self.cfg (StrategyConfig), not self.trade, to order_manager.place_order
             await self.order_manager.place_order(
-                self.trade,  # config
+                self.cfg,  # config (StrategyConfig, has id)
                 order_request,
                 strategy_name=None
             )

@@ -7,9 +7,10 @@ from common.broker_utils import get_broker_credentials, upsert_broker_credential
 from common.default_broker_configs import DEFAULT_BROKER_CONFIGS
 from common.logger import get_logger
 from core.db import get_trade_enabled_brokers as db_get_trade_enabled_brokers
-from core.order_request import OrderRequest
+from core.order_request import OrderRequest, OrderType
 from core.signal import TradeSignal, SignalType
 from core.order_defaults import ORDER_DEFAULTS
+from models.strategy_config import StrategyConfig
 
 logger = get_logger("BrokerManager")
 
@@ -354,24 +355,46 @@ class BrokerManager:
             # Default: just return symbol
             return {'symbol': symbol}
 
-    def build_order_request_from_signal(self, signal: TradeSignal, broker_name: str, quantity: int, extra_fields: dict = None):
+    def build_order_request_from_signal(self, signal: TradeSignal, config: StrategyConfig) -> OrderRequest:
         """
-        Build an OrderRequest from a TradeSignal and broker-specific defaults.
+        Build a broker-agnostic OrderRequest from a TradeSignal and StrategyConfig.
+        Ensures order_type is always set, using broker/signal defaults, config, or fallback to OrderType.MARKET.
         """
-        defaults = ORDER_DEFAULTS.get(broker_name.upper(), {}).get(signal.signal_type, {})
-        # Merge defaults, signal, and any extra fields
-        order_kwargs = {
-            "symbol": signal.symbol,
-            "side": signal.side,
-            "order_type": defaults.get("order_type"),
-            "product_type": defaults.get("product_type"),
-            "price": signal.price,
-            "quantity": quantity,
-        }
-        if extra_fields:
-            order_kwargs.update(extra_fields)
-        # Add any additional default fields (e.g., trail_by)
-        for k, v in defaults.items():
-            if k not in order_kwargs:
-                order_kwargs[k] = v
+        broker_name = getattr(config, 'broker_id', 'fyers')
+        defaults = ORDER_DEFAULTS.get(broker_name, {}).get(signal.signal_type, {})
+        # Priority: config.trade['order_type'] > defaults > fallback
+        order_type = None
+        # 1. Check config.trade (user override)
+        if hasattr(config, 'trade') and isinstance(config.trade, dict):
+            ot = config.trade.get('order_type')
+            if ot:
+                # Accept both enum and string
+                if isinstance(ot, OrderType):
+                    order_type = ot
+                elif isinstance(ot, str):
+                    try:
+                        order_type = OrderType[ot.upper()]
+                    except Exception:
+                        order_type = None
+        # 2. Check broker/signal defaults
+        if not order_type:
+            ot = defaults.get('order_type')
+            if isinstance(ot, OrderType):
+                order_type = ot
+            elif isinstance(ot, str):
+                try:
+                    order_type = OrderType[ot.upper()]
+                except Exception:
+                    order_type = None
+        # 3. Fallback
+        if not order_type:
+            order_type = OrderType.MARKET
+        order_kwargs = {**defaults}
+        order_kwargs.update({
+            'symbol': signal.symbol,
+            'side': signal.side,
+            'price': signal.price,
+            'order_type': order_type,
+            'quantity': getattr(config, 'quantity', 1) or config.trade.get('quantity', 1),
+        })
         return OrderRequest(**order_kwargs)

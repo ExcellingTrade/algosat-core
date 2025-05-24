@@ -1,6 +1,8 @@
 # algosat/main.py
 
 import asyncio
+import sys
+from core.strategy_manager import order_queue
 from core.db import init_db, engine
 from core.db import seed_default_strategies_and_configs
 from core.dbschema import strategies, strategy_configs, broker_credentials
@@ -59,5 +61,9 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.warning("🔴 Program interrupted by user. Exited cleanly...")
-        # All async tasks will be cancelled by asyncio.run automatically.
+        logger.warning("🔴 Program interrupted by user. Shutting down gracefully...")
+        # signal strategy consumers to stop
+        asyncio.run(order_queue.put(None))
+        # close DB connection
+        asyncio.run(engine.dispose())
+        sys.exit(0)

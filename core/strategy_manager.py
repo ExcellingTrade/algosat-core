@@ -12,6 +12,7 @@ from core.data_manager import DataManager
 from core.order_manager import OrderManager
 from core.order_monitor import OrderMonitor
 from core.time_utils import get_ist_datetime
+from models.strategy_config import StrategyConfig
 
 logger = get_logger("strategy_manager")
 
@@ -23,6 +24,9 @@ order_queue = asyncio.Queue()
 async def order_monitor_loop(order_queue, data_manager, order_manager):
     while True:
         order_info = await order_queue.get()
+        if order_info is None:
+            logger.info("Order monitor received shutdown sentinel, exiting loop")
+            break
         order_id = order_info["order_id"]
         if order_id not in order_monitors:
             monitor = OrderMonitor(
@@ -33,6 +37,7 @@ async def order_monitor_loop(order_queue, data_manager, order_manager):
                 interval_minutes=order_info["interval_minutes"]
             )
             order_monitors[order_id] = asyncio.create_task(monitor.start())
+    logger.info("Order monitor loop has exited")
 
 async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
     """
@@ -79,7 +84,15 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                                 if is_time_between(st_time, sq_time, now):
                                     if cfg_id not in running_tasks:
                                         logger.debug(f"Starting runner task for config {cfg_id} (intraday window)")
-                                        task = asyncio.create_task(run_strategy_config(row, data_manager, order_manager, order_queue))
+                                        # Convert row to StrategyConfig
+                                        if hasattr(row, '_mapping'):
+                                            config_dict = dict(row._mapping)
+                                        elif isinstance(row, dict):
+                                            config_dict = row
+                                        else:
+                                            config_dict = dict(row)
+                                        config = StrategyConfig(**config_dict)
+                                        task = asyncio.create_task(run_strategy_config(config, data_manager, order_manager, order_queue))
                                         running_tasks[cfg_id] = task
                                 else:
                                     if cfg_id in running_tasks:
@@ -97,7 +110,14 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                                 else:
                                     if cfg_id not in running_tasks:
                                         logger.debug(f"Starting runner task for config {cfg_id} (delivery)")
-                                        task = asyncio.create_task(run_strategy_config(row, data_manager, order_manager, order_queue))
+                                        if hasattr(row, '_mapping'):
+                                            config_dict = dict(row._mapping)
+                                        elif isinstance(row, dict):
+                                            config_dict = row
+                                        else:
+                                            config_dict = dict(row)
+                                        config = StrategyConfig(**config_dict)
+                                        task = asyncio.create_task(run_strategy_config(config, data_manager, order_manager, order_queue))
                                         running_tasks[cfg_id] = task
                     else:
                         logger.info("🟡 No configs found")

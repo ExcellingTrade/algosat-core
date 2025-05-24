@@ -14,6 +14,7 @@ from core.time_utils import get_ist_datetime, localize_to_ist
 import math
 from core.order_manager import OrderManager
 from core.order_monitor import OrderMonitor
+from models.strategy_config import StrategyConfig
 
 
 logger = get_logger("strategy_runner")
@@ -29,21 +30,32 @@ async def run_strategy_config(config_row, data_manager: DataManager, order_manag
     """
     Given a strategy config row, identify and run the correct strategy.
     """
-    # Determine the strategy key (name) from config_row or via lookup
-    strategy_name = getattr(config_row, "strategy_name", None)
+    # Convert config_row to StrategyConfig dataclass
+    if not isinstance(config_row, StrategyConfig):
+        # Accepts dict, SQLAlchemy row, or namedtuple
+        if hasattr(config_row, '_mapping'):
+            config_dict = dict(config_row._mapping)
+        elif isinstance(config_row, dict):
+            config_dict = config_row
+        else:
+            config_dict = dict(config_row)
+        config = StrategyConfig(**config_dict)
+    else:
+        config = config_row
+
+    strategy_name = getattr(config, "strategy_name", None)
     if not strategy_name:
         # Fallback: fetch from strategies table using strategy_id
         async with AsyncSessionLocal() as session:
-            strategy_name = await get_strategy_name_by_id(session, config_row.strategy_id)
+            strategy_name = await get_strategy_name_by_id(session, config.strategy_id)
     StrategyClass = STRATEGY_MAP.get(strategy_name)
     if not StrategyClass:
         logger.debug(f"No strategy class found for '{strategy_name}'")
         return
 
     # --- Ensure broker is initialized and resolve symbol/token upfront ---
-    # This assumes config_row has 'symbol' and 'instrument_type' attributes/fields
-    symbol = getattr(config_row, 'symbol', None)
-    instrument_type = getattr(config_row, 'instrument', None)
+    symbol = config.symbol
+    instrument_type = config.instrument
     await data_manager.ensure_broker()  # Ensure broker is initialized
     broker_name = data_manager.get_current_broker_name()
     resolved_symbol = symbol
@@ -52,15 +64,10 @@ async def run_strategy_config(config_row, data_manager: DataManager, order_manag
         symbol_info = await data_manager.get_broker_symbol(symbol, instrument_type)
         resolved_symbol = symbol_info.get('instrument_token', symbol_info.get('symbol', symbol))
 
-    # Instantiate strategy with injected DataManager and OrderManager
+    # Pass StrategyConfig to strategy
     try:
-        logger.debug(f"Instantiating strategy class {StrategyClass} with config_row type: {type(config_row)}")
-        logger.debug(f"config_row: {repr(config_row)}")
-        # Always create a shallow copy as a dict and update symbol_info
-        if isinstance(config_row, dict):
-            config_for_strategy = dict(config_row)
-        else:
-            config_for_strategy = dict(getattr(config_row, '_mapping', {}))
+        logger.debug(f"Instantiating strategy class {StrategyClass} with config type: {type(config)}")
+        config_for_strategy = config.copy().dict()
         # Get symbol_info from broker
         symbol_info = None
         if broker_name and symbol:
@@ -69,11 +76,11 @@ async def run_strategy_config(config_row, data_manager: DataManager, order_manag
         # Optionally, for backward compatibility, set 'symbol' to symbol_info['symbol'] if present
         if symbol_info and 'symbol' in symbol_info:
             config_for_strategy['symbol'] = symbol_info['symbol']
-        strategy = StrategyClass(config_for_strategy, data_manager, order_manager)
+        strategy = StrategyClass(StrategyConfig(**config_for_strategy), data_manager, order_manager)
     except Exception as e:
         logger.error(f"Exception during strategy instantiation: {e}", exc_info=True)
         return
-    logger.info(f"Starting strategy '{strategy_name}' for config {config_for_strategy.get('symbol', None)}")
+    logger.info(f"Starting strategy '{strategy_name}' for config {config.symbol}")
 
     # One-time setup with infinite exponential backoff retry if setup fails
     backoff = 5  # initial seconds

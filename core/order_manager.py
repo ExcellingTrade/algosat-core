@@ -10,6 +10,8 @@ from core.db import AsyncSessionLocal
 from sqlalchemy import insert
 from core.broker_manager import BrokerManager
 from core.order_request import OrderRequest
+from models.strategy_config import StrategyConfig
+import json
 
 logger = get_logger("OrderManager")
 
@@ -20,8 +22,10 @@ class OrderManager:
     @staticmethod
     def extract_strategy_config_id(config):
         """
-        Robustly extract strategy_config_id from config, handling dicts, ORM rows, namedtuples, and nested cases.
+        Extract strategy_config_id from a StrategyConfig dataclass, dict, or ORM row.
         """
+        if isinstance(config, StrategyConfig):
+            return config.id
         # Direct attribute or key
         for key in ("strategy_config_id", "id"):  # prefer explicit field if present
             if isinstance(config, dict) and key in config:
@@ -97,43 +101,50 @@ class OrderManager:
         """
         Update order details to orders table in DB using db.py abstraction.
         Called from place_order, so status is set to 'AWAITING_ENTRY'.
+        Ensures all values are native Python types (no numpy types, enums, etc.).
         """
         from core.db import insert_order, AsyncSessionLocal, get_broker_by_name
+        import numpy as np
+        def to_native(val):
+            if isinstance(val, np.generic):
+                return val.item()
+            if hasattr(val, 'value'):
+                return val.value
+            if hasattr(val, 'name'):
+                return val.name
+            return val
         async with AsyncSessionLocal() as sess:
-            # Get broker_id from broker_credentials table using db.py abstraction
             broker_row = await get_broker_by_name(sess, broker_name)
             broker_id = broker_row["id"] if broker_row else None
             strategy_config_id = self.extract_strategy_config_id(config)
             if not strategy_config_id:
                 logger.error(f"[OrderManager] Could not extract strategy_config_id from config: {repr(config)}. Skipping DB insert.")
-                # Set a default non-null value if extraction fails
-                strategy_config_id = 3  # or any other sentinel value that is valid and non-null
-                # return
-            # Use to_dict() if order_payload is OrderRequest
+                strategy_config_id = 3
             if isinstance(order_payload, OrderRequest):
                 order_payload_dict = order_payload.to_dict()
             else:
                 order_payload_dict = order_payload
+            # Convert all values to native types
             order_data = {
-                "strategy_config_id": strategy_config_id,
-                "broker_id": broker_id,
-                "symbol": order_payload_dict.get("symbol"),
-                "candle_range": order_payload_dict.get("candle_range"),
-                "entry_price": order_payload_dict.get("price"),
-                "stop_loss": order_payload_dict.get("extra", {}).get("stopLoss"),
-                "target_price": order_payload_dict.get("extra", {}).get("takeProfit"),
-                "signal_time": order_payload_dict.get("signal_time"),
-                "entry_time": order_payload_dict.get("entry_time"),
-                "exit_time": order_payload_dict.get("exit_time"),
-                "exit_price": order_payload_dict.get("exit_price"),
+                "strategy_config_id": to_native(strategy_config_id),
+                "broker_id": to_native(broker_id),
+                "symbol": to_native(order_payload_dict.get("symbol")),
+                "candle_range": to_native(order_payload_dict.get("candle_range")),
+                "entry_price": to_native(order_payload_dict.get("price")),
+                "stop_loss": to_native(order_payload_dict.get("extra", {}).get("stopLoss")),
+                "target_price": to_native(order_payload_dict.get("extra", {}).get("takeProfit")),
+                "signal_time": to_native(order_payload_dict.get("signal_time")),
+                "entry_time": to_native(order_payload_dict.get("entry_time")),
+                "exit_time": to_native(order_payload_dict.get("exit_time")),
+                "exit_price": to_native(order_payload_dict.get("exit_price")),
                 "status": "AWAITING_ENTRY",
-                "reason": order_payload_dict.get("reason"),
-                "atr": order_payload_dict.get("atr"),
-                "supertrend_signal": order_payload_dict.get("supertrend_signal"),
-                "lot_qty": order_payload_dict.get("quantity"),
-                "side": order_payload_dict.get("side"),
-                "order_ids": order_payload_dict.get("order_ids", []),
-                "order_messages": order_payload_dict.get("order_messages", {}),
+                "reason": to_native(order_payload_dict.get("reason")),
+                "atr": to_native(order_payload_dict.get("atr")),
+                "supertrend_signal": to_native(order_payload_dict.get("supertrend_signal")),
+                "lot_qty": to_native(order_payload_dict.get("quantity")),
+                "side": to_native(order_payload_dict.get("side")),
+                "order_ids": json.dumps(order_payload_dict.get("order_ids", [])),
+                "order_messages": json.dumps(order_payload_dict.get("order_messages", {})),
             }
             await insert_order(sess, order_data)
 

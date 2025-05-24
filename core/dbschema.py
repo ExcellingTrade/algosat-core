@@ -2,7 +2,7 @@
 
 from sqlalchemy import (
     MetaData, Table, Column, Integer, String, Boolean,
-    JSON, DateTime, ForeignKey, text, UniqueConstraint, Index
+    JSON, DateTime, ForeignKey, text, UniqueConstraint, Index, Float
 )
 
 metadata = MetaData()
@@ -130,19 +130,19 @@ orders = Table(
     Column("broker_id", Integer, ForeignKey("broker_credentials.id"), nullable=False, index=True),
     Column("symbol", String, nullable=False, index=True),
     Column("candle_range",  String, nullable=True),
-    Column("entry_price",  String, nullable=True),
-    Column("stop_loss",  String, nullable=True),
-    Column("target_price",  String, nullable=True),
+    Column("entry_price",  Float, nullable=True),
+    Column("stop_loss",  Float, nullable=True),
+    Column("target_price",  Float, nullable=True),
     Column("signal_time", DateTime(timezone=True), nullable=True),
     Column("entry_time", DateTime(timezone=True), nullable=True),
     Column("exit_time", DateTime(timezone=True), nullable=True),
-    Column("exit_price", String, nullable=True),
+    Column("exit_price", Float, nullable=True),
     Column("status", String, nullable=False, index=True),
     Column("reason", String, nullable=True),
-    Column("atr", String, nullable=True),
+    Column("atr", Float, nullable=True),
     Column("supertrend_signal", String, nullable=True),
     Column("lot_qty", Integer, nullable=True),
-    Column("side", Integer, nullable=True),
+    Column("side", String, nullable=True),  # Changed from Integer to String for broker-agnostic side
     Column("order_ids", JSON, nullable=False, server_default=text("'[]'::jsonb")),
     Column("order_messages", JSON, nullable=False, server_default=text("'{}'::jsonb")),
 )
