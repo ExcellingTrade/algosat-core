@@ -12,8 +12,9 @@ from core.time_utils import localize_to_ist, get_ist_datetime
 from common.logger import get_logger
 import logging
 import cachetools
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 from utils.indicators import calculate_atr
+from core.order_request import OrderRequest, Side, OrderType
 
 if TYPE_CHECKING:
     from core.data_provider.provider import DataManager
@@ -23,12 +24,20 @@ logger = get_logger("strategy_utils")
 # In-memory cache for history fetches (TTL: 1 day, maxsize: 128)
 _history_cache = cachetools.TTLCache(maxsize=128, ttl=60*60*24)
 
-async def fetch_strikes_history(broker: 'DataManager', strike_symbols, from_date, to_date, interval_minutes, ins_type="", cache=True):
+async def fetch_strikes_history(
+    broker: 'DataManager',
+    strike_symbols,
+    from_date,
+    to_date,
+    interval_minutes,
+    ins_type="",
+    cache=True
+):
     """
     Fetch history for multiple strikes asynchronously with a super stylish progress bar and in-memory cache.
     Args:
         broker: DataManager instance with async get_history method.
-        strike_symbols (list): List of strike symbols.
+        strike_symbols (list): List of strike symbols (already resolved for broker).
         from_date, to_date: Date range for history.
         interval_minutes: OHLC interval in minutes.
         ins_type: Instrument type (default: "").
@@ -110,17 +119,12 @@ async def fetch_strikes_history(broker: 'DataManager', strike_symbols, from_date
 
 
 async def fetch_option_chain_and_first_candle_history(broker: 'DataManager', symbol, interval_minutes, max_strikes, from_date, to_date, bot_name):
-    # This is a simplified version; adapt as needed
-    option_chain_response = await broker.get_option_chain(symbol, int(max_strikes))
-    if not option_chain_response.get('data') or not option_chain_response['data'].get('optionsChain'):
+    # symbol is already resolved for the broker (runner is responsible for this)
+    strike_symbols = await broker.get_strike_list(symbol, max_strikes)
+    if not strike_symbols:
+        logger.warning(f"No strike symbols found for {symbol} using broker.get_strike_list.")
         return {}
-    import pandas as pd
-    from common import constants
-    option_chain_df = pd.DataFrame(option_chain_response['data']['optionsChain'])
-    strike_symbols = option_chain_df[constants.COLUMN_SYMBOL].unique()
-    strike_symbols = [s for s in strike_symbols if (s.endswith(constants.OPTION_TYPE_CALL)
-                                                    or s.endswith(constants.OPTION_TYPE_PUT)) and "INDEX" not in s]
-    logger.debug(f"⏳ Strike symbols filtered for calls and puts (excluding INDEX): {strike_symbols}")
+    logger.debug(f"⏳ Strike symbols from broker.get_strike_list: {strike_symbols}")
     # Fetch history for all strikes in parallel, with progress bar
     history_data = await fetch_strikes_history(
         broker, strike_symbols, from_date, to_date, interval_minutes, ins_type=""
@@ -340,10 +344,11 @@ def calculate_trade(candle, history_upto_candle, strike_symbol, trade_config, si
     :param history_upto_candle: Historical data up to the current candle.
     :param strike_symbol: Symbol of the option being traded.
     :param trade_config: Configuration parameters for trade calculation.
-    :param side: "1" for "buy", -1 for "sell".
+    :param side: Side enum (Side.BUY or Side.SELL)
     :return: A dictionary containing trade details.
     """
     from common import constants
+    from core.order_request import Side
     history_upto_candle = calculate_atr(history_upto_candle, trade_config.get('atr_multiplier',10))
     atr_value = history_upto_candle['atr'].iloc[-1].round(2)
     candle_range = round(candle[constants.COLUMN_HIGH] - candle[constants.COLUMN_LOW], 2)
@@ -367,16 +372,18 @@ def calculate_trade(candle, history_upto_candle, strike_symbol, trade_config, si
         trade_config["large_target_buffer"],
     )
 
-    if side == 1:
+    if side == Side.BUY:
         entry = candle[constants.COLUMN_HIGH] + entry_buffer
         sl = candle[constants.COLUMN_LOW] - stop_loss_buffer
         target = entry + ((atr_value * trade_config['atr_target_multiplier']) - target_buffer)
-    elif side == -1:
+        side_val = 1
+    elif side == Side.SELL:
         entry = candle[constants.COLUMN_LOW] - entry_buffer
         sl = candle[constants.COLUMN_HIGH] + stop_loss_buffer
         target = entry - ((atr_value * trade_config['atr_target_multiplier']) - target_buffer)
+        side_val = -1
     else:
-        raise ValueError("Invalid side. Use 1 for buy or -1 for sell.")
+        raise ValueError("Invalid side. Use Side.BUY or Side.SELL.")
 
     sl = round(round(sl / 0.05) * 0.05, 2)
     target = round(round(target / 0.05) * 0.05, 2)
@@ -396,9 +403,100 @@ def calculate_trade(candle, history_upto_candle, strike_symbol, trade_config, si
         constants.TRADE_KEY_STATUS: constants.TRADE_STATUS_AWAITING_ENTRY,
         constants.TRADE_KEY_REASON: None,
         constants.TRADE_KEY_ATR: atr_value,
-        constants.TRADE_KEY_SIGNAL_DIRECTION: constants.TRADE_DIRECTION_BUY
-        if side == 1 else constants.TRADE_DIRECTION_SELL,
+        constants.TRADE_KEY_SIGNAL_DIRECTION: constants.TRADE_DIRECTION_BUY if side == Side.BUY else constants.TRADE_DIRECTION_SELL,
         constants.TRADE_KEY_LOT_QTY: lot_qty,
-        constants.TRADE_KEY_SIDE: side
+        constants.TRADE_KEY_SIDE: side  # Store as Side enum, not int
     }
     return trade
+
+def get_trade_config_value(trade_config, key, default=None):
+    # Handles dict, tuple/list, or SQLAlchemy Row
+    if isinstance(trade_config, dict):
+        if key in trade_config:
+            return trade_config.get(key, default)
+        # If not found, check for nested 'trade' dict
+        if 'trade' in trade_config and isinstance(trade_config['trade'], dict):
+            return trade_config['trade'].get(key, default)
+        return default
+    if hasattr(trade_config, key):
+        return getattr(trade_config, key, default)
+    if hasattr(trade_config, 'trade') and isinstance(getattr(trade_config, 'trade'), dict):
+        # SQLAlchemy row or object with .trade dict
+        return getattr(trade_config, 'trade').get(key, default)
+    if isinstance(trade_config, (tuple, list)):
+        # Try to get from a dict in the tuple (common in ORM row)
+        for item in trade_config:
+            if isinstance(item, dict):
+                if key in item:
+                    return item[key]
+                if 'trade' in item and isinstance(item['trade'], dict) and key in item['trade']:
+                    return item['trade'][key]
+        return default
+    return default
+
+async def process_trade(order_manager, trade, trade_config, strategy_config_id, broker_id):
+    """
+    Process the trade: Place the order using OrderManager based on trade details and config.
+    Only perform trade calculations here; broker-specific product/order type logic is handled in OrderManager.
+    :param order_manager: OrderManager instance.
+    :param trade: Trade dictionary containing trade details.
+    :param trade_config: Trade configuration dictionary, tuple, or ORM row.
+    :param strategy_config_id: Strategy config ID for DB tracking.
+    :param broker_id: Broker ID for DB tracking.
+    :return: Result dict for the placed order or error info.
+    """
+    from common import constants
+    try:
+        symbol = trade[constants.TRADE_KEY_SYMBOL]
+        is_call_option = constants.OPTION_TYPE_CALL in symbol
+        lot_qty = get_trade_config_value(trade_config, "ce_lot_qty") if is_call_option else get_trade_config_value(trade_config, "pe_lot_qty")
+        lot_size = get_trade_config_value(trade_config, "lot_size", 1)
+        if lot_qty is None or lot_size is None:
+            logger.error(f"[process_trade] Missing lot_qty or lot_size in trade_config: ce_lot_qty={get_trade_config_value(trade_config, 'ce_lot_qty')}, pe_lot_qty={get_trade_config_value(trade_config, 'pe_lot_qty')}, lot_size={lot_size}")
+            return {"status": "error", "error": "Missing lot_qty or lot_size in trade_config"}
+        total_qty = lot_qty * lot_size
+        entry_price = round(round(trade[constants.TRADE_KEY_ENTRY_PRICE] / 0.05) * 0.05, 2)
+        sl_price = round(round(trade[constants.TRADE_KEY_STOP_LOSS] / 0.05) * 0.05, 2)
+        target_price = round(round(trade[constants.TRADE_KEY_TARGET_PRICE] / 0.05) * 0.05, 2)
+        trigger_price_diff = get_trade_config_value(trade_config, 'trigger_price_diff', 0)
+        stopPrice = (entry_price - trigger_price_diff) if trade["side"] == 1 else (entry_price + trigger_price_diff)
+        stopPrice = round(round(stopPrice / 0.05) * 0.05, 2)
+        # Map side and order_type to enums (always use Side enum, never broker-specific int)
+        side_enum = Side.BUY if trade['side'] == 1 else Side.SELL
+        order_type_enum = OrderType.LIMIT  # Default to LIMIT, can be made dynamic if needed
+        order_request = OrderRequest(
+            symbol=symbol,
+            quantity=total_qty,
+            side=side_enum,  # Always pass Side enum, never int
+            order_type=order_type_enum,
+            price=entry_price,
+            trigger_price=stopPrice,
+            product_type=get_trade_config_value(trade_config, 'product_type', None),
+            tag=str(strategy_config_id),
+            validity="DAY",
+            extra={
+                "stopLoss": sl_price,
+                "takeProfit": abs(target_price)
+            }
+        )
+        logger.info(f"[process_trade] Placing order for {symbol} | qty: {total_qty} | entry: {entry_price} | sl: {sl_price} | target: {target_price}")
+        # Place order via OrderManager (OrderManager will set productType/type based on broker)
+        result = await order_manager.place_order(
+            config=trade_config,
+            order_payload=order_request,
+            strategy_name=None  # Optionally pass strategy name if needed
+        )
+        if result.get('status') == 'success':
+            logger.info(f"[process_trade] Order placed successfully: {result}")
+        else:
+            logger.warning(f"[process_trade] Order placement failed: {result}")
+        return result
+    except Exception as error:
+        logger.error(f"Error processing trade: {error}", exc_info=True)
+        return {"status": "error", "error": str(error)}
+
+async def get_broker_symbol(broker_manager, broker_name, symbol, instrument_type=None):
+    """
+    Utility to get the correct symbol/token for a broker using BrokerManager.get_symbol_info.
+    """
+    return await broker_manager.get_symbol_info(broker_name, symbol, instrument_type)

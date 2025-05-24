@@ -47,6 +47,30 @@ from common.broker_utils import shutdown_gracefully, get_broker_credentials, ups
 from common.logger import get_logger
 from core.time_utils import get_ist_datetime, localize_to_ist
 from pyvirtualdisplay import Display
+from core.order_request import OrderRequest, Side, OrderType
+
+# === Broker-specific API code mapping ===
+# These mappings translate generic enums to Fyers API codes. Do not move these to order_defaults.py.
+SIDE_MAP = {
+    Side.BUY: 1,   # Fyers API: 1 for BUY
+    Side.SELL: -1, # Fyers API: -1 for SELL
+}
+
+ORDER_TYPE_MAP = {
+    OrderType.LIMIT: 1,   # Fyers API: 1 = Limit Order
+    OrderType.MARKET: 2,  # Fyers API: 2 = Market Order
+    OrderType.SL: 3,      # Fyers API: 3 = Stop Order (SL-M)
+    # Add more mappings as needed
+}
+
+PRODUCT_TYPE_MAP = {
+    "CNC": "CNC",
+    "INTRADAY": "INTRADAY",
+    "MARGIN": "MARGIN",
+    "CO": "CO",
+    "BO": "BO",
+    "MTF": "MTF",
+}
 
 nest_asyncio.apply()
 
@@ -78,6 +102,20 @@ rate_limiter_per_second = Limiter(9 / 1)  # 10 requests per second
 rate_limiter_per_minute = Limiter(190 / 60)
 
 
+class OrderRequest:
+    def __init__(self, symbol: str, quantity: int, side: str, order_type: str, price: float = None, trigger_price: float = None, product_type: str = None, tag: str = None, validity: str = None, **kwargs):
+        self.symbol = symbol
+        self.quantity = quantity
+        self.side = side  # "BUY" or "SELL"
+        self.order_type = order_type  # "MARKET", "LIMIT", "SL", etc.
+        self.price = price
+        self.trigger_price = trigger_price
+        self.product_type = product_type
+        self.tag = tag
+        self.validity = validity
+        self.extra = kwargs
+
+
 class FyersWrapper(BrokerInterface):
     """
     FyersWrapper
@@ -94,10 +132,12 @@ class FyersWrapper(BrokerInterface):
     - Initialize the class with necessary configurations (e.g., API credentials).
     - Use the provided methods to perform trading operations.
     """
-    fyers = None
-    is_async = True  # Default to asynchronous mode
-    token = None
-    appId = None
+
+    def __init__(self):
+        self.fyers = None
+        self.is_async = True  # Default to asynchronous mode
+        self.token = None
+        self.appId = None
 
     @staticmethod
     def _make_margin_request(data):
@@ -155,26 +195,62 @@ class FyersWrapper(BrokerInterface):
         else:
             return FyersWrapper.check_margin_sync(data)
 
-    @staticmethod
-    async def setup_auth(is_async=True):
+    async def login(self):
+        """
+        Authenticate with Fyers API using stored credentials.
+        This method conforms to the BrokerInterface.
+        Returns:
+            bool: True if authentication was successful, False otherwise
+        """
+        try:
+            full_config = await get_broker_credentials("fyers")
+            credentials = None
+            if isinstance(full_config, dict):
+                credentials = full_config.get("credentials")
+            if not credentials or not isinstance(credentials, dict):
+                logger.error("No Fyers credentials found in database or credentials are invalid")
+                return False
+            fyers_creds = credentials
+            access_token = fyers_creds.get("access_token")
+            generated_on_str = fyers_creds.get("generated_on")
+            if access_token and generated_on_str and can_reuse_token(generated_on_str):
+                try:
+                    self.token = access_token
+                    self.appId = fyers_creds.get("api_key")
+                    self.fyers = fyersModel.FyersModel(
+                        client_id=fyers_creds.get("api_key"),
+                        is_async=self.is_async,
+                        token=access_token,
+                        log_path=constants.FYER_LOG_DIR
+                    )
+                    logger.debug("Reusing existing Fyers access token (generated today after 6AM or before 6AM and still before 6AM)")
+                    return True
+                except Exception as e:
+                    logger.warning(f"Token reuse check failed: {e}, will generate new token")
+            logger.debug("Obtaining new Fyers access token")
+            result = await self.setup_auth()
+            return result is not None
+        except Exception as e:
+            logger.error(f"Fyers authentication failed: {e}", exc_info=True)
+            return False
+
+    async def setup_auth(self, is_async=True):
         """
         Authenticate and initialize the Fyers API.
         By default, operates in async mode (is_async=True).
         Set is_async=False to use synchronous mode.
         """
-        FyersWrapper.is_async = is_async
-        if FyersWrapper.is_async:
-            return await FyersWrapper._setup_auth_async()
+        self.is_async = is_async
+        if self.is_async:
+            return await self._setup_auth_async()
         else:
-            return FyersWrapper._setup_auth_sync()  # No `await` needed
+            return self._setup_auth_sync()  # No `await` needed
 
-    @staticmethod
-    async def _setup_auth_async():
+    async def _setup_auth_async(self):
         """Authenticate asynchronously."""
-        return FyersWrapper._setup_auth_sync()
+        return self._setup_auth_sync()
 
-    @staticmethod
-    def _setup_auth_sync():
+    def _setup_auth_sync(self):
         """Authenticate synchronously."""
         # Fetch full broker config and extract credentials only
         full_config = asyncio.run(get_broker_credentials("fyers"))
@@ -192,14 +268,14 @@ class FyersWrapper(BrokerInterface):
             can_reuse_token(credentials["generated_on"])
         ):
             try:
-                FyersWrapper.fyers = fyersModel.FyersModel(
+                self.fyers = fyersModel.FyersModel(
                     token=credentials["access_token"],
-                    is_async=FyersWrapper.is_async,
+                    is_async=self.is_async,
                     client_id=credentials["api_key"],
                     log_path=constants.FYER_LOG_DIR,
                 )
-                FyersWrapper.token = credentials["access_token"]
-                FyersWrapper.appId = credentials["api_key"]
+                self.token = credentials["access_token"]
+                self.appId = credentials["api_key"]
                 logger.debug("Successfully authenticated using existing token.")
                 return True
             except Exception as e:
@@ -216,7 +292,7 @@ class FyersWrapper(BrokerInterface):
         )
 
         auth_url = session.generate_authcode()
-        auth_code = FyersWrapper.authenticate(
+        auth_code = self.authenticate(
             url=auth_url,
             mobile_number=credentials["client_id"], # Assuming client_id is the mobile number
             password_2fa=credentials["pin"], # Assuming pin is the 2FA password
@@ -234,119 +310,65 @@ class FyersWrapper(BrokerInterface):
         full_config["credentials"] = credentials
         asyncio.run(upsert_broker_credentials("fyers", full_config))
 
-        FyersWrapper.fyers = fyersModel.FyersModel(
+        self.fyers = fyersModel.FyersModel(
             token=credentials["access_token"],
-            is_async=FyersWrapper.is_async,
+            is_async=self.is_async,
             client_id=credentials["api_key"],
             log_path=constants.FYER_LOG_DIR,
         )
-        FyersWrapper.token = credentials["access_token"]
-        FyersWrapper.appId = credentials["api_key"]
+        self.token = credentials["access_token"]
+        self.appId = credentials["api_key"]
         logger.debug(f"Successfully authenticated with new token.")
         return True
 
-    @staticmethod
-    async def login():
-        """
-        Authenticate with Fyers API using stored credentials.
-        This method conforms to the BrokerInterface.
-        Returns:
-            bool: True if authentication was successful, False otherwise
-        """
-        try:
-            # Fetch full broker config and extract only the credentials field
-            full_config = await get_broker_credentials("fyers")
-            credentials = None
-            if isinstance(full_config, dict):
-                credentials = full_config.get("credentials")
-            if not credentials or not isinstance(credentials, dict):
-                logger.error("No Fyers credentials found in database or credentials are invalid")
-                return False
-
-            # Use only the credentials dict from now on
-            fyers_creds = credentials
-
-            # Check if we already have a valid access token based on generation time
-            access_token = fyers_creds.get("access_token")
-            generated_on_str = fyers_creds.get("generated_on")
-            if access_token and generated_on_str and can_reuse_token(generated_on_str):
-                try:
-                    FyersWrapper.token = access_token
-                    FyersWrapper.appId = fyers_creds.get("api_key")
-                    FyersWrapper.fyers = fyersModel.FyersModel(
-                        client_id=fyers_creds.get("api_key"),
-                        is_async=FyersWrapper.is_async,
-                        token=access_token,
-                        log_path=constants.FYER_LOG_DIR
-                    )
-                    logger.debug("Reusing existing Fyers access token (generated today after 6AM or before 6AM and still before 6AM)")
-                    return True
-                except Exception as e:
-                    logger.warning(f"Token reuse check failed: {e}, will generate new token")
-
-            # Use the existing setup_auth method for now
-            # This maintains backward compatibility while still using the new interface
-            logger.debug("Obtaining new Fyers access token")
-            result = await FyersWrapper.setup_auth()
-            return result is not None  # Return True if we got a result
-        except Exception as e:
-            logger.error(f"Fyers authentication failed: {e}", exc_info=True)
-            return False
-
-    @staticmethod
     async def _wrap_async(callable_func, *args, **kwargs):
         """Wrapper for calling sync methods in async mode."""
         return await asyncio.to_thread(callable_func, *args, **kwargs)
 
-    @staticmethod
-    async def get_balance_async():
+    async def get_balance_async(self):
         """Fetch account balance asynchronously."""
         try:
-            response = await FyersWrapper.fyers.funds()  # Ensure it's awaited here
+            response = await self.fyers.funds()  # Ensure it's awaited here
             return response
         except Exception as e:
             logger.error(f"Failed to fetch balance asynchronously: {e}")
             return None
 
-    def get_balance_sync():
+    def get_balance_sync(self):
         """Fetch account balance synchronously."""
         try:
-            response = FyersWrapper.fyers.funds()
+            response = self.fyers.funds()
             return response
         except Exception as e:
             logger.error(f"Failed to fetch balance synchronously: {e}")
             return None
 
-    @staticmethod
-    async def get_balance():
+    async def get_balance(self):
         """Dynamic balance method based on is_async flag."""
-        if FyersWrapper.is_async:
-            return await FyersWrapper.get_balance_async()  # Return coroutine for await
+        if self.is_async:
+            return await self.get_balance_async()  # Return coroutine for await
         else:
-            return FyersWrapper.get_balance_sync()
+            return self.get_balance_sync()
 
-    @staticmethod
-    async def get_profile_async():
+    async def get_profile_async(self):
         """Fetch account balance asynchronously."""
         try:
-            response = await FyersWrapper.fyers.get_profile()  # Ensure it's awaited here
+            response = await self.fyers.get_profile()  # Ensure it's awaited here
             return response
         except Exception as e:
             logger.error(f"Failed to fetch balance asynchronously: {e}")
             return None
 
-    @staticmethod
-    def get_profile_sync():
+    def get_profile_sync(self):
         """Fetch account balance synchronously."""
         try:
-            response = FyersWrapper.fyers.get_profile()
+            response = self.fyers.get_profile()
             return response
         except Exception as e:
             logger.error(f"Failed to fetch balance synchronously: {e}")
             return None
 
-    @staticmethod
-    async def get_profile():
+    async def get_profile(self):
         """
         Get user profile information from the broker.
         This method implements the BrokerInterface.
@@ -355,15 +377,15 @@ class FyersWrapper(BrokerInterface):
             dict: Profile data or empty dict if unsuccessful
         """
         try:
-            if not FyersWrapper.fyers:
+            if not self.fyers:
                 logger.error("Fyers client not initialized, please call login() first")
                 return {}
 
             # Dispatch to sync or async based on mode
-            if FyersWrapper.is_async:
-                profile_data = await FyersWrapper.get_profile_async()
+            if self.is_async:
+                profile_data = await self.get_profile_async()
             else:
-                profile_data = FyersWrapper.get_profile_sync()
+                profile_data = self.get_profile_sync()
 
             if profile_data and profile_data.get("code") == 200 and profile_data.get("s") == "ok":
                 return profile_data.get("data", {})
@@ -374,8 +396,7 @@ class FyersWrapper(BrokerInterface):
             logger.error(f"Error getting profile: {e}", exc_info=True)
             return {}
 
-    @staticmethod
-    async def get_option_chain_async(symbol, strike_count):
+    async def get_option_chain_async(self, symbol, strike_count):
         """Fetch the option chain asynchronously."""
         try:
             data = {
@@ -383,14 +404,13 @@ class FyersWrapper(BrokerInterface):
                 "strikecount": strike_count,
                 "timestamp": "",
             }
-            response = await FyersWrapper.fyers.optionchain(data)  # Directly await here
+            response = await self.fyers.optionchain(data)
             return response
         except Exception as e:
             logger.error(f"Failed to fetch option chain for {symbol}: {e}")
             return None
 
-    @staticmethod
-    def get_option_chain_sync(symbol, strike_count=20):
+    def get_option_chain_sync(self, symbol, strike_count=20):
         """
         Fetch the option chain synchronously.
 
@@ -408,7 +428,7 @@ class FyersWrapper(BrokerInterface):
             logger.debug(f"Fetching option chain for {symbol} with strike count {strike_count}")
 
             # Call the sync method and get the response
-            response = FyersWrapper.fyers.optionchain(data)
+            response = self.fyers.optionchain(data)
 
             # Validate response
             if response.get("code") != 200 or response.get("s") != "ok":
@@ -422,16 +442,14 @@ class FyersWrapper(BrokerInterface):
             logger.error(f"Failed to fetch option chain for {symbol}: {e}")
             return None
 
-    @staticmethod
-    def get_option_chain(symbol, strike_count):
+    async def get_option_chain(self, symbol, strike_count):
         """Fetch the option chain dynamically based on async/sync mode."""
-        if FyersWrapper.is_async:
-            return FyersWrapper.get_option_chain_async(symbol, strike_count)
+        if self.is_async:
+            return await self.get_option_chain_async(symbol, strike_count)
         else:
-            return FyersWrapper.get_option_chain_sync(symbol, strike_count)
+            return self.get_option_chain_sync(symbol, strike_count)
 
-    @staticmethod
-    async def get_history_async(symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
+    async def get_history_async(self, symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
         """
         Fetch historical OHLC data asynchronously.
 
@@ -467,7 +485,7 @@ class FyersWrapper(BrokerInterface):
             logger.debug(
                 f"Fetching async history for {formatted_symbol} from {from_date} to {to_date}... ")
 
-            response = await FyersWrapper.fyers.history(params)
+            response = await self.fyers.history(params)
 
             if isinstance(response, dict) and response.get("code") == 200 and response.get("s") == "ok":
                 candles = response.get("candles", [])
@@ -502,8 +520,7 @@ class FyersWrapper(BrokerInterface):
 
         return None
 
-    @staticmethod
-    def get_history_sync(symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
+    def get_history_sync(self, symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
         """
         Fetch historical OHLC data synchronously.
 
@@ -531,7 +548,7 @@ class FyersWrapper(BrokerInterface):
 
             logger.debug(
                 f"Fetching sync history for {symbol} from {from_date} to {to_date}... ")
-            response = FyersWrapper.fyers.history(params)
+            response = self.fyers.history(params)
 
             if response.get("code") == 200 and response.get("s") == "ok":
                 candles = response.get("candles", [])
@@ -555,25 +572,33 @@ class FyersWrapper(BrokerInterface):
 
         return None
 
-    @staticmethod
-    async def get_history(symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
+    async def get_history(self, symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
         """
         Fetch historical OHLC data dynamically based on "is_async" flag.
 
         :param symbol: Trading symbol.
         :param from_date: Start timestamp (epoch seconds or date).
         :param to_date: End timestamp (epoch seconds or date).
-        :param ohlc_interval: OHLC interval (e.g., 1 min, 5 min).
+        :param ohlc_interval: OHLC interval (e.g., 1 min, 5 min, or 'D' for day).
         :param ins_type: Instrument type.
         :return: DataFrame or None.
         """
-        if FyersWrapper.is_async:
-            return await FyersWrapper.get_history_async(symbol, from_date, to_date, ohlc_interval, ins_type)
+        # Map int/str intervals to Fyers format
+        interval_map = {
+            1: "1", 2: "2", 3: "3", 5: "5", 10: "10", 15: "15", 20: "20", 30: "30", 60: "60",
+            120: "120", 240: "240", "day": "D", "d": "D", "1d": "D", "D": "D", "1D": "D"
+        }
+        interval = ohlc_interval
+        if isinstance(ohlc_interval, int):
+            interval = interval_map.get(ohlc_interval, str(ohlc_interval))
+        elif isinstance(ohlc_interval, str):
+            interval = interval_map.get(ohlc_interval.strip().lower(), ohlc_interval)
+        if self.is_async:
+            return await self.get_history_async(symbol, from_date, to_date, interval, ins_type)
         else:
-            return FyersWrapper.get_history_sync(symbol, from_date, to_date, ohlc_interval, ins_type)
+            return self.get_history_sync(symbol, from_date, to_date, interval, ins_type)
 
-    @staticmethod
-    async def place_order_async(**order_params):
+    async def place_order_async(self, order_payload: dict):
         """
         Place an order in async mode.
 
@@ -581,14 +606,13 @@ class FyersWrapper(BrokerInterface):
         :return: Response from the Fyers API.
         """
         try:
-            response = await FyersWrapper.fyers.place_order(order_params)
+            response = await self.fyers.place_order(order_payload)
             # logger.debug(response)
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to place order (async): {e}")
 
-    @staticmethod
-    def place_order_sync(**order_params):
+    def place_order_sync(self, order_payload: dict):
         """
         Place an order in sync mode.
 
@@ -596,23 +620,40 @@ class FyersWrapper(BrokerInterface):
         :return: Response from the Fyers API.
         """
         try:
-            response = FyersWrapper.fyers.place_order(order_params)
+            response = self.fyers.place_order(order_payload)
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to place order (sync): {e}")
 
-    @staticmethod
-    async def place_order(**order_params):
+    async def place_order(self, order_request: OrderRequest) -> dict:
         """
-        Common method to place an order dynamically based on the mode (sync/async).
-
-        :param order_params: Parameters for the order (symbol, qty, type, etc.).
-        :return: Response from the Fyers API.
+        Place an order with Fyers using a generic OrderRequest object.
         """
-        if FyersWrapper.is_async:
-            return await FyersWrapper.place_order_async(**order_params)
-        else:
-            return FyersWrapper.place_order_sync(**order_params)
+        fyers_payload = {
+            "symbol":      order_request.symbol,
+            "qty":         order_request.quantity,
+            "type":        ORDER_TYPE_MAP[order_request.order_type],
+            "side":        SIDE_MAP[order_request.side],
+            "productType": PRODUCT_TYPE_MAP.get(order_request.product_type, "INTRADAY"),
+            "limitPrice":  float(order_request.price) if order_request.price is not None else 0,
+            "stopPrice":   float(order_request.trigger_price) if order_request.trigger_price is not None else 0,
+            "disclosedQty": order_request.extra.get("disclosedQty", 0),
+            "validity":     order_request.validity or "DAY",
+            "offlineOrder": order_request.extra.get("offlineOrder", False),
+            "stopLoss":     order_request.extra.get("stopLoss", 0),
+            "takeProfit":   order_request.extra.get("takeProfit", 0),
+            "orderTag":     order_request.tag or ""
+        }
+        # Remove any None values
+        fyers_payload = {k: v for k, v in fyers_payload.items() if v is not None}
+        try:
+            print(fyers_payload)
+            response = await self.fyers.place_order(fyers_payload)
+            logger.info(f"Fyers order placed: {response}")
+            return response
+        except Exception as e:
+            logger.error(f"Fyers order placement failed: {e}")
+            return {"error": str(e)}
 
     @staticmethod
     async def split_and_place_order(total_qty, max_nse_qty, trigger_price_diff, **order_params):
@@ -755,6 +796,28 @@ class FyersWrapper(BrokerInterface):
             "sl_responses": sl_responses,
             "target_responses": target_responses
         }
+
+    async def get_ltp(self, symbol):
+        raise NotImplementedError("get_ltp is not implemented for FyersWrapper yet.")
+
+    async def get_quote(self, symbol):
+        raise NotImplementedError("get_quote is not implemented for FyersWrapper yet.")
+
+    async def get_strike_list(self, symbol, max_strikes=40):
+        """
+        Fetch the list of option strike symbols for the given symbol using the option chain API.
+        Returns a list of strike symbols (filtered for calls and puts, excluding INDEX).
+        """
+        option_chain_response = await self.get_option_chain(symbol, max_strikes)
+        if not option_chain_response or not option_chain_response.get('data') or not option_chain_response['data'].get('optionsChain'):
+            return []
+        import pandas as pd
+        from common import constants
+        option_chain_df = pd.DataFrame(option_chain_response['data']['optionsChain'])
+        strike_symbols = option_chain_df[constants.COLUMN_SYMBOL].unique()
+        strike_symbols = [s for s in strike_symbols if (s.endswith(constants.OPTION_TYPE_CALL)
+                                                        or s.endswith(constants.OPTION_TYPE_PUT)) and "INDEX" not in s]
+        return strike_symbols
 
     @staticmethod
     async def get_order_details_async(order_id=None):
@@ -926,45 +989,42 @@ class FyersWrapper(BrokerInterface):
         else:
             return FyersWrapper.exit_positions_sync(data)
 
-    @staticmethod
-    async def get_positions_async():
+    async def get_positions_async(self):
         """
         Fetch the positions asynchronously.
 
         :return: The response JSON contains positions data.
         """
         try:
-            response = await FyersWrapper.fyers.positions()
+            response = await self.fyers.positions()
             if response.get("code") != 200 or response.get("s") != "ok":
                 raise RuntimeError(f"Error fetching positions: {response.get('message', 'Unknown error')}")
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to fetch positions (async): {e}")
 
-    @staticmethod
-    def get_positions_sync():
+    def get_positions_sync(self):
         """
         Fetch the positions synchronously.
 
         :return: The response JSON contains positions data.
         """
         try:
-            response = FyersWrapper.fyers.positions()
+            response = self.fyers.positions()
             if response.get("code") != 200 or response.get("s") != "ok":
                 raise RuntimeError(f"Error fetching positions: {response.get('message', 'Unknown error')}")
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to fetch positions (sync): {e}")
 
-    @staticmethod
-    async def get_positions():
+    async def get_positions(self):
         """
         Dynamically fetch positions based on the mode (sync/async).
 
         :return: The response JSON contains positions data.
         """
-        if FyersWrapper.is_async:
-            return await FyersWrapper.get_positions_async()
+        if self.is_async:
+            return await self.get_positions_async()
 
         else:
             return FyersWrapper.get_positions_sync()

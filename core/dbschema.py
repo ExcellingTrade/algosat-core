@@ -122,3 +122,27 @@ Index(
     unique=True,
     postgresql_where=text("is_data_provider = true"),
 )
+
+orders = Table(
+    "orders", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("strategy_config_id", Integer, ForeignKey("strategy_configs.id"), nullable=False, index=True),
+    Column("broker_id", Integer, ForeignKey("broker_credentials.id"), nullable=False, index=True),
+    Column("symbol", String, nullable=False, index=True),
+    Column("candle_range",  String, nullable=True),
+    Column("entry_price",  String, nullable=True),
+    Column("stop_loss",  String, nullable=True),
+    Column("target_price",  String, nullable=True),
+    Column("signal_time", DateTime(timezone=True), nullable=True),
+    Column("entry_time", DateTime(timezone=True), nullable=True),
+    Column("exit_time", DateTime(timezone=True), nullable=True),
+    Column("exit_price", String, nullable=True),
+    Column("status", String, nullable=False, index=True),
+    Column("reason", String, nullable=True),
+    Column("atr", String, nullable=True),
+    Column("supertrend_signal", String, nullable=True),
+    Column("lot_qty", Integer, nullable=True),
+    Column("side", Integer, nullable=True),
+    Column("order_ids", JSON, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("order_messages", JSON, nullable=False, server_default=text("'{}'::jsonb")),
+)

@@ -25,9 +25,9 @@ class StrategyBase(ABC):
         self.indicators = getattr(config, "indicators", None) or config.get("indicators", {})
         # Compute symbol from config fields
         trade_symbol = self.trade.get("symbol") or getattr(config, "symbol", None) or config.get("symbol")
-        self.symbol = None
-        if self.exchange and trade_symbol and self.instrument:
-            self.symbol = f"{self.exchange}:{trade_symbol}-{self.instrument}"
+        self.trade_symbol = trade_symbol
+        self.symbol = trade_symbol  # For backward compatibility, but do not format here
+        # Do not format symbol here; let BrokerManager/DataManager handle it
         # Timeframe and poll_interval can be in trade dict
         self.timeframe: str = self.trade.get("timeframe", "1m")
         self.poll_interval: int = self.trade.get("poll_interval", 60)

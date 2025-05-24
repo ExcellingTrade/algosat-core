@@ -1,18 +1,48 @@
 # core/broker_manager.py
 
 import asyncio
-from typing import Dict, Optional, List
+from typing import Dict, Optional, List, Callable
 from brokers.factory import get_broker
 from common.broker_utils import get_broker_credentials, upsert_broker_credentials
 from common.default_broker_configs import DEFAULT_BROKER_CONFIGS
 from common.logger import get_logger
 from core.db import get_trade_enabled_brokers as db_get_trade_enabled_brokers
+from core.order_request import OrderRequest
+from core.signal import TradeSignal, SignalType
+from core.order_defaults import ORDER_DEFAULTS
 
 logger = get_logger("BrokerManager")
+
+def is_retryable_exception(exc):
+    # Customize this as needed: don't retry on 4xx errors (e.g., BadRequest), retry on network/server errors
+    if hasattr(exc, 'status_code'):
+        # Example: HTTPException with status_code
+        return not (400 <= exc.status_code < 500)
+    if isinstance(exc, ValueError):
+        # ValueError often means bad input, don't retry
+        return False
+    # Add more logic as needed
+    return True
+
+async def async_retry(func: Callable, *args, retries=3, delay=1, **kwargs):
+    last_exc = None
+    for attempt in range(retries):
+        try:
+            return await func(*args, **kwargs)
+        except Exception as exc:
+            last_exc = exc
+            if not is_retryable_exception(exc):
+                raise
+            if attempt < retries - 1:
+                logger.warning(f"Retryable error in {func.__name__}: {exc}. Retrying ({attempt+1}/{retries})...")
+                await asyncio.sleep(delay)
+    raise last_exc
 
 class BrokerManager:
     def __init__(self):
         self.brokers: Dict[str, object] = {}
+        # --- Symbol/Instrument resolution for all brokers ---
+        self._instrument_cache = {}
 
     async def _discover_enabled_brokers(self) -> List[str]:
         # Discover all brokers that have credentials or default configs
@@ -59,13 +89,18 @@ class BrokerManager:
             return True
         return False
 
-    async def _authenticate_broker(self, broker_key: str) -> bool:
+    async def _authenticate_broker(self, broker_key: str, retries=3, delay=1) -> bool:
         broker = get_broker(broker_key)
         if not broker:
             logger.error(f"🔴 Could not instantiate broker: {broker_key}")
             self.brokers[broker_key] = None
             return False
-        success = await broker.login()
+        try:
+            success = await async_retry(broker.login, retries=retries, delay=delay)
+        except Exception as e:
+            logger.error(f"🔴 Broker login failed for {broker_key}: {e}")
+            self.brokers[broker_key] = None
+            return False
         self.brokers[broker_key] = broker if success else None
         if success:
             logger.info(f"🟢 Authentication successful for {broker_key}")
@@ -81,14 +116,18 @@ class BrokerManager:
             await self._authenticate_broker(broker_key)
         logger.info("🟢 BrokerManager setup complete.")
 
-    async def reauthenticate_broker(self, broker_key: str) -> bool:
+    async def reauthenticate_broker(self, broker_key: str, retries=3, delay=1) -> bool:
         broker = self.brokers.get(broker_key)
         if not broker:
             logger.info(f"🔄 Broker {broker_key} not initialized. Initializing now...")
             # Attempt to authenticate broker if not initialized
-            return await self._authenticate_broker(broker_key)
+            return await self._authenticate_broker(broker_key, retries=retries, delay=delay)
         logger.info(f"🔄 Reauthenticating broker: {broker_key}")
-        success = await broker.login()
+        try:
+            success = await async_retry(broker.login, retries=retries, delay=delay)
+        except Exception as e:
+            logger.error(f"Reauthentication failed for {broker_key}: {e}")
+            return False
         if success:
             logger.info(f"🟢 Reauthentication successful for {broker_key}")
         else:
@@ -104,35 +143,128 @@ class BrokerManager:
         """
         Returns the broker instance to be used for fetching data.
         If broker_name is given, return that broker if available and valid.
-        Otherwise, return the first authenticated broker.
+        Otherwise, return the broker with is_data_provider enabled in the DB.
         """
         if broker_name and broker_name in self.brokers and self.brokers[broker_name]:
             return self.brokers[broker_name]
-        # Return the first valid broker, if any
-        for broker in self.brokers.values():
-            if broker:
-                return broker
+        # Find the broker with is_data_provider enabled in the DB
+        from core.db import get_data_enabled_broker, AsyncSessionLocal
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            async def _get():
+                async with AsyncSessionLocal() as session:
+                    return await get_data_enabled_broker(session)
+            broker_row = loop.run_until_complete(_get())
+            if broker_row:
+                bname = broker_row.get("broker_name")
+                if bname in self.brokers and self.brokers[bname]:
+                    return self.brokers[bname]
+        except Exception as e:
+            logger.error(f"Error fetching data provider broker from DB: {e}")
         return None
 
-    async def place_order(self, order_payload):
+    async def get_all_trade_enabled_brokers(self) -> Dict[str, object]:
         """
-        Place order in all authenticated brokers that implement place_order.
+        Returns a dict of broker_name -> broker_obj (can be None if not authenticated) for all brokers
+        where trade_execution_enabled is True in the DB, regardless of authentication status.
+        """
+        enabled_broker_names = await db_get_trade_enabled_brokers()
+        return {name: self.brokers.get(name) for name in enabled_broker_names}
+
+    async def place_order(self, order_payload, strategy_name=None, retries=3, delay=1):
+        """
+        Place order in all trade-enabled brokers (even if not authenticated), with retry on retryable errors.
+        Accepts an OrderRequest object and passes it to each broker's place_order.
         Returns a dict of broker_name -> order result.
         """
+        if not isinstance(order_payload, OrderRequest):
+            raise ValueError("order_payload must be an OrderRequest instance")
         results = {}
-        for broker_name, broker in self.brokers.items():
+        all_brokers = await self.get_all_trade_enabled_brokers()
+        for broker_name, broker in all_brokers.items():
             if not broker:
-                results[broker_name] = {"status": False, "message": "Broker not initialized"}
+                results[broker_name] = {"status": False, "message": "Broker not initialized or not authenticated"}
                 continue
             if not hasattr(broker, "place_order") or not callable(getattr(broker, "place_order", None)):
                 results[broker_name] = {"status": False, "message": "place_order not implemented"}
                 continue
             try:
-                result = await broker.place_order(order_payload)
+                result = await async_retry(broker.place_order, order_payload, retries=retries, delay=delay)
                 results[broker_name] = result
             except Exception as e:
                 results[broker_name] = {"status": False, "message": str(e)}
         return results
+
+    async def get_profile(self, broker_name, retries=3, delay=1):
+        broker = self.brokers.get(broker_name)
+        if not broker or not hasattr(broker, "get_profile"):
+            return None
+        try:
+            return await async_retry(broker.get_profile, retries=retries, delay=delay)
+        except Exception as e:
+            logger.error(f"get_profile failed for {broker_name}: {e}")
+            return None
+
+    async def get_positions(self, broker_name, retries=3, delay=1):
+        broker = self.brokers.get(broker_name)
+        if not broker or not hasattr(broker, "get_positions"):
+            return None
+        try:
+            return await async_retry(broker.get_positions, retries=retries, delay=delay)
+        except Exception as e:
+            logger.error(f"get_positions failed for {broker_name}: {e}")
+            return None
+
+    async def get_holdings(self, broker_name, retries=3, delay=1):
+        broker = self.brokers.get(broker_name)
+        if not broker or not hasattr(broker, "get_holdings"):
+            return None
+        try:
+            return await async_retry(broker.get_holdings, retries=retries, delay=delay)
+        except Exception as e:
+            logger.error(f"get_holdings failed for {broker_name}: {e}")
+            return None
+
+    async def get_funds(self, broker_name, retries=3, delay=1):
+        broker = self.brokers.get(broker_name)
+        if not broker or not hasattr(broker, "get_funds"):
+            return None
+        try:
+            return await async_retry(broker.get_funds, retries=retries, delay=delay)
+        except Exception as e:
+            logger.error(f"get_funds failed for {broker_name}: {e}")
+            return None
+
+    async def get_orders(self, broker_name, retries=3, delay=1):
+        broker = self.brokers.get(broker_name)
+        if not broker or not hasattr(broker, "get_orders"):
+            return None
+        try:
+            return await async_retry(broker.get_orders, retries=retries, delay=delay)
+        except Exception as e:
+            logger.error(f"get_orders failed for {broker_name}: {e}")
+            return None
+
+    async def get_trade_book(self, broker_name, retries=3, delay=1):
+        broker = self.brokers.get(broker_name)
+        if not broker or not hasattr(broker, "get_trade_book"):
+            return None
+        try:
+            return await async_retry(broker.get_trade_book, retries=retries, delay=delay)
+        except Exception as e:
+            logger.error(f"get_trade_book failed for {broker_name}: {e}")
+            return None
+
+    async def get_margins(self, broker_name, retries=3, delay=1):
+        broker = self.brokers.get(broker_name)
+        if not broker or not hasattr(broker, "get_margins"):
+            return None
+        try:
+            return await async_retry(broker.get_margins, retries=retries, delay=delay)
+        except Exception as e:
+            logger.error(f"get_margins failed for {broker_name}: {e}")
+            return None
 
     async def get_trade_enabled_brokers(self):
         """
@@ -151,3 +283,95 @@ class BrokerManager:
             for name in enabled_broker_names
             if name in self.brokers and self.brokers[name] is not None
         }
+
+    async def get_symbol_info(self, broker_name: str, symbol: str, instrument_type: str = None) -> dict:
+        """
+        Returns broker-specific symbol info for a logical symbol/instrument_type.
+        For Zerodha: returns { 'symbol': symbol, 'instrument_token': int }
+        For Fyers: returns { 'symbol': 'NSE:SBIN-EQ' } etc.
+        """
+        broker_name = broker_name.lower()
+        if broker_name == 'fyers':
+            # Fyers expects NSE:SBIN-EQ, NSE:NIFTY50-INDEX, etc.
+            exchange = 'NSE'
+            if instrument_type is not None:
+                instrument_type = instrument_type.upper()
+            if instrument_type == 'INDEX':
+                fyers_symbol = f"{exchange}:{symbol}-INDEX"
+            elif instrument_type == 'EQ':
+                fyers_symbol = f"{exchange}:{symbol}-EQ"
+            elif instrument_type == 'NFO':
+                fyers_symbol = f"{exchange}:{symbol}"
+            else:
+                fyers_symbol = f"{exchange}:{symbol}"
+            return {'symbol': fyers_symbol}
+        elif broker_name == 'zerodha':
+            # Zerodha expects instrument_token for everything (quotes, ltp, history, etc.)
+            # Cache instruments for performance
+            if 'zerodha' not in self._instrument_cache:
+                broker = self.brokers.get('zerodha')
+                if not broker or not broker.kite:
+                    raise Exception("Zerodha broker not initialized or not logged in.")
+                loop = asyncio.get_event_loop()
+                instruments = await loop.run_in_executor(None, broker.kite.instruments, None)
+                self._instrument_cache['zerodha'] = instruments
+            else:
+                instruments = self._instrument_cache['zerodha']
+            # Find instrument token and correct display symbol
+            token = None
+            display_symbol = symbol
+            for i in instruments:
+                # Zerodha uses 'INDICES' for index segment
+                seg = i.get('segment', '')
+                name = i.get('name', '').upper()
+                ins_type = i.get('instrument_type', '').upper()
+                tradingsymbol = i.get('tradingsymbol', '')
+                # For index, user may input NIFTY50, but Zerodha expects NIFTY 50
+                if instrument_type and instrument_type.upper() == 'INDEX' and seg == 'INDICES':
+                    if name.replace(' ', '').upper() == symbol.replace(' ', '').upper():
+                        token = i['instrument_token']
+                        display_symbol = tradingsymbol
+                        break
+                elif instrument_type and instrument_type.upper() == 'EQ' and seg == 'NSE':
+                    if name == symbol.upper():
+                        token = i['instrument_token']
+                        display_symbol = tradingsymbol
+                        break
+                elif instrument_type and instrument_type.upper() == 'NFO' and seg == 'NFO-OPT':
+                    if name == symbol.upper():
+                        token = i['instrument_token']
+                        display_symbol = tradingsymbol
+                        break
+                elif not instrument_type:
+                    if name == symbol.upper():
+                        token = i['instrument_token']
+                        display_symbol = tradingsymbol
+                        break
+            if token is None:
+                raise Exception(f"Instrument token not found for {symbol} {instrument_type}")
+            return {'symbol': display_symbol, 'instrument_token': token}
+        else:
+            # Default: just return symbol
+            return {'symbol': symbol}
+
+    def build_order_request_from_signal(self, signal: TradeSignal, broker_name: str, quantity: int, extra_fields: dict = None):
+        """
+        Build an OrderRequest from a TradeSignal and broker-specific defaults.
+        """
+        defaults = ORDER_DEFAULTS.get(broker_name.upper(), {}).get(signal.signal_type, {})
+        # Merge defaults, signal, and any extra fields
+        order_kwargs = {
+            "symbol": signal.symbol,
+            "side": signal.side,
+            "order_type": defaults.get("order_type"),
+            "product_type": defaults.get("product_type"),
+            "price": signal.price,
+            "quantity": quantity,
+        }
+        if extra_fields:
+            order_kwargs.update(extra_fields)
+        # Add any additional default fields (e.g., trail_by)
+        for k, v in defaults.items():
+            if k not in order_kwargs:
+                order_kwargs[k] = v
+        return OrderRequest(**order_kwargs)

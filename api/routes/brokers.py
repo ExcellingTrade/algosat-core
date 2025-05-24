@@ -41,6 +41,12 @@ async def disable_broker(broker_name: str, db=Depends(get_db)):
 
 @router.put("/{broker_name}/enable-data-provider")
 async def enable_data_provider(broker_name: str, db=Depends(get_db)):
+    allowed_brokers = {"fyers", "zerodha"}
+    if broker_name.lower() not in allowed_brokers:
+        raise HTTPException(
+            status_code=406,
+            detail="Only fyers and zerodha are allowed as data providers. No changes made."
+        )
     # Set is_data_provider=False for all brokers first using db.py logic
     brokers = await get_all_brokers(db)
     for broker in brokers:
@@ -76,7 +82,14 @@ async def update_broker_api(
     update: BrokerUpdate = Body(...),
     db=Depends(get_db)
 ):
-    row = await update_broker(db, broker_name, {k: v for k, v in update.dict(exclude_unset=True).items()})
+    update_data = {k: v for k, v in update.dict(exclude_unset=True).items()}
+    # If is_data_provider is being set to True, set all others to False first
+    if update_data.get("is_data_provider") is True:
+        brokers = await get_all_brokers(db)
+        for broker in brokers:
+            if broker["broker_name"] != broker_name and broker["is_data_provider"]:
+                await update_broker(db, broker["broker_name"], {"is_data_provider": False})
+    row = await update_broker(db, broker_name, update_data)
     if not row:
         raise HTTPException(status_code=404, detail="Broker not found")
     return BrokerResponse(**row)

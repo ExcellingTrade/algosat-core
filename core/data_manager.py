@@ -29,7 +29,7 @@ async def _async_retry(coro_func, *args, max_attempts=3, initial_delay=1, backof
 _RATE_LIMITS = {
     "fyers": 10,
     "angel": 5,
-    "zerodha": 5,
+    "zerodha": 3,
 }
 ############################################################
 
@@ -152,6 +152,13 @@ class DataManager:
         if self.broker_manager:
             # Always use get_data_broker for unified broker selection logic
             self.broker = self.broker_manager.get_data_broker(broker_name=self.broker_name)
+            # If broker_name is not set, but a broker is found, set broker_name to the actual broker used
+            if not self.broker_name and self.broker:
+                # Try to get the broker's name from the broker_manager mapping
+                for name, broker in self.broker_manager.brokers.items():
+                    if broker is self.broker:
+                        self.broker_name = name
+                        break
         if not self.broker:
             raise RuntimeError("No broker available for DataManager!")
 
@@ -176,7 +183,7 @@ class DataManager:
         if cache:
             cached = self.cache.get(cache_key, ttl=ttl)
             if cached is not None:
-                logger.info(f"Cache hit for history: {cache_key}") 
+                logger.debug(f"Cache hit for history: {cache_key}") 
                 return cached
         async def _fetch():
             async with self.get_active_rate_limiter():
@@ -187,6 +194,25 @@ class DataManager:
                     self.cache.set(cache_key, history, ttl=ttl)
                 return history
         return await _async_retry(_fetch)
+
+    async def get_strike_list(self, symbol, max_strikes=40):
+        """
+        Unified interface to fetch strike symbols for a given symbol using the broker's implementation.
+        """
+        await self.ensure_broker()
+        if hasattr(self.broker, "get_strike_list"):
+            result = self.broker.get_strike_list(symbol, max_strikes)
+            return await result if inspect.isawaitable(result) else result
+        raise NotImplementedError(f"Broker {self.get_current_broker_name()} does not implement get_strike_list.")
+
+    async def get_broker_symbol(self, symbol, instrument_type=None):
+        """
+        Returns the correct symbol/token for the current broker using BrokerManager.get_symbol_info.
+        """
+        broker_name = self.get_current_broker_name()
+        if not self.broker_manager or not broker_name:
+            raise RuntimeError("BrokerManager or broker_name not set in DataManager.")
+        return await self.broker_manager.get_symbol_info(broker_name, symbol, instrument_type)
 
 
 # Example: instantiate a global DataManager with per-broker rate limiting

@@ -336,3 +336,24 @@ class AngelWrapper(BrokerInterface):
         except Exception as e:
             logger.error(f"Error getting profile: {e}")
             return {}
+
+    async def get_ltp(self, symbol: str) -> Any:
+        """
+        Placeholder for get_ltp. Should return last traded price for the given symbol.
+        """
+        logger.warning("Angel get_ltp is a placeholder. Not implemented.")
+        return None
+
+    async def get_quote(self, symbol: str) -> dict:
+        """
+        Placeholder for get_quote. Should return full quote for the given symbol.
+        """
+        logger.warning("Angel get_quote is a placeholder. Not implemented.")
+        return {}
+
+    async def get_strike_list(self, symbol: str, expiry, atm_count: int, itm_count: int, otm_count: int) -> list:
+        """
+        Placeholder for get_strike_list. Should return a list of tradingsymbols for CE and PE strikes.
+        """
+        logger.warning("Angel get_strike_list is a placeholder. Not implemented.")
+        return []

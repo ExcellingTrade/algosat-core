@@ -13,6 +13,7 @@ from core.data_manager import DataManager
 from core.time_utils import get_ist_datetime, localize_to_ist
 import math
 from core.order_manager import OrderManager
+from core.order_monitor import OrderMonitor
 
 
 logger = get_logger("strategy_runner")
@@ -24,7 +25,7 @@ STRATEGY_MAP = {
     # "swing_highlow": SwingHighLowStrategy,
 }
 
-async def run_strategy_config(config_row, data_manager: DataManager, order_manager: OrderManager):
+async def run_strategy_config(config_row, data_manager: DataManager, order_manager: OrderManager, order_queue):
     """
     Given a strategy config row, identify and run the correct strategy.
     """
@@ -39,15 +40,40 @@ async def run_strategy_config(config_row, data_manager: DataManager, order_manag
         logger.debug(f"No strategy class found for '{strategy_name}'")
         return
 
-    # Instantiate strategy with injected DataManager and ExecutionManager
+    # --- Ensure broker is initialized and resolve symbol/token upfront ---
+    # This assumes config_row has 'symbol' and 'instrument_type' attributes/fields
+    symbol = getattr(config_row, 'symbol', None)
+    instrument_type = getattr(config_row, 'instrument', None)
+    await data_manager.ensure_broker()  # Ensure broker is initialized
+    broker_name = data_manager.get_current_broker_name()
+    resolved_symbol = symbol
+    if broker_name and symbol:
+        # Use DataManager's get_broker_symbol to resolve
+        symbol_info = await data_manager.get_broker_symbol(symbol, instrument_type)
+        resolved_symbol = symbol_info.get('instrument_token', symbol_info.get('symbol', symbol))
+
+    # Instantiate strategy with injected DataManager and OrderManager
     try:
         logger.debug(f"Instantiating strategy class {StrategyClass} with config_row type: {type(config_row)}")
         logger.debug(f"config_row: {repr(config_row)}")
-        strategy = StrategyClass(config_row, data_manager, order_manager)
+        # Always create a shallow copy as a dict and update symbol_info
+        if isinstance(config_row, dict):
+            config_for_strategy = dict(config_row)
+        else:
+            config_for_strategy = dict(getattr(config_row, '_mapping', {}))
+        # Get symbol_info from broker
+        symbol_info = None
+        if broker_name and symbol:
+            symbol_info = await data_manager.get_broker_symbol(symbol, instrument_type)
+        config_for_strategy['symbol_info'] = symbol_info
+        # Optionally, for backward compatibility, set 'symbol' to symbol_info['symbol'] if present
+        if symbol_info and 'symbol' in symbol_info:
+            config_for_strategy['symbol'] = symbol_info['symbol']
+        strategy = StrategyClass(config_for_strategy, data_manager, order_manager)
     except Exception as e:
         logger.error(f"Exception during strategy instantiation: {e}", exc_info=True)
         return
-    logger.info(f"Starting strategy '{strategy_name}' for config {getattr(config_row, 'symbol', None)}")
+    logger.info(f"Starting strategy '{strategy_name}' for config {config_for_strategy.get('symbol', None)}")
 
     # One-time setup with infinite exponential backoff retry if setup fails
     backoff = 5  # initial seconds
@@ -94,7 +120,14 @@ async def run_strategy_config(config_row, data_manager: DataManager, order_manag
 
     while True:
         try:
-            await strategy.process_cycle()
+            order_info = await strategy.process_cycle()
+            # If an order was placed, put it in the order_queue for the manager to monitor
+            if order_info and isinstance(order_info, dict) and "order_id" in order_info:
+                await order_queue.put({
+                    "order_id": order_info["order_id"],
+                    "config": config_row,
+                    "interval_minutes": interval_minutes
+                })
         except Exception as e:
             logger.error(f"Error in run_tick for '{strategy_name}': {e}", exc_info=True)
         try:

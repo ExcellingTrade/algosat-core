@@ -22,6 +22,10 @@ import logging
 import os
 import sys
 import time
+import os
+# Ensure all logging and time functions use IST (Asia/Kolkata)
+os.environ['TZ'] = 'Asia/Kolkata'
+time.tzset()
 import traceback
 from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler

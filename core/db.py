@@ -362,3 +362,31 @@ async def get_trade_enabled_brokers(async_session=None):
             .where(broker_credentials.c.is_enabled == True)
         )
         return [row[0] for row in result.fetchall()]
+
+async def insert_order(session, order_data):
+    """
+    Insert a new order into the orders table.
+    Args:
+        session: SQLAlchemy async session
+        order_data: dict with order fields
+    Returns:
+        The inserted order row as a dict, or None if failed.
+    """
+    from core.dbschema import orders
+    stmt = orders.insert().values(**order_data)
+    res = await session.execute(stmt)
+    await session.commit()
+    order_id = res.inserted_primary_key[0] if res.inserted_primary_key else None
+    if order_id:
+        result = await session.execute(select(orders).where(orders.c.id == order_id))
+        row = result.first()
+        return dict(row._mapping) if row else None
+    return None
+
+async def get_data_enabled_broker(session):
+    """
+    Return the broker row (as dict) where is_data_provider is True. Returns None if not found.
+    """
+    result = await session.execute(select(broker_credentials).where(broker_credentials.c.is_data_provider == True))
+    row = result.first()
+    return dict(row._mapping) if row else None

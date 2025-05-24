@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
+import datetime
 
 class BrokerInterface(ABC):
     """
@@ -48,3 +49,32 @@ class BrokerInterface(ABC):
         Returns a dict containing profile data.
         """
         ...
+
+    @abstractmethod
+    async def get_quote(self, symbol: str) -> Dict[str, Any]:
+        """
+        Fetch a full quote for the given symbol.
+        """
+        pass
+
+    @abstractmethod
+    async def get_ltp(self, symbol: str) -> Any:
+        """
+        Fetch the last traded price for the given symbol.
+        """
+        pass
+
+    @abstractmethod
+    async def get_strike_list(
+        self,
+        symbol: str,
+        expiry: datetime.date,
+        atm_count: int,
+        itm_count: int,
+        otm_count: int
+    ) -> List[str]:
+        """
+        Return a list of tradingsymbols or tokens for CE and PE strikes:
+        ATM, ITM, and OTM based on counts.
+        """
+        pass
