@@ -1,19 +1,28 @@
 # algosat/core/db.py
 
+try:
+    from algosat.config import settings
+except ModuleNotFoundError as e:
+    raise ImportError(
+        "Could not import 'settings' from 'algosat.config'. "
+        "Make sure you are running your app from the project root with 'python -m algosat.api.enhanced_app' or 'python -m algosat.main'. "
+        f"Original error: {e}"
+    )
+
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import inspect, Table, MetaData, update, select, delete  # Modified import
+from sqlalchemy import inspect, Table, MetaData, update, select, delete, func # Modified import
 
-from config import settings
-from core.dbschema import metadata
-from core.dbschema import broker_credentials, strategy_configs, strategies  # Importing the new tables
+import os
 from datetime import datetime  # moved to top
-from common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
-from core.time_utils import get_ist_now
+from algosat.common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
+from algosat.core.time_utils import get_ist_now
+
+from algosat.core.dbschema import metadata, orders, broker_credentials, strategies, strategy_configs # Added orders, broker_credentials, strategies, strategy_configs
 
 # 1) Create the Async Engine
 engine = create_async_engine(
-    str(settings.database_url),  
+    str(settings.database_url),  # Use the unified config object
     echo=False,        # Set True during dev to see SQL queries
     pool_size=5,       
     max_overflow=10,   # extra connections beyond pool_size
@@ -347,13 +356,13 @@ async def reset_table_sequence(conn, table_name: str, sequence_name: str, restar
 # await reset_table_sequence(conn, 'strategy_configs', 'strategy_configs_id_seq')
 
 from sqlalchemy import select
-from core.dbschema import broker_credentials
+from algosat.core.dbschema import broker_credentials
 
 async def get_trade_enabled_brokers(async_session=None):
     """
     Return a list of broker names where trade_execution_enabled is True.
     """
-    from core.db import AsyncSessionLocal
+    from algosat.core.db import AsyncSessionLocal
     session = async_session or AsyncSessionLocal()
     async with session as sess:
         result = await sess.execute(
@@ -383,10 +392,126 @@ async def insert_order(session, order_data):
         return dict(row._mapping) if row else None
     return None
 
-async def get_data_enabled_broker(session):
+# --- Order CRUD Operations ---
+
+async def get_all_orders(session: AsyncSession):
     """
-    Return the broker row (as dict) where is_data_provider is True. Returns None if not found.
+    Retrieve all orders with broker_name.
+    Joins orders with broker_credentials to get broker_name.
     """
-    result = await session.execute(select(broker_credentials).where(broker_credentials.c.is_data_provider == True))
+    stmt = (
+        select(
+            orders.c.id,
+            orders.c.symbol,
+            orders.c.status,
+            orders.c.side,
+            broker_credentials.c.broker_name,
+            orders.c.entry_price,
+            orders.c.lot_qty,
+            orders.c.signal_time,
+            orders.c.entry_time,
+        )
+        .select_from(orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id))
+        .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
+    )
+    result = await session.execute(stmt)
+    rows = result.fetchall()
+    print(f"DEBUG DB: get_all_orders fetched {len(rows)} rows")
+    if rows:
+        print(f"DEBUG DB: first row raw: {rows[0]}")
+    converted = [dict(row._mapping) for row in rows]
+    print(f"DEBUG DB: converted to {len(converted)} dicts")
+    if converted:
+        print(f"DEBUG DB: first dict: {converted[0]}")
+    return converted
+
+async def get_order_by_id(session: AsyncSession, order_id: int):
+    """
+    Retrieve a specific order by its ID, including broker_name and strategy_name.
+    Joins orders with broker_credentials, strategy_configs, and strategies.
+    """
+    stmt = (
+        select(
+            orders.c.id,
+            orders.c.symbol,
+            orders.c.status,
+            orders.c.side,
+            broker_credentials.c.broker_name,
+            strategies.c.name.label("strategy_name"),
+            strategy_configs.c.symbol.label("config_symbol"),
+            strategy_configs.c.exchange,
+            orders.c.entry_price,
+            orders.c.stop_loss,
+            orders.c.target_price,
+            orders.c.lot_qty,
+            orders.c.signal_time,
+            orders.c.entry_time,
+            orders.c.exit_time,
+            orders.c.exit_price,
+            orders.c.candle_range,
+            orders.c.reason,
+            orders.c.atr,
+            orders.c.supertrend_signal,
+            orders.c.order_ids,
+            orders.c.order_messages
+        )
+        .select_from(
+            orders
+            .join(broker_credentials, orders.c.broker_id == broker_credentials.c.id)
+            .join(strategy_configs, orders.c.strategy_config_id == strategy_configs.c.id)
+            .join(strategies, strategy_configs.c.strategy_id == strategies.c.id)
+        )
+        .where(orders.c.id == order_id)
+    )
+    result = await session.execute(stmt)
     row = result.first()
     return dict(row._mapping) if row else None
+
+async def get_orders_by_broker(session: AsyncSession, broker_name: str):
+    """
+    Retrieve orders filtered by broker_name.
+    Joins orders with broker_credentials.
+    """
+    stmt = (
+        select(
+            orders.c.id,
+            orders.c.symbol,
+            orders.c.status,
+            orders.c.side,
+            broker_credentials.c.broker_name,
+            orders.c.entry_price,
+            orders.c.lot_qty,
+            orders.c.signal_time,
+            orders.c.entry_time,
+        )
+        .select_from(orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id))
+        .where(broker_credentials.c.broker_name == broker_name)
+        .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
+    )
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_orders_by_broker_and_strategy(session: AsyncSession, broker_name: str, strategy_config_id: int):
+    """
+    Retrieve orders filtered by both broker_name and strategy_config_id.
+    Joins orders with broker_credentials.
+    """
+    stmt = (
+        select(
+            orders.c.id,
+            orders.c.symbol,
+            orders.c.status,
+            orders.c.side,
+            broker_credentials.c.broker_name,
+            orders.c.entry_price,
+            orders.c.lot_qty,
+            orders.c.signal_time,
+            orders.c.entry_time,
+        )
+        .select_from(orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id))
+        .where(broker_credentials.c.broker_name == broker_name)
+        .where(orders.c.strategy_config_id == strategy_config_id)
+        .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
+    )
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]

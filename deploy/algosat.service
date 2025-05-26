@@ -1,0 +1,53 @@
+# Algosat Trading System - systemd service file
+# Place this file at: /etc/systemd/system/algosat.service
+
+[Unit]
+Description=Algosat Trading System API Server
+Documentation=https://github.com/algosat/algosat
+After=network.target
+Wants=network.target
+
+[Service]
+Type=exec
+User=algosat
+Group=algosat
+WorkingDirectory=/opt/algosat/algosat
+Environment=PATH=/opt/algosat/venv/bin
+Environment=PYTHONPATH=/opt/algosat/algosat
+Environment=ALGOSAT_CONFIG_DIR=/etc/algosat
+Environment=ALGOSAT_LOG_DIR=/var/log/algosat
+Environment=ALGOSAT_DATA_DIR=/var/lib/algosat
+ExecStart=/opt/algosat/venv/bin/python -m api.enhanced_app
+ExecReload=/bin/kill -HUP $MAINPID
+KillMode=mixed
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security settings
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/algosat /var/log/algosat /etc/algosat
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+
+# Resource limits
+LimitNOFILE=65535
+MemoryMax=2G
+CPUQuota=200%
+TasksMax=1024
+
+# Hardening
+ProtectClock=yes
+ProtectHostname=yes
+RemoveIPC=yes
+RestrictNamespaces=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,22 +1,80 @@
-fastapi
-uvicorn[standard]
-sqlalchemy[asyncio]
-asyncpg
-pydantic
-python-dotenv    # to load your .env
-backtrader       # for backtesting later
-pandas           # for data manipulation
-numpy            # for numerical operations
-nest_asyncio
-pyotp
-requests
-asyncio-limiter
-fyers_apiv3
-selenium
-webdriver-manager
-beautifulsoup4
-seleniumbase
-colorlog
-pyvirtualdisplay
-smartapi-python
-logzero
+# Core FastAPI and web framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart>=0.0.6
+
+# Database and ORM
+sqlalchemy[asyncio]>=2.0.0
+aiosqlite>=0.19.0
+asyncpg>=0.29.0
+
+# Data handling and validation
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+pandas>=2.1.0
+numpy>=1.25.0
+
+# Trading and broker APIs
+fyers_apiv3>=3.3.0
+smartapi-python>=1.3.0
+backtrader>=1.9.78
+
+# Web scraping and automation
+selenium>=4.15.0
+webdriver-manager>=4.0.0
+beautifulsoup4>=4.12.0
+seleniumbase>=4.21.0
+pyvirtualdisplay>=3.0.0
+
+# Authentication and security
+cryptography>=41.0.0
+bcrypt>=4.1.0
+PyJWT>=2.8.0
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0
+
+# Configuration and environment
+python-dotenv>=1.0.0
+PyYAML>=6.0.1
+
+# Async and concurrency
+nest_asyncio>=1.5.8
+asyncio-limiter>=1.1.0
+
+# HTTP and requests
+requests>=2.31.0
+httpx>=0.25.0
+
+# Authentication helpers
+pyotp>=2.9.0
+
+# Monitoring and observability
+prometheus-client>=0.19.0
+structlog>=23.2.0
+python-json-logger>=2.0.7
+
+# VPS monitoring and performance optimization
+psutil>=5.9.6
+aiofiles>=23.2.1
+
+# File I/O and utilities
+aiofiles>=23.2.1
+
+# Testing dependencies
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+pytest-mock>=3.12.0
+
+# Logging and debugging
+colorlog>=6.8.0
+logzero>=1.7.0
+rich>=13.7.0
+
+# Error tracking and monitoring
+sentry-sdk[fastapi]>=1.38.0
+
+# Performance and caching (optional)
+redis>=5.0.1
+
+# Additional utilities for production
+supervisor>=4.2.5

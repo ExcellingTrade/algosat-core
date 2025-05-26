@@ -2,6 +2,19 @@ from pydantic import BaseModel, Field, field_serializer
 from typing import Optional, Any, Dict, List
 from datetime import datetime
 
+# --- Authentication Schemas ---
+class LoginRequest(BaseModel):
+    """Request model for user login."""
+    username: str = Field(..., description="Username for authentication", min_length=1, max_length=50)
+    password: str = Field(..., description="Password for authentication", min_length=1, max_length=100)
+
+class TokenResponse(BaseModel):
+    """Response model for authentication token."""
+    access_token: str = Field(..., description="JWT access token")
+    token_type: str = Field(default="bearer", description="Token type")
+    expires_in: int = Field(..., description="Token expiration time in seconds")
+    user_info: Dict[str, Any] = Field(..., description="Authenticated user information")
+
 # --- Strategy Schemas ---
 class StrategyConfigBase(BaseModel):
     symbol: str
@@ -113,6 +126,62 @@ class BrokerDetailResponse(BrokerListResponse):
     @classmethod
     def from_db(cls, data: dict):
         return cls(**cls.mask_sensitive(data))
+
+# --- Order Schemas ---
+class OrderListResponse(BaseModel):
+    """Order list response with basic metadata."""
+    id: int
+    symbol: str
+    status: str
+    side: Optional[str] = None
+    broker_name: str
+    entry_price: Optional[float] = None
+    lot_qty: Optional[int] = None
+    signal_time: Optional[datetime] = None
+    entry_time: Optional[datetime] = None
+
+    @field_serializer("signal_time", "entry_time")
+    def serialize_dt(self, v):
+        if isinstance(v, str):
+            return v
+        return v.isoformat() if v else None
+
+    class Config:
+        from_attributes = True
+
+class OrderDetailResponse(BaseModel):
+    """Order detail response with full information."""
+    id: int
+    symbol: str
+    status: str
+    side: Optional[str] = None
+    broker_name: str
+    strategy_name: Optional[str] = None
+    config_symbol: Optional[str] = None
+    exchange: Optional[str] = None
+    entry_price: Optional[float] = None
+    stop_loss: Optional[float] = None
+    target_price: Optional[float] = None
+    lot_qty: Optional[int] = None
+    signal_time: Optional[datetime] = None
+    entry_time: Optional[datetime] = None
+    exit_time: Optional[datetime] = None
+    exit_price: Optional[float] = None
+    candle_range: Optional[str] = None
+    reason: Optional[str] = None
+    atr: Optional[float] = None
+    supertrend_signal: Optional[str] = None
+    order_ids: Optional[Any] = None
+    order_messages: Optional[Any] = None
+
+    @field_serializer("signal_time", "entry_time", "exit_time")
+    def serialize_dt(self, v):
+        if isinstance(v, str):
+            return v
+        return v.isoformat() if v else None
+
+    class Config:
+        from_attributes = True
 
 # --- Position Schemas ---
 class PositionResponse(BaseModel):

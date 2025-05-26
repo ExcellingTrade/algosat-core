@@ -34,8 +34,8 @@ from pathlib import Path
 from rich.console import Console
 from rich.logging import RichHandler
 
-from common import constants
-from core.time_utils import get_ist_now 
+from algosat.common import constants
+from algosat.core.time_utils import get_ist_now 
 
 # Constants for logging configuration
 MAX_LOG_FILE_SIZE = int(2.3 * 1024 * 1024)  # 2.3 MB

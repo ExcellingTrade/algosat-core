@@ -168,7 +168,7 @@ class OptionBuyStrategy(StrategyBase):
             return
         trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=3)
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=5)
         # 1. Fetch history for all strikes
         history_data = await self.fetch_history_data(
             self.dp, self._strikes, trade_day, trade_config
