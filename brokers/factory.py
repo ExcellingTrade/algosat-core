@@ -1,10 +1,10 @@
 from typing import Dict, Any, Type
 import inspect
-from brokers.base import BrokerInterface
-from brokers.fyers import FyersWrapper
-from brokers.zerodha import ZerodhaWrapper
-from brokers.angel import AngelWrapper
-from common.logger import get_logger
+from algosat.brokers.base import BrokerInterface
+from algosat.brokers.fyers import FyersWrapper
+from algosat.brokers.zerodha import ZerodhaWrapper
+from algosat.brokers.angel import AngelWrapper
+from algosat.common.logger import get_logger
 
 logger = get_logger("broker_factory")
 

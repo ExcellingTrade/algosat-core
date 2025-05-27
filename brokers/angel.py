@@ -6,13 +6,12 @@ from SmartApi.smartConnect import SmartConnect
 import logging
 import logzero
 import requests  # Add this import for better error handling
-# Suppress logzero (and SmartApi) noisy info/debug logs to keep console output clean
 logzero.loglevel(logging.ERROR)
-from brokers.base import BrokerInterface
-from common.broker_utils import get_broker_credentials, upsert_broker_credentials
-from common.logger import get_logger
+from algosat.brokers.base import BrokerInterface
+from algosat.common.broker_utils import get_broker_credentials, upsert_broker_credentials
+from algosat.common.logger import get_logger
 from typing import Dict, Any, List
-from core.time_utils import get_ist_datetime
+from algosat.core.time_utils import get_ist_datetime
 
 logger = get_logger("angel_wrapper")
 

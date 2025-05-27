@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional
-from core.data_manager import DataManager
-from models.strategy_config import StrategyConfig
+from algosat.core.data_manager import DataManager
+from algosat.models.strategy_config import StrategyConfig
 
 
 class StrategyBase(ABC):

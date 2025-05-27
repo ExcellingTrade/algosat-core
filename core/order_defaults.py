@@ -1,5 +1,5 @@
-from core.signal import SignalType
-from core.order_request import OrderType
+from algosat.core.signal import SignalType
+from algosat.core.order_request import OrderType
 
 # keyed by broker name (UPPERCASE), then by signal type
 ORDER_DEFAULTS = {

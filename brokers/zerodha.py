@@ -6,19 +6,19 @@ import asyncio
 from typing import Dict, Any, List
 import re
 from datetime import datetime
-from brokers.base import BrokerInterface
-from common.broker_utils import get_broker_credentials, upsert_broker_credentials, can_reuse_token
-from common.logger import get_logger
+from algosat.brokers.base import BrokerInterface
+from algosat.common.broker_utils import get_broker_credentials, upsert_broker_credentials, can_reuse_token
+from algosat.common.logger import get_logger
 from kiteconnect import KiteConnect
 import pyotp
 from selenium.webdriver.common.by import By
 from seleniumbase import SB
 from pyvirtualdisplay import Display
 from urllib.parse import urlparse, parse_qs
-from core.time_utils import get_ist_datetime
+from algosat.core.time_utils import get_ist_datetime
 import pandas as pd
 import datetime
-from core.order_request import OrderRequest, Side, OrderType
+from algosat.core.order_request import OrderRequest, Side, OrderType
 
 logger = get_logger("zerodha_wrapper")
 

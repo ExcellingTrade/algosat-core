@@ -1,6 +1,6 @@
 from enum import Enum
 from dataclasses import dataclass
-from core.order_request import Side
+from algosat.core.order_request import Side
 
 class SignalType(Enum):
     ENTRY     = "ENTRY"

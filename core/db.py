@@ -313,8 +313,8 @@ async def has_any_strategy_configs() -> bool:
     """
     Return True if the strategy_configs table has any rows, else False.
     """
-    from core.dbschema import strategy_configs
-    from core.db import engine
+    from algosat.core.dbschema import strategy_configs
+    from algosat.core.db import engine
     async with engine.begin() as conn:
         result = await conn.execute(select(strategy_configs))
         return result.first() is not None
@@ -547,3 +547,29 @@ async def create_user(session: AsyncSession, username: str, email: str, hashed_p
     result = await session.execute(select(users).where(users.c.username == username))
     row = result.first()
     return dict(row._mapping) if row else None
+
+from sqlalchemy import select
+from algosat.core.dbschema import orders
+
+async def get_open_orders_for_symbol(session, symbol: str):
+    """Return all open orders for a given symbol (status = 'OPEN' or equivalent)."""
+    stmt = select(orders).where(
+        orders.c.symbol == symbol,
+        orders.c.status.in_(["OPEN", "PARTIALLY_FILLED"])  # Add other statuses as needed
+    )
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_open_orders_for_symbol_and_tradeday(session, symbol: str, trade_day):
+    """Return all open orders for a given symbol and trade day (status = 'OPEN' or equivalent)."""
+    from datetime import datetime
+    start_dt = datetime.combine(trade_day, datetime.min.time())
+    end_dt = datetime.combine(trade_day, datetime.max.time())
+    stmt = select(orders).where(
+        orders.c.symbol == symbol,
+        orders.c.status.in_(["OPEN", "PARTIALLY_FILLED"]),
+        orders.c.entry_time >= start_dt,
+        orders.c.entry_time <= end_dt
+    )
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]

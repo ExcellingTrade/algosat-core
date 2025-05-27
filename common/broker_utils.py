@@ -30,17 +30,17 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, Ti
 
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from core.db import AsyncSessionLocal
-from core.dbschema import broker_credentials
-from core.time_utils import get_ist_now, get_ist_datetime, localize_to_ist
+from algosat.core.db import AsyncSessionLocal
+from algosat.core.dbschema import broker_credentials
+from algosat.core.time_utils import get_ist_now, get_ist_datetime, localize_to_ist
 
-from common import constants
-from utils.config_wrapper import get_config, get_trade_config
-from utils.indicators import calculate_atr
-from common.logger import get_logger
-from utils.rich_utils import ProgressHandler
-from utils.telegram_bot import TelegramBot
-from utils.utils import get_action_icon
+from algosat.common import constants
+from algosat.utils.config_wrapper import get_config, get_trade_config
+from algosat.utils.indicators import calculate_atr
+from algosat.common.logger import get_logger
+from algosat.utils.rich_utils import ProgressHandler
+from algosat.utils.telegram_bot import TelegramBot
+from algosat.utils.utils import get_action_icon
 
 logger = get_logger("broker_utils")
 progress_handler = ProgressHandler.get_instance()

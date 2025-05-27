@@ -1,6 +1,6 @@
 import logging
 import requests
-from common.logger import get_logger
+from algosat.common.logger import get_logger
 
 logger = get_logger("telegram_utils")
 

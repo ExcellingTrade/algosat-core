@@ -41,13 +41,13 @@ from fyers_apiv3 import fyersModel
 from selenium.webdriver.common.by import By
 from seleniumbase import SB
 
-from brokers.base import BrokerInterface
-from common import constants
-from common.broker_utils import shutdown_gracefully, get_broker_credentials, upsert_broker_credentials, can_reuse_token
-from common.logger import get_logger
-from core.time_utils import get_ist_datetime, localize_to_ist
+from algosat.brokers.base import BrokerInterface
+from algosat.common import constants
+from algosat.common.broker_utils import shutdown_gracefully, get_broker_credentials, upsert_broker_credentials, can_reuse_token
+from algosat.common.logger import get_logger
+from algosat.core.time_utils import get_ist_datetime, localize_to_ist
 from pyvirtualdisplay import Display
-from core.order_request import OrderRequest, Side, OrderType
+from algosat.core.order_request import OrderRequest, Side, OrderType
 
 # === Broker-specific API code mapping ===
 # These mappings translate generic enums to Fyers API codes. Do not move these to order_defaults.py.

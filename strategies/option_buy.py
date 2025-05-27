@@ -1,39 +1,38 @@
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
-
-from .base import StrategyBase
-from common.logger import get_logger
-from core.execution_manager import ExecutionManager
-from core.data_manager import DataManager
-from core.dbschema import strategy_configs
-from core.order_manager import OrderManager
-from core.broker_manager import BrokerManager
-from core.order_request import Side
-from common.strategy_utils import (
+from algosat.strategies.base import StrategyBase
+from algosat.common.logger import get_logger
+from algosat.core.execution_manager import ExecutionManager
+from algosat.core.data_manager import DataManager
+from algosat.core.dbschema import strategy_configs
+from algosat.core.order_manager import OrderManager
+from algosat.core.broker_manager import BrokerManager
+from algosat.core.order_request import Side
+from algosat.common.strategy_utils import (
     calculate_end_date,
     wait_for_first_candle_completion,
     calculate_first_candle_details,
     fetch_option_chain_and_first_candle_history,
     identify_strike_price_combined,
     fetch_strikes_history,
-    # evaluate_signals, evaluate_trade_signal  # removed, now in-class
     calculate_backdate_days,
     localize_to_ist,
     calculate_trade,
 )
-from utils.indicators import (
+from algosat.utils.indicators import (
     calculate_supertrend,
     calculate_atr,
     calculate_sma,
     calculate_vwap,
 )
-from core.time_utils import get_ist_datetime
-from common.broker_utils import get_trade_day
-from common import constants
+from algosat.core.time_utils import get_ist_datetime
+from algosat.common.broker_utils import get_trade_day
+from algosat.common import constants
 import json
 import os
-from core.signal import TradeSignal, SignalType
-from models.strategy_config import StrategyConfig
+from algosat.core.signal import TradeSignal, SignalType
+from algosat.models.strategy_config import StrategyConfig
+from algosat.core.db import AsyncSessionLocal, get_open_orders_for_symbol_and_tradeday
 
 logger = get_logger(__name__)
 
@@ -101,6 +100,7 @@ class OptionBuyStrategy(StrategyBase):
         self._position = None      # Track current open position, if any
         self._setup_failed = False # Track if setup failed
         self.order_manager = execution_manager  # <-- Fix: store execution_manager as order_manager
+        self._positions = {}       # Track open positions by strike
 
     async def ensure_broker(self):
         # No longer needed for data fetches, but keep for order placement if required
@@ -158,6 +158,18 @@ class OptionBuyStrategy(StrategyBase):
             self._setup_failed = False
             logger.info(f"Selected strikes for entry: {self._strikes}")
 
+    async def sync_open_positions(self):
+        """Synchronize self._positions with open orders in the database for all strikes for the current trade day."""
+        self._positions = {}
+        async with AsyncSessionLocal() as session:
+            from common.broker_utils import get_trade_day
+            from core.time_utils import get_ist_datetime
+            trade_day = get_trade_day(get_ist_datetime())
+            for strike in self._strikes:
+                open_orders = await get_open_orders_for_symbol_and_tradeday(session, strike, trade_day)
+                if open_orders:
+                    self._positions[strike] = open_orders
+
     async def process_cycle(self) -> None:
         """
         Main signal evaluation cycle for OptionBuyStrategy.
@@ -182,9 +194,14 @@ class OptionBuyStrategy(StrategyBase):
             for strike, data in history_data.items()
             if data is not None and not getattr(data, 'empty', False)
         }
+        await self.sync_open_positions()  # Sync in-memory with DB
         # 3. Evaluate trade signal for each strike
         for strike, data in indicator_data.items():
             try:
+                # Check DB-synced open positions
+                if self._positions.get(strike):
+                    logger.info(f"DB: Position already open for {strike}, skipping signal evaluation and order placement.")
+                    continue
                 # Only evaluate signal and place order if no open position for this strike
                 if self._position is not None and self._position.get('strike') == strike:
                     logger.info(f"Position already open for {strike}, skipping signal evaluation and order placement.")

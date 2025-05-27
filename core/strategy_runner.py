@@ -1,20 +1,18 @@
 from datetime import timedelta
-from sqlalchemy import select
-from core.dbschema import strategies as strategies_table
-from core.db import AsyncSessionLocal, get_strategy_name_by_id
 import asyncio
-from common.logger import get_logger
-# from core.data_provider import get_data_provider
-from core.execution_manager import get_execution_manager
-from strategies.option_buy import OptionBuyStrategy
+from sqlalchemy import select
+from algosat.core.dbschema import strategies as strategies_table
+from algosat.core.db import AsyncSessionLocal, get_strategy_name_by_id
+from algosat.common.logger import get_logger
+from algosat.core.execution_manager import get_execution_manager
+from algosat.strategies.option_buy import OptionBuyStrategy
 # from strategies.option_sell import OptionSellStrategy
 # from strategies.swing_highlow import SwingHighLowStrategy
-from core.data_manager import DataManager
-from core.time_utils import get_ist_datetime, localize_to_ist
-import math
-from core.order_manager import OrderManager
-from core.order_monitor import OrderMonitor
-from models.strategy_config import StrategyConfig
+from algosat.core.data_manager import DataManager
+from algosat.core.time_utils import get_ist_datetime, localize_to_ist
+from algosat.core.order_manager import OrderManager
+from algosat.core.order_monitor import OrderMonitor
+from algosat.models.strategy_config import StrategyConfig
 
 
 logger = get_logger("strategy_runner")

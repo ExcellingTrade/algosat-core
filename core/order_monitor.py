@@ -1,6 +1,6 @@
 import asyncio
 from datetime import datetime
-from common.logger import get_logger
+from algosat.common.logger import get_logger
 
 logger = get_logger("OrderMonitor")
 

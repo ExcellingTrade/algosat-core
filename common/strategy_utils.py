@@ -8,13 +8,13 @@ from rich.progress import (
     Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn,
     TimeRemainingColumn, TaskProgressColumn
 )
-from core.time_utils import localize_to_ist, get_ist_datetime
-from common.logger import get_logger
+from algosat.core.time_utils import localize_to_ist, get_ist_datetime
+from algosat.common.logger import get_logger
 import logging
 import cachetools
 from typing import TYPE_CHECKING, Optional
-from utils.indicators import calculate_atr
-from core.order_request import OrderRequest, Side, OrderType
+from algosat.utils.indicators import calculate_atr
+from algosat.core.order_request import OrderRequest, Side, OrderType
 
 if TYPE_CHECKING:
     from core.data_provider.provider import DataManager

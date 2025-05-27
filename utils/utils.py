@@ -21,8 +21,8 @@ Functions:
 - some_utility_function: Description of what the function does.
 """
 
-from common import constants
-from common.constants import EOD_EXIT_ICON
+from algosat.common import constants
+from algosat.common.constants import EOD_EXIT_ICON
 
 # Updated ACTION_ICONS with constants.<VARIABLE_NAME>
 ACTION_ICONS = {

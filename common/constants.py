@@ -18,7 +18,7 @@ Example:
 import os
 import sys
 
-from utils.config_wrapper import get_log_config, load_config
+from algosat.utils.config_wrapper import get_log_config, load_config
 
 
 # Get the directory of the calling script

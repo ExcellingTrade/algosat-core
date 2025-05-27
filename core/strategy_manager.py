@@ -4,15 +4,15 @@ import asyncio
 import datetime
 from typing import Dict
 from sqlalchemy.exc import ProgrammingError
-from core.db import get_enabled_default_strategy_configs, AsyncSessionLocal
-from config import settings
-from common.logger import get_logger
-from core.strategy_runner import run_strategy_config
-from core.data_manager import DataManager
-from core.order_manager import OrderManager
-from core.order_monitor import OrderMonitor
-from core.time_utils import get_ist_datetime
-from models.strategy_config import StrategyConfig
+from algosat.core.db import get_enabled_default_strategy_configs, AsyncSessionLocal
+from algosat.config import settings
+from algosat.common.logger import get_logger
+from algosat.core.strategy_runner import run_strategy_config
+from algosat.core.data_manager import DataManager
+from algosat.core.order_manager import OrderManager
+from algosat.core.order_monitor import OrderMonitor
+from algosat.core.time_utils import get_ist_datetime
+from algosat.models.strategy_config import StrategyConfig
 
 logger = get_logger("strategy_manager")
 
