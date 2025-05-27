@@ -29,6 +29,8 @@ from collections import defaultdict
 import json
 from pydantic import BaseModel, EmailStr # Add EmailStr
 from passlib.context import CryptContext
+from algosat.core.dbschema import users
+from algosat.core.db import AsyncSessionLocal, get_user_by_username
 
 logger = logging.getLogger(__name__)
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -39,9 +41,9 @@ class SecurityError(Exception):
 
 # Password Hashing Context
 # Placeholder for database interaction or user store
-USERS_DB = {
-    "testuser": {"username": "testuser", "hashed_password": pwd_context.hash("testpassword"), "email": "testuser@example.com", "full_name": "Test User", "disabled": False}
-}
+# USERS_DB = {
+#     "testuser": {"username": "testuser", "hashed_password": pwd_context.hash("testpassword"), "email": "testuser@example.com", "full_name": "Test User", "disabled": False}
+# }
 
 class User(BaseModel):
     username: str
@@ -595,17 +597,21 @@ class SecurityManager:
     
     async def authenticate_user(self, username: str, password: str, request_info: Dict[str, Any]) -> Dict[str, Any]:
         """Authenticate user and return token if successful."""
-        user_record = self._get_user(username)
-        if user_record and self._verify_password(password, user_record["password_hash"]):
+        user_record = await self._get_user(username)
+        if not user_record:
+            self.logger.warning(
+                f"Authentication failed - invalid user: {username}, ip: {request_info.get('ip')}"
+            )
+            return {"success": False, "message": "Invalid username or password"}
+        if self._verify_password(password, user_record["password_hash"]):
             user_info = {
                 "user_id": user_record["user_id"],
                 "username": username,
-                "role": user_record.get("role", "user"), # Ensure role is included
-                "email": user_record.get("email", "") # Ensure email is included
+                "role": user_record.get("role", "user"),
+                "email": user_record.get("email", "")
             }
             token_duration = timedelta(minutes=self.config.get("jwt_expiry_minutes", 60))
             token_str, expires_in_seconds = self._create_jwt_token(user_info, expires_delta=token_duration)
-            
             self.logger.info(
                 f"User authenticated successfully - username: {username}, "
                 f"ip: {request_info.get('ip')}, user_agent: {request_info.get('user_agent')}"
@@ -613,14 +619,13 @@ class SecurityManager:
             return {
                 "success": True,
                 "token": token_str,
-                "expires_in": expires_in_seconds, # Added expires_in
-                "user_info": user_info # Added user_info
+                "expires_in": expires_in_seconds,
+                "user_info": user_info
             }
         else:
             self.logger.warning(
-                f"Authentication failed - username: {username}, ip: {request_info.get('ip')}"
+                f"Authentication failed - invalid password for user: {username}, ip: {request_info.get('ip')}"
             )
-            # Implement lockout mechanism if needed
             return {"success": False, "message": "Invalid username or password"}
 
     async def regenerate_token(self, user_info: Dict[str, Any], expires_delta: timedelta) -> tuple[str, int]:
@@ -669,18 +674,19 @@ class SecurityManager:
             self.logger.error(f"Unexpected error during token validation: {str(e)}", exc_info=True)
             return None
     
-    def _get_user(self, username: str) -> Optional[Dict[str, Any]]:
+    async def _get_user(self, username: str) -> Optional[Dict[str, Any]]:
         """Get user from database or storage."""
-        user = USERS_DB.get(username)
-        if user:
-            return {
-                "user_id": username,  # Using username as user_id for simplicity
-                "username": username,
-                "password_hash": user["hashed_password"],
-                "email": user.get("email", ""),
-                "role": user.get("role", "user")
-            }
-        return None
+        async with AsyncSessionLocal() as session:
+            db_user = await get_user_by_username(session, username)
+            if db_user:
+                return {
+                    "user_id": db_user["id"],
+                    "username": db_user["username"],
+                    "password_hash": db_user["hashed_password"],
+                    "email": db_user["email"],
+                    "role": db_user["role"],
+                }
+            return None
     
     def _verify_password(self, plain_password: str, hashed_password: str) -> bool:
         """Verify password against hash."""

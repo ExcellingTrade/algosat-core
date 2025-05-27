@@ -3,19 +3,21 @@ from typing import Dict, Any, List
 
 from algosat.core.db import get_all_brokers, get_broker_by_name, add_broker, update_broker, delete_broker
 from algosat.api.schemas import BrokerResponse, BrokerCreate, BrokerUpdate, BrokerListResponse, BrokerDetailResponse
-from algosat.api.dependencies import get_db, get_current_user # Updated import
-from algosat.core.security import EnhancedInputValidator, InvalidInputError # Fixed import path
+from algosat.api.dependencies import get_db
+from algosat.api.auth_dependencies import get_current_user
+from algosat.core.security import EnhancedInputValidator, InvalidInputError
 
-router = APIRouter()
-input_validator = EnhancedInputValidator() # Added
+# Require authentication for all endpoints in this router
+router = APIRouter(dependencies=[Depends(get_current_user)])
+input_validator = EnhancedInputValidator()
 
 @router.get("/", response_model=List[BrokerListResponse])
-async def list_brokers(db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def list_brokers(db=Depends(get_db)):
     brokers = [BrokerListResponse(**row) for row in await get_all_brokers(db)]
     return sorted(brokers, key=lambda b: b.id)
 
 @router.get("/{broker_name}", response_model=BrokerDetailResponse)
-async def get_broker(broker_name: str, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_broker(broker_name: str, db=Depends(get_db)):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     row = await get_broker_by_name(db, validated_broker_name)
     if not row:
@@ -23,7 +25,7 @@ async def get_broker(broker_name: str, db=Depends(get_db), current_user: Dict[st
     return BrokerDetailResponse.from_db(row)
 
 @router.post("/", response_model=BrokerResponse)
-async def add_broker_api(broker: BrokerCreate, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def add_broker_api(broker: BrokerCreate, db=Depends(get_db)):
     # Validate BrokerCreate fields
     validated_broker_name = input_validator.validate_and_sanitize(broker.broker_name, "broker.broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     validated_broker_title = input_validator.validate_and_sanitize(broker.broker_title, "broker.broker_title", expected_type=str, max_length=256)
@@ -36,25 +38,25 @@ async def add_broker_api(broker: BrokerCreate, db=Depends(get_db), current_user:
     return BrokerResponse(**row)
 
 @router.delete("/{broker_name}")
-async def delete_broker_api(broker_name: str, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def delete_broker_api(broker_name: str, db=Depends(get_db)):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     await delete_broker(db, validated_broker_name)
     return {"status": "deleted", "broker_name": validated_broker_name}
 
 @router.put("/{broker_name}/enable")
-async def enable_broker(broker_name: str, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def enable_broker(broker_name: str, db=Depends(get_db)):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     row = await update_broker(db, validated_broker_name, {"is_enabled": True})
     return {"status": "enabled", "broker_name": validated_broker_name}
 
 @router.put("/{broker_name}/disable")
-async def disable_broker(broker_name: str, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def disable_broker(broker_name: str, db=Depends(get_db)):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     row = await update_broker(db, validated_broker_name, {"is_enabled": False})
     return {"status": "disabled", "broker_name": validated_broker_name}
 
 @router.put("/{broker_name}/enable-data-provider")
-async def enable_data_provider(broker_name: str, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def enable_data_provider(broker_name: str, db=Depends(get_db)):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     allowed_brokers = {"fyers", "zerodha"}
     if validated_broker_name.lower() not in allowed_brokers:
@@ -72,25 +74,25 @@ async def enable_data_provider(broker_name: str, db=Depends(get_db), current_use
     return {"status": "data_provider_enabled", "broker_name": validated_broker_name}
 
 @router.put("/{broker_name}/disable-data-provider")
-async def disable_data_provider(broker_name: str, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def disable_data_provider(broker_name: str, db=Depends(get_db)):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     row = await update_broker(db, validated_broker_name, {"is_data_provider": False})
     return {"status": "data_provider_disabled", "broker_name": validated_broker_name}
 
 @router.put("/{broker_name}/enable-trade-execution")
-async def enable_trade_execution(broker_name: str, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def enable_trade_execution(broker_name: str, db=Depends(get_db)):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     row = await update_broker(db, validated_broker_name, {"trade_execution_enabled": True})
     return {"status": "trade_execution_enabled", "broker_name": validated_broker_name}
 
 @router.put("/{broker_name}/disable-trade-execution")
-async def disable_trade_execution(broker_name: str, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def disable_trade_execution(broker_name: str, db=Depends(get_db)):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     row = await update_broker(db, validated_broker_name, {"trade_execution_enabled": False})
     return {"status": "trade_execution_disabled", "broker_name": validated_broker_name}
 
 @router.post("/{broker_name}/auth")
-async def reauth_broker(broker_name: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+async def reauth_broker(broker_name: str):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
     # TODO: Implement broker re-authentication logic
     return {"status": "reauth_triggered", "broker_name": validated_broker_name}
@@ -99,8 +101,7 @@ async def reauth_broker(broker_name: str, current_user: Dict[str, Any] = Depends
 async def update_broker_api(
     broker_name: str,
     update: BrokerUpdate = Body(...),
-    db=Depends(get_db),
-    current_user: Dict[str, Any] = Depends(get_current_user)
+    db=Depends(get_db)
 ):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
 

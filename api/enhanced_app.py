@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone # Added timezone
 from typing import Dict, Any, Optional, List
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Depends, Request, Response, status
+from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordRequestForm
@@ -18,17 +18,20 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 import structlog
 from pydantic import BaseModel # Added
+from sqlalchemy import select
 
 # Import our enhanced modules
 from algosat.core.security import SecurityManager, EnhancedInputValidator, User, InvalidInputError
 from algosat.core.resilience import ErrorTracker, resilient_operation, AlgosatError
 from algosat.core.monitoring import TradingMetrics, HealthChecker
 # from algosat.core.vps_performance import VPSOptimizer  # Temporarily disabled
-from algosat.core.db import AsyncSessionLocal  # For database operations
+from algosat.core.db import AsyncSessionLocal, get_user_by_username, get_user_by_email, create_user  # For database operations
+
+# Import get_current_user from auth_dependencies instead of defining here
+from .auth_dependencies import get_current_user
 
 # Import existing API routes
 from .routes import strategies, brokers, positions, trades, orders # Uncommented
-from .dependencies import get_current_user # Import from dependencies
 
 # Use default port for now
 API_PORT = 8000
@@ -45,8 +48,9 @@ input_validator = None
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan management for consumer-only API service."""
     global security_manager, error_tracker, trading_metrics, health_checker, input_validator
+    # In lifespan, set security_manager in auth_dependencies
+    import algosat.api.auth_dependencies as auth_deps
     
     try:
         logger.info("Starting Algosat API consumer service")
@@ -55,6 +59,7 @@ async def lifespan(app: FastAPI):
         security_manager = SecurityManager(
             data_dir="/tmp/algosat_api_security"  # Temporary directory for API security
         )
+        auth_deps.security_manager = security_manager
         
         # Initialize error tracking (minimal setup)
         error_tracker = ErrorTracker(
@@ -465,6 +470,57 @@ async def invalid_input_exception_handler(request: Request, exc: InvalidInputErr
         content={"detail": str(exc)},
     )
 
+# Register user endpoint
+from algosat.api.schemas import UserRegisterRequest, UserResponse
+
+@app.post("/auth/register", response_model=UserResponse, tags=["Authentication"])
+async def register_user(user: UserRegisterRequest, request: Request):
+    """User registration endpoint."""
+    async with AsyncSessionLocal() as session:
+        # Check if username or email already exists
+        if await get_user_by_username(session, user.username):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Username already exists")
+        if await get_user_by_email(session, user.email):
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already exists")
+        # Hash password
+        hashed_password = security_manager.hash_password(user.password)
+        # Create user
+        db_user = await create_user(
+            session,
+            username=user.username,
+            email=user.email,
+            hashed_password=hashed_password,
+            full_name=user.full_name,
+        )
+        return UserResponse(**db_user)
+
+# New endpoints to list and delete users
+@app.get("/users", response_model=List[UserResponse], tags=["Users"])
+async def list_users(
+    skip: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
+    current_user: Dict = Depends(get_current_user)
+):
+    """List all users (paginated, requires authentication)."""
+    async with AsyncSessionLocal() as session:
+        from algosat.core.dbschema import users
+        result = await session.execute(select(users).offset(skip).limit(limit))
+        users_list = [UserResponse(**dict(row._mapping)) for row in result.fetchall()]
+        return users_list
+
+@app.delete("/users/{user_id}", response_model=dict, tags=["Users"])
+async def delete_user(user_id: int, current_user: Dict = Depends(get_current_user)):
+    """Delete a user by user_id (requires authentication)."""
+    async with AsyncSessionLocal() as session:
+        from algosat.core.dbschema import users
+        result = await session.execute(select(users).where(users.c.id == user_id))
+        user = result.first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        await session.execute(users.delete().where(users.c.id == user_id))
+        await session.commit()
+        return {"detail": f"User {user_id} deleted"}
+
 # Include existing routers with security wrapper
 def create_secured_router(router, prefix: str, tags: List[str]):
     """Wrap existing router with security middleware."""
@@ -531,6 +587,30 @@ async def global_exception_handler(request: Request, exc: Exception):
             "timestamp": datetime.utcnow().isoformat()
         }
     )
+
+# Define get_current_user here to use the correct security_manager
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+security = HTTPBearer(auto_error=False)
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    global security_manager
+    if not credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required"
+        )
+    if not security_manager:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Security manager not initialized"
+        )
+    user_info = await security_manager.validate_token(credentials.credentials)
+    if not user_info:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token"
+        )
+    return user_info
 
 if __name__ == "__main__":
     uvicorn.run(

@@ -18,7 +18,7 @@ from datetime import datetime  # moved to top
 from algosat.common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
 from algosat.core.time_utils import get_ist_now
 
-from algosat.core.dbschema import metadata, orders, broker_credentials, strategies, strategy_configs # Added orders, broker_credentials, strategies, strategy_configs
+from algosat.core.dbschema import metadata, orders, broker_credentials, strategies, strategy_configs, users # Added users
 
 # 1) Create the Async Engine
 engine = create_async_engine(
@@ -515,3 +515,35 @@ async def get_orders_by_broker_and_strategy(session: AsyncSession, broker_name: 
     )
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_user_by_username(session: AsyncSession, username: str):
+    from algosat.core.dbschema import users
+    stmt = select(users).where(users.c.username == username)
+    result = await session.execute(stmt)
+    row = result.first()
+    return dict(row._mapping) if row else None
+
+async def get_user_by_email(session: AsyncSession, email: str):
+    from algosat.core.dbschema import users
+    stmt = select(users).where(users.c.email == email)
+    result = await session.execute(stmt)
+    row = result.first()
+    return dict(row._mapping) if row else None
+
+async def create_user(session: AsyncSession, username: str, email: str, hashed_password: str, full_name: str = None, role: str = "user"):
+    from algosat.core.dbschema import users
+    new_user = {
+        "username": username,
+        "email": email,
+        "hashed_password": hashed_password,
+        "full_name": full_name,
+        "role": role,
+        "is_active": True,
+    }
+    stmt = users.insert().values(**new_user)
+    await session.execute(stmt)
+    await session.commit()
+    # Fetch the user just created
+    result = await session.execute(select(users).where(users.c.username == username))
+    row = result.first()
+    return dict(row._mapping) if row else None

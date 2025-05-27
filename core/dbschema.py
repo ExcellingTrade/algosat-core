@@ -146,3 +146,16 @@ orders = Table(
     Column("order_ids", JSON, nullable=False, server_default=text("'[]'::jsonb")),
     Column("order_messages", JSON, nullable=False, server_default=text("'{}'::jsonb")),
 )
+
+users = Table(
+    "users", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("username", String, nullable=False, unique=True),
+    Column("email", String, nullable=False, unique=True),
+    Column("hashed_password", String, nullable=False),
+    Column("full_name", String, nullable=True),
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    Column("role", String, nullable=False, server_default=text("'user'")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+)

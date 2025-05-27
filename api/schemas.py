@@ -228,3 +228,24 @@ class PnLResponse(BaseModel):
     details: Optional[List[Any]] = None
     class Config:
         from_attributes = True
+
+# --- User Schemas ---
+class UserRegisterRequest(BaseModel):
+    """Request model for user registration."""
+    username: str = Field(..., min_length=3, max_length=50, description="Unique username for the user")
+    email: str = Field(..., min_length=5, max_length=254, description="User's email address")
+    password: str = Field(..., min_length=8, max_length=128, description="User's password (will be hashed)")
+    full_name: Optional[str] = Field(None, max_length=100, description="Full name of the user")
+
+class UserResponse(BaseModel):
+    """Response model for user information."""
+    id: int
+    username: str
+    email: str
+    full_name: Optional[str]
+    is_active: bool
+    role: str
+    created_at: datetime
+    updated_at: datetime
+    class Config:
+        from_attributes = True

@@ -2,10 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import Dict, Any, List # Added List and Any
 
 from algosat.api.schemas import PositionResponse
-from algosat.api.dependencies import get_db, get_current_user # Updated import
-from algosat.core.security import EnhancedInputValidator, InvalidInputError # Fixed import path
+from algosat.api.dependencies import get_db
+from algosat.api.auth_dependencies import get_current_user
+from algosat.core.security import EnhancedInputValidator # Fixed import path
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 input_validator = EnhancedInputValidator() # Added
 
 # (For future: you can add get_all_positions, get_positions_by_broker, etc. to core/db.py)

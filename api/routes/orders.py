@@ -3,10 +3,11 @@ from typing import Dict, Any, List, Optional
 
 from algosat.core.db import get_all_orders, get_order_by_id, get_orders_by_broker, get_orders_by_broker_and_strategy
 from algosat.api.schemas import OrderListResponse, OrderDetailResponse
-from algosat.api.dependencies import get_db, get_current_user
+from algosat.api.dependencies import get_db
+from algosat.api.auth_dependencies import get_current_user
 from algosat.core.security import EnhancedInputValidator, InvalidInputError
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(get_current_user)])
 input_validator = EnhancedInputValidator()
 
 @router.get("/", response_model=List[OrderListResponse])

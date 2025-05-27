@@ -15,19 +15,21 @@ from algosat.api.schemas import (
     StrategyConfigDetailResponse,
     StrategyConfigUpdate,
 )
-from algosat.api.dependencies import get_db, get_current_user # Updated import
-from algosat.core.security import EnhancedInputValidator, InvalidInputError # Fixed import path
+from algosat.api.dependencies import get_db
+from algosat.api.auth_dependencies import get_current_user
+from algosat.core.security import EnhancedInputValidator, InvalidInputError
 
-router = APIRouter()
-input_validator = EnhancedInputValidator() # Added
+# Require authentication for all endpoints in this router
+router = APIRouter(dependencies=[Depends(get_current_user)])
+input_validator = EnhancedInputValidator()
 
 @router.get("/", response_model=List[StrategyListResponse])
-async def list_strategies(db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def list_strategies(db=Depends(get_db)):
     strategies = [StrategyListResponse(**row) for row in await get_all_strategies(db)]
     return sorted(strategies, key=lambda s: s.id)
 
 @router.get("/{strategy_id}", response_model=StrategyDetailResponse)
-async def get_strategy(strategy_id: int, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_strategy(strategy_id: int, db=Depends(get_db)):
     validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
     row = await get_strategy_by_id(db, validated_strategy_id)
     if not row:
@@ -35,13 +37,13 @@ async def get_strategy(strategy_id: int, db=Depends(get_db), current_user: Dict[
     return StrategyDetailResponse(**row)
 
 @router.get("/{strategy_id}/configs", response_model=List[StrategyConfigListResponse])
-async def list_strategy_configs_for_strategy(strategy_id: int, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def list_strategy_configs_for_strategy(strategy_id: int, db=Depends(get_db)):
     validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
     configs = [StrategyConfigListResponse(**row) for row in await get_strategy_configs_by_strategy_id(db, validated_strategy_id)]
     return sorted(configs, key=lambda c: c.id)
 
 @router.get("/configs/{config_id}", response_model=StrategyConfigDetailResponse)
-async def get_strategy_config_detail(config_id: int, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_strategy_config_detail(config_id: int, db=Depends(get_db)):
     validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
     row = await get_strategy_config_by_id(db, validated_config_id)
     if not row:
@@ -52,7 +54,7 @@ async def get_strategy_config_detail(config_id: int, db=Depends(get_db), current
     return StrategyConfigDetailResponse(**row)
 
 @router.get("/{strategy_id}/confesigs/{config_id}", response_model=StrategyConfigDetailResponse)
-async def get_strategy_config_detail_for_strategy(strategy_id: int, config_id: int, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def get_strategy_config_detail_for_strategy(strategy_id: int, config_id: int, db=Depends(get_db)):
     validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
     validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
     row = await get_strategy_config_by_id(db, validated_config_id)
@@ -67,7 +69,7 @@ async def get_strategy_config_detail_for_strategy(strategy_id: int, config_id: i
     return StrategyConfigDetailResponse(**row)
 
 @router.put("/configs/{config_id}", response_model=StrategyConfigDetailResponse)
-async def update_strategy_config_params(config_id: int, update: StrategyConfigUpdate, db=Depends(get_db), current_user: Dict[str, Any] = Depends(get_current_user)):
+async def update_strategy_config_params(config_id: int, update: StrategyConfigUpdate, db=Depends(get_db)):
     validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
     # Validate fields within update.params if necessary.
     if update.params:
