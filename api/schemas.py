@@ -173,6 +173,7 @@ class OrderDetailResponse(BaseModel):
     supertrend_signal: Optional[str] = None
     order_ids: Optional[Any] = None
     order_messages: Optional[Any] = None
+    raw_response: Optional[Any] = None  # Expose raw broker API payload(s) in API response
 
     @field_serializer("signal_time", "entry_time", "exit_time")
     def serialize_dt(self, v):

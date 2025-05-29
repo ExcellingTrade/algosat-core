@@ -359,16 +359,15 @@ class BrokerManager:
         """
         Build a broker-agnostic OrderRequest from a TradeSignal and StrategyConfig.
         Ensures order_type is always set, using broker/signal defaults, config, or fallback to OrderType.MARKET.
+        Populates all relevant fields for DB and broker adapters, using the 'extra' field for non-core OrderRequest fields.
         """
         broker_name = getattr(config, 'broker_id', 'fyers')
         defaults = ORDER_DEFAULTS.get(broker_name, {}).get(signal.signal_type, {})
         # Priority: config.trade['order_type'] > defaults > fallback
         order_type = None
-        # 1. Check config.trade (user override)
         if hasattr(config, 'trade') and isinstance(config.trade, dict):
             ot = config.trade.get('order_type')
             if ot:
-                # Accept both enum and string
                 if isinstance(ot, OrderType):
                     order_type = ot
                 elif isinstance(ot, str):
@@ -376,7 +375,6 @@ class BrokerManager:
                         order_type = OrderType[ot.upper()]
                     except Exception:
                         order_type = None
-        # 2. Check broker/signal defaults
         if not order_type:
             ot = defaults.get('order_type')
             if isinstance(ot, OrderType):
@@ -386,15 +384,31 @@ class BrokerManager:
                     order_type = OrderType[ot.upper()]
                 except Exception:
                     order_type = None
-        # 3. Fallback
         if not order_type:
             order_type = OrderType.MARKET
+        # --- Only include fields defined in OrderRequest, others go in 'extra' ---
         order_kwargs = {**defaults}
         order_kwargs.update({
             'symbol': signal.symbol,
             'side': signal.side,
-            'price': signal.price,
             'order_type': order_type,
-            'quantity': getattr(config, 'quantity', 1) or config.trade.get('quantity', 1),
+            'quantity': getattr(config, 'quantity', 1) or (config.trade.get('quantity', 1) if hasattr(config, 'trade') and isinstance(config.trade, dict) else 1),
         })
+        # Core OrderRequest fields
+        if hasattr(signal, 'price') and signal.price is not None:
+            order_kwargs['price'] = signal.price
+        if hasattr(signal, 'trigger_price') and signal.trigger_price is not None:
+            order_kwargs['trigger_price'] = signal.trigger_price
+        # All other fields go into 'extra'
+        extra = {}
+        for field in [
+            'candle_range', 'entry_price', 'stop_loss', 'target_price', 'profit', 'signal_time', 'exit_time',
+            'exit_price', 'status', 'reason', 'atr', 'supertrend_signal', 'lot_qty', 'entry_time', 'order_ids', 'order_messages']:
+            val = getattr(signal, field, None)
+            if val is not None:
+                extra[field] = val
+        # Also allow config to override/add extra fields
+        if hasattr(config, 'extra') and isinstance(config.extra, dict):
+            extra.update({k: v for k, v in config.extra.items() if v is not None})
+        order_kwargs['extra'] = extra
         return OrderRequest(**order_kwargs)

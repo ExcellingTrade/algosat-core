@@ -150,6 +150,7 @@ orders = Table(
     Column("order_ids", JSONB, nullable=True),
     Column("order_messages", JSONB, nullable=True),
     Column("qty", Integer, nullable=True),
+    Column("raw_response", JSONB, nullable=True),  # NEW: store full broker API payload(s)
 )
 
 users = Table(

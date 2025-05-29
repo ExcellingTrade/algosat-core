@@ -47,19 +47,18 @@ from algosat.common.broker_utils import shutdown_gracefully, get_broker_credenti
 from algosat.common.logger import get_logger
 from algosat.core.time_utils import get_ist_datetime, localize_to_ist
 from pyvirtualdisplay import Display
-from algosat.core.order_request import OrderRequest, Side, OrderType
 
 # === Broker-specific API code mapping ===
 # These mappings translate generic enums to Fyers API codes. Do not move these to order_defaults.py.
 SIDE_MAP = {
-    Side.BUY: 1,   # Fyers API: 1 for BUY
-    Side.SELL: -1, # Fyers API: -1 for SELL
+    "BUY": 1,   # Fyers API: 1 for BUY
+    "SELL": -1, # Fyers API: -1 for SELL
 }
 
 ORDER_TYPE_MAP = {
-    OrderType.LIMIT: 1,   # Fyers API: 1 = Limit Order
-    OrderType.MARKET: 2,  # Fyers API: 2 = Market Order
-    OrderType.SL: 3,      # Fyers API: 3 = Stop Order (SL-M)
+    "LIMIT": 1,   # Fyers API: 1 = Limit Order
+    "MARKET": 2,  # Fyers API: 2 = Market Order
+    "SL": 3,      # Fyers API: 3 = Stop Order (SL-M)
     # Add more mappings as needed
 }
 
@@ -100,20 +99,6 @@ logger = get_logger("fyers_wrapper")
 # rate_limiter = Limiter(10, max_burst=20)
 rate_limiter_per_second = Limiter(9 / 1)  # 10 requests per second
 rate_limiter_per_minute = Limiter(190 / 60)
-
-
-class OrderRequest:
-    def __init__(self, symbol: str, quantity: int, side: str, order_type: str, price: float = None, trigger_price: float = None, product_type: str = None, tag: str = None, validity: str = None, **kwargs):
-        self.symbol = symbol
-        self.quantity = quantity
-        self.side = side  # "BUY" or "SELL"
-        self.order_type = order_type  # "MARKET", "LIMIT", "SL", etc.
-        self.price = price
-        self.trigger_price = trigger_price
-        self.product_type = product_type
-        self.tag = tag
-        self.validity = validity
-        self.extra = kwargs
 
 
 class FyersWrapper(BrokerInterface):
@@ -625,35 +610,31 @@ class FyersWrapper(BrokerInterface):
         except Exception as e:
             raise RuntimeError(f"Failed to place order (sync): {e}")
 
-    async def place_order(self, order_request: OrderRequest) -> dict:
+    async def place_order(self, order_request):
         """
         Place an order with Fyers using a generic OrderRequest object.
         """
-        fyers_payload = {
-            "symbol":      order_request.symbol,
-            "qty":         order_request.quantity,
-            "type":        ORDER_TYPE_MAP[order_request.order_type],
-            "side":        SIDE_MAP[order_request.side],
-            "productType": PRODUCT_TYPE_MAP.get(order_request.product_type, "INTRADAY"),
-            "limitPrice":  float(order_request.price) if order_request.price is not None else 0,
-            "stopPrice":   float(order_request.trigger_price) if order_request.trigger_price is not None else 0,
-            "disclosedQty": order_request.extra.get("disclosedQty", 0),
-            "validity":     order_request.validity or "DAY",
-            "offlineOrder": order_request.extra.get("offlineOrder", False),
-            "stopLoss":     order_request.extra.get("stopLoss", 0),
-            "takeProfit":   order_request.extra.get("takeProfit", 0),
-            "orderTag":     order_request.tag or ""
-        }
-        # Remove any None values
+        fyers_payload = order_request.to_fyers_dict()
         fyers_payload = {k: v for k, v in fyers_payload.items() if v is not None}
         try:
-            print(fyers_payload)
             response = await self.fyers.place_order(fyers_payload)
             logger.info(f"Fyers order placed: {response}")
-            return response
+            from algosat.core.order_request import OrderResponse
+            return OrderResponse.from_fyers(response, order_request=order_request).dict()
         except Exception as e:
             logger.error(f"Fyers order placement failed: {e}")
-            return {"error": str(e)}
+            from algosat.core.order_request import OrderStatus, OrderResponse
+            return OrderResponse(
+                status=OrderStatus.FAILED,
+                order_ids=[],
+                order_messages={},
+                broker="fyers",
+                raw_response=None,
+                symbol=getattr(order_request, 'symbol', None),
+                side=getattr(order_request, 'side', None),
+                quantity=getattr(order_request, 'quantity', None),
+                order_type=getattr(order_request, 'order_type', None)
+            ).dict()
 
     @staticmethod
     async def split_and_place_order(total_qty, max_nse_qty, trigger_price_diff, **order_params):
