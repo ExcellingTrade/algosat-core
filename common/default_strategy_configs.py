@@ -9,6 +9,7 @@ OPTION_BUY_DEFAULT_CONFIG = {
     "symbol": "NIFTY50",
     "exchange": "NSE",
     "instrument": "INDEX",
+    "product_type": "INTRADAY",
 
     # Trade-specific parameters
     "trade": {
@@ -70,6 +71,7 @@ OPTION_BUY_DEFAULT_CONFIG = {
 OPTION_SELL_DEFAULT_CONFIG = {
     **OPTION_BUY_DEFAULT_CONFIG,
     # You can override or add OptionSell-specific params here
+    "product_type": "INTRADAY",
 }
 
 # Default config for SwingHighLow (now with required keys and empty/placeholder values)
@@ -81,6 +83,7 @@ SWING_HIGH_LOW_DEFAULT_CONFIG = {
     "indicators": {},
     "is_default": True,
     "enabled": True,
+    "product_type": "INTRADAY",
 }
 
 DEFAULT_STRATEGY_CONFIGS = {

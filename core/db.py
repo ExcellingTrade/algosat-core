@@ -11,7 +11,7 @@ except ModuleNotFoundError as e:
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import inspect, Table, MetaData, update, select, delete, func # Modified import
+from sqlalchemy import inspect, Table, MetaData, update, select, delete, func, text # Modified import
 
 import os
 from datetime import datetime  # moved to top
@@ -348,7 +348,7 @@ async def reset_table_sequence(conn, table_name: str, sequence_name: str, restar
     """
     Reset the sequence for a table's autoincrementing primary key (PostgreSQL).
     """
-    await conn.execute(f"ALTER SEQUENCE {sequence_name} RESTART WITH {restart_with};")
+    await conn.execute(text(f"ALTER SEQUENCE {sequence_name} RESTART WITH {restart_with};"))
 
 
 # Example usage in your seeding/init logic (call after dropping and recreating tables):
@@ -381,7 +381,7 @@ async def insert_order(session, order_data):
     Returns:
         The inserted order row as a dict, or None if failed.
     """
-    from core.dbschema import orders
+    from algosat.core.dbschema import orders
     stmt = orders.insert().values(**order_data)
     res = await session.execute(stmt)
     await session.commit()
@@ -573,3 +573,17 @@ async def get_open_orders_for_symbol_and_tradeday(session, symbol: str, trade_da
     )
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
+
+# --- Data Provider Broker ---
+async def get_data_enabled_broker(session):
+    """
+    Return the broker row where is_data_provider=True and is_enabled=True.
+    """
+    result = await session.execute(
+        select(broker_credentials).where(
+            broker_credentials.c.is_data_provider == True,
+            broker_credentials.c.is_enabled == True
+        )
+    )
+    row = result.first()
+    return dict(row._mapping) if row else None

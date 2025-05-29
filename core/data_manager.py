@@ -147,20 +147,29 @@ class DataManager:
         return self.rate_limiter
 
     async def ensure_broker(self):
+        logger.debug(f"Entering ensure_broker. Current broker: {self.broker}, broker_name: {self.broker_name}")
         if self.broker:
+            logger.debug(f"Broker already set: {self.broker} (type: {type(self.broker)})")
             return
         if self.broker_manager:
-            # Always use get_data_broker for unified broker selection logic
-            self.broker = self.broker_manager.get_data_broker(broker_name=self.broker_name)
+            logger.debug(f"Attempting to get broker from broker_manager with broker_name: {self.broker_name}")
+            try:
+                self.broker = self.broker_manager.get_data_broker(broker_name=self.broker_name)
+                logger.debug(f"Broker set from manager: {self.broker} (type: {type(self.broker)})")
+            except Exception as e:
+                logger.error(f"Exception in get_data_broker: {e}", exc_info=True)
+                raise
             # If broker_name is not set, but a broker is found, set broker_name to the actual broker used
             if not self.broker_name and self.broker:
-                # Try to get the broker's name from the broker_manager mapping
                 for name, broker in self.broker_manager.brokers.items():
                     if broker is self.broker:
                         self.broker_name = name
+                        logger.debug(f"broker_name set from broker_manager mapping: {self.broker_name}")
                         break
         if not self.broker:
+            logger.error("No broker available for DataManager! Raising RuntimeError.")
             raise RuntimeError("No broker available for DataManager!")
+        logger.debug(f"Exiting ensure_broker. Final broker: {self.broker}, broker_name: {self.broker_name}")
 
     async def get_option_chain(self, symbol, expiry=None, ttl=120):
         await self.ensure_broker()

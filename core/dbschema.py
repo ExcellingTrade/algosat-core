@@ -4,6 +4,7 @@ from sqlalchemy import (
     MetaData, Table, Column, Integer, String, Boolean,
     JSON, DateTime, ForeignKey, text, UniqueConstraint, Index, Float
 )
+from sqlalchemy.dialects.postgresql import JSONB
 
 metadata = MetaData()
 
@@ -24,6 +25,7 @@ strategy_configs = Table(
     Column("symbol", String, nullable=False),
     Column("exchange", String, nullable=False),
     Column("instrument", String, nullable=True),
+    Column("product_type", String, nullable=False, server_default=text("'INTRADAY'")),  # "INTRADAY" or "DELIVERY"
     Column("trade", JSON, nullable=False, server_default=text("'{}'::jsonb")),
     Column("indicators", JSON, nullable=False, server_default=text("'{}'::jsonb")),
     Column("is_default", Boolean, nullable=False, server_default=text("false")),
@@ -124,12 +126,14 @@ Index(
 )
 
 orders = Table(
-    "orders", metadata,
+    "orders",
+    metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("parent_order_id", Integer, nullable=True, index=True),  # New: group logical trades
     Column("strategy_config_id", Integer, ForeignKey("strategy_configs.id"), nullable=False, index=True),
     Column("broker_id", Integer, ForeignKey("broker_credentials.id"), nullable=False, index=True),
     Column("symbol", String, nullable=False, index=True),
-    Column("candle_range",  String, nullable=True),
+    Column("candle_range",  Float, nullable=True),  # Changed from String to Float
     Column("entry_price",  Float, nullable=True),
     Column("stop_loss",  Float, nullable=True),
     Column("target_price",  Float, nullable=True),
@@ -143,8 +147,9 @@ orders = Table(
     Column("supertrend_signal", String, nullable=True),
     Column("lot_qty", Integer, nullable=True),
     Column("side", String, nullable=True),  # Changed from Integer to String for broker-agnostic side
-    Column("order_ids", JSON, nullable=False, server_default=text("'[]'::jsonb")),
-    Column("order_messages", JSON, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("order_ids", JSONB, nullable=True),
+    Column("order_messages", JSONB, nullable=True),
+    Column("qty", Integer, nullable=True),
 )
 
 users = Table(
@@ -159,3 +164,6 @@ users = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 )
+
+# NOTE: The migrations folder is deprecated and will be removed as per current development workflow.
+# All schema changes should be handled by dropping and recreating tables during development.

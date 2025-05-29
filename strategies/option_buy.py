@@ -162,32 +162,31 @@ class OptionBuyStrategy(StrategyBase):
         """Synchronize self._positions with open orders in the database for all strikes for the current trade day."""
         self._positions = {}
         async with AsyncSessionLocal() as session:
-            from common.broker_utils import get_trade_day
-            from core.time_utils import get_ist_datetime
             trade_day = get_trade_day(get_ist_datetime())
             for strike in self._strikes:
                 open_orders = await get_open_orders_for_symbol_and_tradeday(session, strike, trade_day)
                 if open_orders:
                     self._positions[strike] = open_orders
 
-    async def process_cycle(self) -> None:
+    async def process_cycle(self) -> Optional[dict]:
         """
         Main signal evaluation cycle for OptionBuyStrategy.
         Refactored for clarity: 1) Fetch history, 2) Compute indicators, 3) Evaluate signal, 4) Place order.
+        Returns order info dict if an order is placed, else None.
         """
         if getattr(self, '_setup_failed', False) or not self._strikes:
             logger.warning("process_cycle aborted: setup failed or no strikes available.")
-            return
+            return None
         trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=5)
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=3)
         # 1. Fetch history for all strikes
         history_data = await self.fetch_history_data(
             self.dp, self._strikes, trade_day, trade_config
         )
         if not history_data or all(h is None or getattr(h, 'empty', False) for h in history_data.values()):
             logger.warning("No history data received for strikes. Skipping signal evaluation.")
-            return
+            return None
         # 2. Compute indicators for each strike
         indicator_data = {
             strike: self.compute_indicators(data, trade_config, strike)
@@ -208,9 +207,12 @@ class OptionBuyStrategy(StrategyBase):
                     continue
                 signal_payload = self.evaluate_trade_signal(data, trade_config, strike)
                 # 4. Place order if signal
-                await self.process_order(signal_payload, data, strike)
+                order_info = await self.process_order(signal_payload, data, strike)
+                if order_info:
+                    return order_info  # Return as soon as an order is placed
             except Exception as e:
                 logger.error(f"Error during signal evaluation or order for {strike}: {e}")
+        return None  # No order placed
 
     async def fetch_history_data(self, broker, strike_symbols, current_date, trade_config: dict):
         """
@@ -225,7 +227,7 @@ class OptionBuyStrategy(StrategyBase):
                                                 get_ist_datetime().time())
             end_date = calculate_end_date(current_end_date,
                                           trade_config['interval_minutes'])
-            end_date = end_date.replace(hour=10, minute=20, second=0, microsecond=0)
+            end_date = end_date.replace(hour=9, minute=40, second=0, microsecond=0)
             logger.info(f"Fetching history for strike symbols {', '.join(str(strike) for strike in strike_symbols)}...")
             history_data = await fetch_strikes_history(
                 self.dp,
@@ -267,6 +269,7 @@ class OptionBuyStrategy(StrategyBase):
         """
         Process order using the new TradeSignal and BrokerManager logic.
         Always pass self.cfg (StrategyConfig) as the config to order_manager.place_order for correct DB logging.
+        Returns order info dict with local DB order_id if an order is placed, else None.
         """
         if signal_payload:
             ts = data.iloc[-1].get('timestamp', 'N/A')
@@ -274,14 +277,16 @@ class OptionBuyStrategy(StrategyBase):
             order_request = self.order_manager.broker_manager.build_order_request_from_signal(
                 signal_payload, self.cfg
             )
-            # Pass self.cfg (StrategyConfig), not self.trade, to order_manager.place_order
-            await self.order_manager.place_order(
+            # Place order(s) with broker(s) via OrderManager, which handles DB updates
+            result = await self.order_manager.place_order(
                 self.cfg,  # config (StrategyConfig, has id)
                 order_request,
                 strategy_name=None
             )
+            return result
         else:
             logger.debug(f"No signal for {strike} at {data.iloc[-1].get('timestamp', 'N/A')}")
+            return None
 
     def evaluate_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
         """
@@ -328,7 +333,20 @@ class OptionBuyStrategy(StrategyBase):
                     symbol=strike,
                     side=trade_dict.get('side', Side.BUY),
                     price=trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
-                    signal_type=SignalType.ENTRY
+                    signal_type=SignalType.ENTRY,
+                    candle_range=trade_dict.get(constants.TRADE_KEY_CANDLE_RANGE),
+                    entry_price=trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
+                    stop_loss=trade_dict.get(constants.TRADE_KEY_STOP_LOSS),
+                    target_price=trade_dict.get(constants.TRADE_KEY_TARGET_PRICE),
+                    signal_time=trade_dict.get(constants.TRADE_KEY_SIGNAL_TIME),
+                    exit_time=trade_dict.get(constants.TRADE_KEY_EXIT_TIME),
+                    exit_price=trade_dict.get(constants.TRADE_KEY_EXIT_PRICE),
+                    status=trade_dict.get(constants.TRADE_KEY_STATUS),
+                    reason=trade_dict.get(constants.TRADE_KEY_REASON),
+                    atr=trade_dict.get(constants.TRADE_KEY_ATR),
+                    signal_direction=trade_dict.get(constants.TRADE_KEY_SIGNAL_DIRECTION),
+                    lot_qty=trade_dict.get(constants.TRADE_KEY_LOT_QTY),
+                    side_value=trade_dict.get(constants.TRADE_KEY_SIDE)
                 )
             else:
                 logger.debug(

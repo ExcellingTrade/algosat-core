@@ -1,5 +1,6 @@
 from datetime import timedelta
 import asyncio
+import math
 from sqlalchemy import select
 from algosat.core.dbschema import strategies as strategies_table
 from algosat.core.db import AsyncSessionLocal, get_strategy_name_by_id
@@ -46,6 +47,7 @@ async def run_strategy_config(config_row, data_manager: DataManager, order_manag
         # Fallback: fetch from strategies table using strategy_id
         async with AsyncSessionLocal() as session:
             strategy_name = await get_strategy_name_by_id(session, config.strategy_id)
+    logger.debug(f"Config id: {getattr(config, 'id', None)}, strategy_name resolved: '{strategy_name}'")
     StrategyClass = STRATEGY_MAP.get(strategy_name)
     if not StrategyClass:
         logger.debug(f"No strategy class found for '{strategy_name}'")
@@ -125,14 +127,16 @@ async def run_strategy_config(config_row, data_manager: DataManager, order_manag
 
     while True:
         try:
-            order_info = await strategy.process_cycle()
-            # If an order was placed, put it in the order_queue for the manager to monitor
-            if order_info and isinstance(order_info, dict) and "order_id" in order_info:
-                await order_queue.put({
-                    "order_id": order_info["order_id"],
-                    "config": config_row,
-                    "interval_minutes": interval_minutes
-                })
+            order_ids = await strategy.process_cycle()
+            logger.info(f"Processed cycle for strategy '{strategy_name}' with order ids: {order_ids}")
+            # If orders were placed, put each order_id in the order_queue for the manager to monitor
+            if order_ids and isinstance(order_ids, list):
+                for order_id in order_ids:
+                    await order_queue.put({
+                        "order_id": order_id,
+                        "config": config,
+                        "interval_minutes": interval_minutes
+                    })
         except Exception as e:
             logger.error(f"Error in run_tick for '{strategy_name}': {e}", exc_info=True)
         try:

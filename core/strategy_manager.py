@@ -31,10 +31,8 @@ async def order_monitor_loop(order_queue, data_manager, order_manager):
         if order_id not in order_monitors:
             monitor = OrderMonitor(
                 order_id=order_id,
-                config=order_info["config"],
                 data_manager=data_manager,
-                order_manager=order_manager,
-                interval_minutes=order_info["interval_minutes"]
+                order_manager=order_manager
             )
             order_monitors[order_id] = asyncio.create_task(monitor.start())
     logger.info("Order monitor loop has exited")
@@ -75,6 +73,7 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                             sq_time = datetime.datetime.strptime(square_off_time, "%H:%M").time()
                             st_time = datetime.datetime.strptime(start_time, "%H:%M").time()
                             st_time = st_time.replace(hour=4, minute=0)  # Adjust start time to 4 AM
+                            sq_time = sq_time.replace(hour=21, minute=0)  # Adjust stop time to 4 AM
                             def is_time_between(start, end, now):
                                 if start < end:
                                     return start <= now < end

@@ -15,6 +15,7 @@ import cachetools
 from typing import TYPE_CHECKING, Optional
 from algosat.utils.indicators import calculate_atr
 from algosat.core.order_request import OrderRequest, Side, OrderType
+from algosat.common import constants
 
 if TYPE_CHECKING:
     from core.data_provider.provider import DataManager
@@ -114,7 +115,7 @@ async def fetch_strikes_history(
                 success=success_count,
                 fail=fail_count,
             )
-    logger.info(f"🟢 Completed fetching history. Successful fetches: {success_count}/{len(strike_symbols)} | Failures: {fail_count}")
+    logger.debug(f"🟢 Completed fetching history. Successful fetches: {success_count}/{len(strike_symbols)} | Failures: {fail_count}")
     return results
 
 
@@ -133,7 +134,6 @@ async def fetch_option_chain_and_first_candle_history(broker: 'DataManager', sym
 
 def identify_strike_price_combined(option_chain_df=None, history_data=None, max_premium=200):
     import pandas as pd
-    from common import constants
     try:
         if option_chain_df is not None:
             # Normalize price field if needed (e.g., ltp to price)
@@ -188,7 +188,6 @@ def identify_strike_price_combined(option_chain_df=None, history_data=None, max_
             logger.warning("🟡 No option_chain_df or history_data provided to identify strikes.")
             return None, None
 
-        from common import constants
         # Select the highest-price CE and PE under max_premium
         if not ce_data.empty:
             ce_sorted = ce_data.sort_values(by=constants.COLUMN_PRICE, ascending=False)
@@ -347,8 +346,6 @@ def calculate_trade(candle, history_upto_candle, strike_symbol, trade_config, si
     :param side: Side enum (Side.BUY or Side.SELL)
     :return: A dictionary containing trade details.
     """
-    from common import constants
-    from core.order_request import Side
     history_upto_candle = calculate_atr(history_upto_candle, trade_config.get('atr_multiplier',10))
     atr_value = history_upto_candle['atr'].iloc[-1].round(2)
     candle_range = round(candle[constants.COLUMN_HIGH] - candle[constants.COLUMN_LOW], 2)
@@ -445,7 +442,6 @@ async def process_trade(order_manager, trade, trade_config, strategy_config_id, 
     :param broker_id: Broker ID for DB tracking.
     :return: Result dict for the placed order or error info.
     """
-    from common import constants
     try:
         symbol = trade[constants.TRADE_KEY_SYMBOL]
         is_call_option = constants.OPTION_TYPE_CALL in symbol
