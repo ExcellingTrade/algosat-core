@@ -1486,7 +1486,7 @@ def can_reuse_token(generated_on_str, ist_timezone=None):
         current_ist_time = get_ist_datetime()
         if current_ist_time.tzinfo is None:
             current_ist_time = ist_timezone.localize(current_ist_time)
-        today_6am = current_ist_time.replace(hour=6, minute=0, second=0, microsecond=0)
+        today_6am = current_ist_time.replace(hour=5, minute=0, second=0, microsecond=0)
         # Token is valid if generated after 6 AM today, or if generated before 6 AM and it's still before 6 AM
         if token_generated_on >= today_6am or current_ist_time < today_6am:
             return True

@@ -1,11 +1,17 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, BackgroundTasks
 from typing import Dict, Any, List
+import asyncio
 
 from algosat.core.db import get_all_brokers, get_broker_by_name, add_broker, update_broker, delete_broker
 from algosat.api.schemas import BrokerResponse, BrokerCreate, BrokerUpdate, BrokerListResponse, BrokerDetailResponse
 from algosat.api.dependencies import get_db
 from algosat.api.auth_dependencies import get_current_user
 from algosat.core.security import EnhancedInputValidator, InvalidInputError
+from algosat.common.logger import get_logger
+
+logger = get_logger("api.brokers")
+
+# from algosat.main import broker_manager
 
 # Require authentication for all endpoints in this router
 router = APIRouter(dependencies=[Depends(get_current_user)])
@@ -94,8 +100,14 @@ async def disable_trade_execution(broker_name: str, db=Depends(get_db)):
 @router.post("/{broker_name}/auth")
 async def reauth_broker(broker_name: str):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
-    # TODO: Implement broker re-authentication logic
-    return {"status": "reauth_triggered", "broker_name": validated_broker_name}
+    from algosat.main import broker_manager
+    # Schedule the reauth as a background task using asyncio.create_task
+    asyncio.create_task(broker_manager.reauthenticate_broker(validated_broker_name))
+    return {
+        "status": "reauth_started",
+        "broker_name": validated_broker_name,
+        "message": "Reauthentication started. Check /brokers/{broker_name} for the new token's generated_on field. If not updated within a minute, check logs for errors."
+    }
 
 @router.put("/{broker_name}", response_model=BrokerResponse)
 async def update_broker_api(

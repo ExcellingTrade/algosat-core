@@ -172,7 +172,8 @@ class DataManager:
         logger.debug(f"Exiting ensure_broker. Final broker: {self.broker}, broker_name: {self.broker_name}")
 
     async def get_option_chain(self, symbol, expiry=None, ttl=120):
-        await self.ensure_broker()
+        if not self.broker:
+            raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
         cache_key = f"option_chain:{symbol}:{expiry}"
         cached = self.cache.get(cache_key, ttl=ttl)
         if cached is not None:
@@ -187,8 +188,26 @@ class DataManager:
         return await _async_retry(_fetch)
 
     async def get_history(self, symbol, from_date, to_date, ohlc_interval, ins_type="", ttl=600, cache=True):
-        await self.ensure_broker()
-        cache_key = f"history:{symbol}:{from_date}:{to_date}:{ohlc_interval}:{ins_type}"
+        if not self.broker:
+            raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
+        from algosat.core.time_utils import get_ist_datetime
+        ist_now = get_ist_datetime()
+        from_dt = pd.to_datetime(from_date)
+        to_dt = pd.to_datetime(to_date)
+        # Only adjust the date(s) that are in the future
+        if from_dt > ist_now:
+            from algosat.common.broker_utils import get_trade_day
+            prev_trade_day = get_trade_day(ist_now - timedelta(days=1))
+            from_time = from_dt.time()
+            from_dt = datetime.combine(prev_trade_day, from_time)
+            logger.debug(f"Adjusted from_date to previous trade day (IST): {from_dt} for symbol {symbol}")
+        if to_dt > ist_now:
+            from algosat.common.broker_utils import get_trade_day
+            prev_trade_day = get_trade_day(ist_now - timedelta(days=1))
+            to_time = to_dt.time()
+            to_dt = datetime.combine(prev_trade_day, to_time)
+            logger.debug(f"Adjusted to_date to previous trade day (IST): {to_dt} for symbol {symbol}")
+        cache_key = f"history:{symbol}:{from_dt}:{to_dt}:{ohlc_interval}:{ins_type}"
         if cache:
             cached = self.cache.get(cache_key, ttl=ttl)
             if cached is not None:
@@ -196,7 +215,7 @@ class DataManager:
                 return cached
         async def _fetch():
             async with self.get_active_rate_limiter():
-                result = self.broker.get_history(symbol, from_date, to_date, ohlc_interval, ins_type)
+                result = self.broker.get_history(symbol, from_dt, to_dt, ohlc_interval, ins_type)
                 history = await result if inspect.isawaitable(result) else result
                 validate_broker_response(history, expected_type="history", symbol=symbol)
                 if cache:
@@ -205,19 +224,14 @@ class DataManager:
         return await _async_retry(_fetch)
 
     async def get_strike_list(self, symbol, max_strikes=40):
-        """
-        Unified interface to fetch strike symbols for a given symbol using the broker's implementation.
-        """
-        await self.ensure_broker()
+        if not self.broker:
+            raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
         if hasattr(self.broker, "get_strike_list"):
             result = self.broker.get_strike_list(symbol, max_strikes)
             return await result if inspect.isawaitable(result) else result
         raise NotImplementedError(f"Broker {self.get_current_broker_name()} does not implement get_strike_list.")
 
     async def get_broker_symbol(self, symbol, instrument_type=None):
-        """
-        Returns the correct symbol/token for the current broker using BrokerManager.get_symbol_info.
-        """
         broker_name = self.get_current_broker_name()
         if not self.broker_manager or not broker_name:
             raise RuntimeError("BrokerManager or broker_name not set in DataManager.")

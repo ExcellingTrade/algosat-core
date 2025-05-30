@@ -32,9 +32,10 @@ class ZerodhaWrapper(BrokerInterface):
         self.kite = None
         self.access_token = None
         
-    async def login(self) -> bool:
+    async def login(self, force_reauth: bool = False) -> bool:
         """
         Authenticate with Zerodha's Kite Connect API using stored credentials and TOTP.
+        If force_reauth is True, always perform a fresh authentication (ignore existing token).
         Returns:
             bool: True if authentication was successful, False otherwise
         """
@@ -56,7 +57,8 @@ class ZerodhaWrapper(BrokerInterface):
             totp_secret = credentials.get("totp_secret")
             # totp_secret = "DDEULTWO73Q65KT7AO3SQQM5Y24BLZ7K"
 
-            if access_token and generated_on_str and can_reuse_token(generated_on_str):
+            # Only reuse token if not forcing reauth
+            if not force_reauth and access_token and generated_on_str and can_reuse_token(generated_on_str):
                 try:
                     self.kite = KiteConnect(api_key=api_key)
                     self.kite.set_access_token(access_token)
@@ -237,8 +239,9 @@ class ZerodhaWrapper(BrokerInterface):
             to_dt = from_dt + pd.Timedelta(minutes=interval_minutes)
         from_date_fmt = from_dt.strftime("%Y-%m-%d %H:%M:%S")
         to_date_fmt = to_dt.strftime("%Y-%m-%d %H:%M:%S")
+        logger.debug(f"Fetching historical data for {symbol} from {from_date_fmt} to {to_date_fmt} with interval {interval}")
         candles = await loop.run_in_executor(None, self.kite.historical_data, token, from_date_fmt, to_date_fmt, interval)
-        print("ZERODHA RAW CANDLES:", candles)
+        # print("ZERODHA RAW CANDLES:", candles, token, from_date_fmt, to_date_fmt, interval)
         # Convert to DataFrame
         if candles and isinstance(candles, list):
             df = pd.DataFrame.from_dict(candles)

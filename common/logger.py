@@ -199,18 +199,21 @@ def configure_root_logger():
 def get_logger(module_name: str) -> logging.Logger:
     """
     Get or configure a logger for the specified module.
-    Uses RichHandler for console output and standard file logging.
+    - All loggers whose name starts with 'api.' will log to logs/api-YYYY-MM-DD.log (rotated daily)
+    - All others log to the main daily log file
     """
-    # File handler for persistent logs (DEBUG and above)
     logger = logging.getLogger(module_name)
     if not logger.handlers:
-        # Add file handler if not already present
         from logging.handlers import RotatingFileHandler
         from datetime import datetime
         import os
         log_dir = os.path.join(os.path.dirname(__file__), '../../logs')
         os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, f"algosat-{get_ist_now().strftime('%Y-%m-%d')}.log")
+        today = get_ist_now().strftime('%Y-%m-%d')
+        if module_name.startswith("api."):
+            log_file = os.path.join(log_dir, f"api-{today}.log")
+        else:
+            log_file = os.path.join(log_dir, f"algosat-{today}.log")
         file_handler = RotatingFileHandler(log_file, maxBytes=2*1024*1024, backupCount=7, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         file_formatter = ISTFormatter(
@@ -219,8 +222,7 @@ def get_logger(module_name: str) -> logging.Logger:
         )
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
-        logger.setLevel(logging.DEBUG)  # Ensure logger emits DEBUG logs
-    # logger.propagate = False
+        logger.setLevel(logging.DEBUG)
     return logger
 
 

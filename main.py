@@ -59,12 +59,14 @@ async def main():
     # 7) Close the database connection
     await engine.dispose()
     logger.info("🟢 Database connection closed.")
-try:
-    asyncio.run(main())
-except KeyboardInterrupt:
-    logger.warning("🔴 Program interrupted by user. Shutting down gracefully...")
-    # signal strategy consumers to stop
-    asyncio.run(order_queue.put(None))
-    # close DB connection
-    asyncio.run(engine.dispose())
-    sys.exit(0)
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.warning("🔴 Program interrupted by user. Shutting down gracefully...")
+        # signal strategy consumers to stop
+        asyncio.run(order_queue.put(None))
+        # close DB connection
+        asyncio.run(engine.dispose())
+        sys.exit(0)

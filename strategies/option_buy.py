@@ -122,7 +122,7 @@ class OptionBuyStrategy(StrategyBase):
         # 1. Wait for first candle completion
         # await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
         # 2. Calculate first candle data using the correct trade day
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=3)
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=0)
         # 3. Fetch option chain and identify strikes
         cache = load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
@@ -179,7 +179,7 @@ class OptionBuyStrategy(StrategyBase):
             return None
         trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=3)
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=0)
         # 1. Fetch history for all strikes
         history_data = await self.fetch_history_data(
             self.dp, self._strikes, trade_day, trade_config
@@ -218,17 +218,18 @@ class OptionBuyStrategy(StrategyBase):
         """
         Fetch candle data for the given strike symbols.
         Split out for clarity and easier backtest override.
+        All datetimes are IST-aware.
         """
         try:
             back_days = calculate_backdate_days(trade_config['interval_minutes'])
             trade_day = get_trade_day(current_date - timedelta(days=back_days))
-            start_date = datetime.combine(trade_day, time(9, 15))
-            current_end_date = datetime.combine(localize_to_ist(current_date),
-                                                get_ist_datetime().time())
-            end_date = calculate_end_date(current_end_date,
-                                          trade_config['interval_minutes'])
-            end_date = end_date.replace(hour=9, minute=40, second=0, microsecond=0)
-            logger.info(f"Fetching history for strike symbols {', '.join(str(strike) for strike in strike_symbols)}...")
+            # Make start_date and end_date IST-aware
+            start_date = localize_to_ist(datetime.combine(trade_day, time(9, 15)))
+            current_end_date = localize_to_ist(datetime.combine(current_date, get_ist_datetime().time()))
+            end_date = calculate_end_date(current_end_date, trade_config['interval_minutes'])
+            end_date = end_date.replace(hour=11, minute=15, second=0, microsecond=0)
+            logger.debug(f"Fetching history for strike symbols {', '.join(str(strike) for strike in strike_symbols)}...")
+            logger.debug(f"Start date: {start_date}, End date: {end_date}, Interval: {trade_config['interval_minutes']} minutes")
             history_data = await fetch_strikes_history(
                 self.dp,
                 self._strikes,
@@ -303,7 +304,7 @@ class OptionBuyStrategy(StrategyBase):
             max_range = config.get('max_range', 100)
             if candle_range > max_range:
                 logger.debug(
-                    f"No valid signal for {strike} at {curr.get('timestamp')}: Candle range {candle_range} exceeds max {max_range}."
+                    f"No valid signal for {strike} at {curr.get('timestamp')}: Candle range {candle_range} exceeds max {max_range} with curr high {curr['high']} and curr low {curr['low']}."
                 )
                 return None
             if (

@@ -31,8 +31,6 @@ import time
 from datetime import datetime
 from urllib.parse import parse_qs, urlparse
 
-import nest_asyncio
-import pandas as pd
 import pyotp
 import pytz
 import requests
@@ -47,6 +45,10 @@ from algosat.common.broker_utils import shutdown_gracefully, get_broker_credenti
 from algosat.common.logger import get_logger
 from algosat.core.time_utils import get_ist_datetime, localize_to_ist
 from pyvirtualdisplay import Display
+
+import pandas as pd
+from algosat.common import constants
+from algosat.core.order_request import OrderResponse, OrderStatus
 
 # === Broker-specific API code mapping ===
 # These mappings translate generic enums to Fyers API codes. Do not move these to order_defaults.py.
@@ -71,7 +73,14 @@ PRODUCT_TYPE_MAP = {
     "MTF": "MTF",
 }
 
-nest_asyncio.apply()
+# Only apply nest_asyncio if not running under uvloop (e.g., in Jupyter, not in production)
+try:
+    loop = asyncio.get_event_loop()
+    if loop.__class__.__module__ != 'uvloop.loop':
+        import nest_asyncio
+        nest_asyncio.apply()
+except Exception:
+    pass
 
 
 # Get the directory of the calling script
@@ -180,10 +189,10 @@ class FyersWrapper(BrokerInterface):
         else:
             return FyersWrapper.check_margin_sync(data)
 
-    async def login(self):
+    async def login(self, force_reauth: bool = False) -> bool:
         """
         Authenticate with Fyers API using stored credentials.
-        This method conforms to the BrokerInterface.
+        If force_reauth is True, always perform a fresh authentication (ignore existing token).
         Returns:
             bool: True if authentication was successful, False otherwise
         """
@@ -198,7 +207,8 @@ class FyersWrapper(BrokerInterface):
             fyers_creds = credentials
             access_token = fyers_creds.get("access_token")
             generated_on_str = fyers_creds.get("generated_on")
-            if access_token and generated_on_str and can_reuse_token(generated_on_str):
+            # Only reuse token if not forcing reauth
+            if not force_reauth and access_token and generated_on_str and can_reuse_token(generated_on_str):
                 try:
                     self.token = access_token
                     self.appId = fyers_creds.get("api_key")
@@ -236,75 +246,8 @@ class FyersWrapper(BrokerInterface):
         return self._setup_auth_sync()
 
     def _setup_auth_sync(self):
-        """Authenticate synchronously."""
-        # Fetch full broker config and extract credentials only
-        full_config = asyncio.run(get_broker_credentials("fyers"))
-        credentials = None
-        if isinstance(full_config, dict):
-            credentials = full_config.get("credentials")
-        if not credentials or not isinstance(credentials, dict):
-            logger.error("No Fyers credentials found in database or credentials are invalid")
-            return False
-
-        # Use can_reuse_token utility for token validation
-        if (
-            "access_token" in credentials and
-            "generated_on" in credentials and
-            can_reuse_token(credentials["generated_on"])
-        ):
-            try:
-                self.fyers = fyersModel.FyersModel(
-                    token=credentials["access_token"],
-                    is_async=self.is_async,
-                    client_id=credentials["api_key"],
-                    log_path=constants.FYER_LOG_DIR,
-                )
-                self.token = credentials["access_token"]
-                self.appId = credentials["api_key"]
-                logger.debug("Successfully authenticated using existing token.")
-                return True
-            except Exception as e:
-                logger.exception("Token validation exception while checking reuse")
-
-        # Perform re-authentication
-        logger.debug("Generating a new access token.")
-        session = fyersModel.SessionModel(
-            client_id=credentials["api_key"],
-            secret_key=credentials["api_secret"],
-            redirect_uri=credentials["redirect_uri"],
-            response_type="code",
-            grant_type="authorization_code",
-        )
-
-        auth_url = session.generate_authcode()
-        auth_code = self.authenticate(
-            url=auth_url,
-            mobile_number=credentials["client_id"], # Assuming client_id is the mobile number
-            password_2fa=credentials["pin"], # Assuming pin is the 2FA password
-            totp_secret_key=credentials["totp_secret"],
-        )
-
-        if not auth_code:
-            return False
-
-        session.set_token(auth_code)
-        response = session.generate_token()
-        credentials["access_token"] = response["access_token"]
-        credentials["generated_on"] = get_ist_datetime().strftime("%d/%m/%Y %H:%M:%S")
-        # Persist the entire broker config, not just the credentials sub-dict
-        full_config["credentials"] = credentials
-        asyncio.run(upsert_broker_credentials("fyers", full_config))
-
-        self.fyers = fyersModel.FyersModel(
-            token=credentials["access_token"],
-            is_async=self.is_async,
-            client_id=credentials["api_key"],
-            log_path=constants.FYER_LOG_DIR,
-        )
-        self.token = credentials["access_token"]
-        self.appId = credentials["api_key"]
-        logger.debug(f"Successfully authenticated with new token.")
-        return True
+        """Authenticate synchronously. Not supported in async server context."""
+        raise NotImplementedError("Synchronous Fyers authentication is not supported in async server context. Use the async version.")
 
     async def _wrap_async(callable_func, *args, **kwargs):
         """Wrapper for calling sync methods in async mode."""
@@ -619,11 +562,9 @@ class FyersWrapper(BrokerInterface):
         try:
             response = await self.fyers.place_order(fyers_payload)
             logger.info(f"Fyers order placed: {response}")
-            from algosat.core.order_request import OrderResponse
             return OrderResponse.from_fyers(response, order_request=order_request).dict()
         except Exception as e:
             logger.error(f"Fyers order placement failed: {e}")
-            from algosat.core.order_request import OrderStatus, OrderResponse
             return OrderResponse(
                 status=OrderStatus.FAILED,
                 order_ids=[],
@@ -792,8 +733,6 @@ class FyersWrapper(BrokerInterface):
         option_chain_response = await self.get_option_chain(symbol, max_strikes)
         if not option_chain_response or not option_chain_response.get('data') or not option_chain_response['data'].get('optionsChain'):
             return []
-        import pandas as pd
-        from common import constants
         option_chain_df = pd.DataFrame(option_chain_response['data']['optionsChain'])
         strike_symbols = option_chain_df[constants.COLUMN_SYMBOL].unique()
         strike_symbols = [s for s in strike_symbols if (s.endswith(constants.OPTION_TYPE_CALL)

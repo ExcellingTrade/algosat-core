@@ -90,14 +90,19 @@ class BrokerManager:
             return True
         return False
 
-    async def _authenticate_broker(self, broker_key: str, retries=3, delay=1) -> bool:
+    async def _authenticate_broker(self, broker_key: str, retries=3, delay=1, force_reauth: bool = False) -> bool:
         broker = get_broker(broker_key)
         if not broker:
             logger.error(f"🔴 Could not instantiate broker: {broker_key}")
             self.brokers[broker_key] = None
             return False
         try:
-            success = await async_retry(broker.login, retries=retries, delay=delay)
+            # Pass force_reauth if supported
+            import inspect
+            if hasattr(broker, 'login') and 'force_reauth' in inspect.signature(broker.login).parameters:
+                success = await async_retry(broker.login, force_reauth=force_reauth, retries=retries, delay=delay)
+            else:
+                success = await async_retry(broker.login, retries=retries, delay=delay)
         except Exception as e:
             logger.error(f"🔴 Broker login failed for {broker_key}: {e}")
             self.brokers[broker_key] = None
@@ -122,10 +127,18 @@ class BrokerManager:
         if not broker:
             logger.info(f"🔄 Broker {broker_key} not initialized. Initializing now...")
             # Attempt to authenticate broker if not initialized
-            return await self._authenticate_broker(broker_key, retries=retries, delay=delay)
+            return await self._authenticate_broker(broker_key, retries=retries, delay=delay, force_reauth=True)
         logger.info(f"🔄 Reauthenticating broker: {broker_key}")
         try:
-            success = await async_retry(broker.login, retries=retries, delay=delay)
+            # Pass force_reauth=True if supported
+            if hasattr(broker, 'login'):
+                import inspect
+                if 'force_reauth' in inspect.signature(broker.login).parameters:
+                    success = await async_retry(broker.login, force_reauth=True, retries=retries, delay=delay)
+                else:
+                    success = await async_retry(broker.login, retries=retries, delay=delay)
+            else:
+                success = False
         except Exception as e:
             logger.error(f"Reauthentication failed for {broker_key}: {e}")
             return False

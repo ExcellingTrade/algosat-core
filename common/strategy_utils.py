@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Optional
 from algosat.utils.indicators import calculate_atr
 from algosat.core.order_request import OrderRequest, Side, OrderType
 from algosat.common import constants
+from algosat.common.broker_utils import get_trade_day
 
 if TYPE_CHECKING:
     from core.data_provider.provider import DataManager
@@ -46,7 +47,7 @@ async def fetch_strikes_history(
     Returns:
         dict: Dict of strike_symbol -> history data.
     """
-    from rich.console import Console
+    # --- Revert: Do not sanitize from_date and to_date here, let DataManager handle it ---
     console = Console()
     results = {}
     success_count = 0
@@ -271,12 +272,12 @@ def calculate_first_candle_details(current_date, first_candle_time, interval_min
     try:
         first_candle_start = datetime.combine(current_date,
                                               datetime.strptime(first_candle_time, "%H:%M").time())
+        # Always localize to IST (timezone-aware)
         first_candle_start = localize_to_ist(first_candle_start)
-        first_candle_close = first_candle_start
-        # + timedelta(minutes=interval_minutes)
+        first_candle_close = first_candle_start  # (can add timedelta if needed)
         from_date = first_candle_start
         to_date = first_candle_close
-        logger.debug(f"🚀 Calculated first candle details: start={first_candle_start}, close={first_candle_close}")
+        logger.debug(f"🚀 Calculated first candle details (IST-aware): start={first_candle_start}, close={first_candle_close}")
         return {
             "first_candle_start": first_candle_start,
             "first_candle_close": first_candle_close,
