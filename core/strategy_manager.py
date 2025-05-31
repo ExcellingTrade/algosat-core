@@ -13,6 +13,8 @@ from algosat.core.order_manager import OrderManager
 from algosat.core.order_monitor import OrderMonitor
 from algosat.core.time_utils import get_ist_datetime
 from algosat.models.strategy_config import StrategyConfig
+from algosat.core.order_cache import OrderCache
+from algosat.core.broker_manager import BrokerManager
 
 logger = get_logger("strategy_manager")
 
@@ -21,28 +23,37 @@ running_tasks: Dict[int, asyncio.Task] = {}
 order_monitors: Dict[str, asyncio.Task] = {}
 order_queue = asyncio.Queue()
 
+order_cache = None  # Will be initialized in run_poll_loop
+
 async def order_monitor_loop(order_queue, data_manager, order_manager):
+    global order_cache
     while True:
         order_info = await order_queue.get()
         if order_info is None:
             logger.info("Order monitor received shutdown sentinel, exiting loop")
             break
         order_id = order_info["order_id"]
+        strategy = order_info.get("strategy")
         if order_id not in order_monitors:
             monitor = OrderMonitor(
                 order_id=order_id,
+                strategy=strategy,
                 data_manager=data_manager,
-                order_manager=order_manager
+                order_manager=order_manager,
+                order_cache=order_cache
             )
             order_monitors[order_id] = asyncio.create_task(monitor.start())
     logger.info("Order monitor loop has exited")
 
 async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
-    """
-    Poll the strategy_configs table forever.
-    For each enabled config, launch a runner (OptionBuy only for now).
-    Now supports time-based start/stop for intraday/delivery trade types.
-    """
+    global order_cache
+    # Initialize OrderCache with the broker_manager from data_manager
+    if order_cache is None:
+        broker_manager = getattr(data_manager, 'broker_manager', None)
+        if broker_manager is None:
+            raise RuntimeError("DataManager must have a broker_manager attribute for OrderCache initialization.")
+        order_cache = OrderCache(broker_manager)
+        await order_cache.start()
     asyncio.create_task(order_monitor_loop(order_queue, data_manager, order_manager))
     try:
         async with AsyncSessionLocal() as session:

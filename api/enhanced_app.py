@@ -16,7 +16,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-import structlog
+from algosat.common.logger import get_logger
 from pydantic import BaseModel # Added
 from sqlalchemy import select
 
@@ -36,7 +36,7 @@ from .routes import strategies, brokers, positions, trades, orders # Uncommented
 # Use default port for now
 API_PORT = 8000
 
-logger = structlog.get_logger(__name__)
+logger = get_logger("api.app")
 
 # Global instances
 security_manager = None
@@ -84,14 +84,14 @@ async def lifespan(app: FastAPI):
                 await session.execute(text("SELECT 1"))
             logger.info("Database connection verified")
         except Exception as db_error:
-            logger.error("Database connection failed", error=str(db_error))
+            logger.error(f"Database connection failed | error={str(db_error)}")
             raise
         
         logger.info("Algosat API consumer service initialized successfully")
         yield
         
     except Exception as e:
-        logger.error("Failed to initialize API consumer service", error=str(e), traceback=traceback.format_exc())
+        logger.error(f"Failed to initialize API consumer service | error={str(e)} | traceback={traceback.format_exc()}")
         raise
     finally:
         # Cleanup
@@ -165,7 +165,7 @@ async def refresh_token(current_user_info: Dict[str, Any] = Depends(get_current_
     except Exception as e:
         if error_tracker:
             error_tracker.track_error(error=e, function_name="refresh_token")
-        logger.error("Token refresh failed", error=str(e), exc_info=True)
+        logger.error(f"Token refresh failed | error={str(e)} | exc_info={traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Token refresh service error"
@@ -213,13 +213,7 @@ async def request_logging_middleware(request: Request, call_next):
         
         # Log request
         logger.info(
-            "Request processed",
-            request_id=request_id,
-            method=request.method,
-            path=request.url.path,
-            status_code=response.status_code,
-            duration=duration,
-            client_ip=client_ip
+            f"Request processed | request_id={request_id} | method={request.method} | path={request.url.path} | status_code={response.status_code} | duration={duration} | client_ip={client_ip}"
         )
         
         return response
@@ -233,12 +227,7 @@ async def request_logging_middleware(request: Request, call_next):
         ).inc()
         
         logger.warning(
-            "HTTP exception",
-            request_id=request_id,
-            method=request.method,
-            path=request.url.path,
-            status_code=e.status_code,
-            detail=e.detail
+            f"HTTP exception | request_id={request_id} | method={request.method} | path={request.url.path} | status_code={e.status_code} | detail={e.detail}"
         )
         raise
         
@@ -255,10 +244,7 @@ async def request_logging_middleware(request: Request, call_next):
         ).inc()
         
         logger.error(
-            "Unexpected error",
-            request_id=request_id,
-            error=str(e),
-            traceback=traceback.format_exc()
+            f"Unexpected error | request_id={request_id} | error={str(e)} | traceback={traceback.format_exc()}"
         )
         
         return JSONResponse(
@@ -573,10 +559,7 @@ async def global_exception_handler(request: Request, exc: Exception):
         )
     
     logger.error(
-        "Unhandled exception",
-        request_id=request_id,
-        error=str(exc),
-        traceback=traceback.format_exc()
+        f"Unhandled exception | request_id={request_id} | error={str(exc)} | traceback={traceback.format_exc()}"
     )
     
     return JSONResponse(

@@ -18,6 +18,9 @@ from algosat.api.schemas import (
 from algosat.api.dependencies import get_db
 from algosat.api.auth_dependencies import get_current_user
 from algosat.core.security import EnhancedInputValidator, InvalidInputError
+from algosat.common.logger import get_logger
+
+logger = get_logger("api.strategies")
 
 # Require authentication for all endpoints in this router
 router = APIRouter(dependencies=[Depends(get_current_user)])
@@ -25,48 +28,68 @@ input_validator = EnhancedInputValidator()
 
 @router.get("/", response_model=List[StrategyListResponse])
 async def list_strategies(db=Depends(get_db)):
-    strategies = [StrategyListResponse(**row) for row in await get_all_strategies(db)]
-    return sorted(strategies, key=lambda s: s.id)
+    try:
+        strategies = [StrategyListResponse(**row) for row in await get_all_strategies(db)]
+        return sorted(strategies, key=lambda s: s.id)
+    except Exception as e:
+        logger.error(f"Error in list_strategies: {e}")
+        raise
 
 @router.get("/{strategy_id}", response_model=StrategyDetailResponse)
 async def get_strategy(strategy_id: int, db=Depends(get_db)):
-    validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
-    row = await get_strategy_by_id(db, validated_strategy_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Strategy not found")
-    return StrategyDetailResponse(**row)
+    try:
+        validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
+        row = await get_strategy_by_id(db, validated_strategy_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        return StrategyDetailResponse(**row)
+    except Exception as e:
+        logger.error(f"Error in get_strategy: {e}")
+        raise
 
 @router.get("/{strategy_id}/configs", response_model=List[StrategyConfigListResponse])
 async def list_strategy_configs_for_strategy(strategy_id: int, db=Depends(get_db)):
-    validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
-    configs = [StrategyConfigListResponse(**row) for row in await get_strategy_configs_by_strategy_id(db, validated_strategy_id)]
-    return sorted(configs, key=lambda c: c.id)
+    try:
+        validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
+        configs = [StrategyConfigListResponse(**row) for row in await get_strategy_configs_by_strategy_id(db, validated_strategy_id)]
+        return sorted(configs, key=lambda c: c.id)
+    except Exception as e:
+        logger.error(f"Error in list_strategy_configs_for_strategy: {e}")
+        raise
 
 @router.get("/configs/{config_id}", response_model=StrategyConfigDetailResponse)
 async def get_strategy_config_detail(config_id: int, db=Depends(get_db)):
-    validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
-    row = await get_strategy_config_by_id(db, validated_config_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Strategy config not found")
-    # Convert SQLAlchemy Row to dict if needed
-    if hasattr(row, "_mapping"):
-        row = dict(row._mapping)
-    return StrategyConfigDetailResponse(**row)
+    try:
+        validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
+        row = await get_strategy_config_by_id(db, validated_config_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Strategy config not found")
+        # Convert SQLAlchemy Row to dict if needed
+        if hasattr(row, "_mapping"):
+            row = dict(row._mapping)
+        return StrategyConfigDetailResponse(**row)
+    except Exception as e:
+        logger.error(f"Error in get_strategy_config_detail: {e}")
+        raise
 
 @router.get("/{strategy_id}/confesigs/{config_id}", response_model=StrategyConfigDetailResponse)
 async def get_strategy_config_detail_for_strategy(strategy_id: int, config_id: int, db=Depends(get_db)):
-    validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
-    validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
-    row = await get_strategy_config_by_id(db, validated_config_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Strategy config not found")
-    if hasattr(row, "_mapping"):
-        row = dict(row._mapping)
-    if "params" not in row or row["params"] is None:
-        row["params"] = {}
-    if row.get("strategy_id") != validated_strategy_id: # Use validated id
-        raise HTTPException(status_code=404, detail="Strategy config does not belong to this strategy")
-    return StrategyConfigDetailResponse(**row)
+    try:
+        validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
+        validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
+        row = await get_strategy_config_by_id(db, validated_config_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Strategy config not found")
+        if hasattr(row, "_mapping"):
+            row = dict(row._mapping)
+        if "params" not in row or row["params"] is None:
+            row["params"] = {}
+        if row.get("strategy_id") != validated_strategy_id: # Use validated id
+            raise HTTPException(status_code=404, detail="Strategy config does not belong to this strategy")
+        return StrategyConfigDetailResponse(**row)
+    except Exception as e:
+        logger.error(f"Error in get_strategy_config_detail_for_strategy: {e}")
+        raise
 
 @router.put("/configs/{config_id}", response_model=StrategyConfigDetailResponse)
 async def update_strategy_config_params(config_id: int, update: StrategyConfigUpdate, db=Depends(get_db)):

@@ -365,6 +365,15 @@ class ZerodhaWrapper(BrokerInterface):
                 pe_itm["tradingsymbol"].tolist() + pe_otm["tradingsymbol"].tolist()
         return picks
 
+    async def get_order_details(self) -> list[dict]:
+        """
+        Fetch all order details for the current account/session from Zerodha.
+        Returns a list of order dicts.
+        """
+        loop = asyncio.get_event_loop()
+        orders = await loop.run_in_executor(None, self.kite.orders)
+        return orders
+
 # === Broker-specific API code mapping ===
 # These mappings translate generic enums to Zerodha API codes. Do not move these to order_defaults.py.
 SIDE_MAP = {

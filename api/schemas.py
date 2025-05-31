@@ -1,6 +1,7 @@
 from pydantic import BaseModel, Field, field_serializer
 from typing import Optional, Any, Dict, List
 from datetime import datetime
+from algosat.core.time_utils import to_ist
 
 # --- Authentication Schemas ---
 class LoginRequest(BaseModel):
@@ -134,7 +135,6 @@ class OrderListResponse(BaseModel):
     symbol: str
     status: str
     side: Optional[str] = None
-    broker_name: str
     entry_price: Optional[float] = None
     lot_qty: Optional[int] = None
     signal_time: Optional[datetime] = None
@@ -142,9 +142,10 @@ class OrderListResponse(BaseModel):
 
     @field_serializer("signal_time", "entry_time")
     def serialize_dt(self, v):
-        if isinstance(v, str):
-            return v
-        return v.isoformat() if v else None
+        if v is None:
+            return None
+        ist_dt = to_ist(v)
+        return ist_dt.isoformat()
 
     class Config:
         from_attributes = True
@@ -152,34 +153,67 @@ class OrderListResponse(BaseModel):
 class OrderDetailResponse(BaseModel):
     """Order detail response with full information."""
     id: int
+    strategy_config_id: int
     symbol: str
-    status: str
-    side: Optional[str] = None
-    broker_name: str
-    strategy_name: Optional[str] = None
-    config_symbol: Optional[str] = None
-    exchange: Optional[str] = None
+    candle_range: Optional[float] = None
     entry_price: Optional[float] = None
     stop_loss: Optional[float] = None
     target_price: Optional[float] = None
-    lot_qty: Optional[int] = None
     signal_time: Optional[datetime] = None
     entry_time: Optional[datetime] = None
     exit_time: Optional[datetime] = None
     exit_price: Optional[float] = None
-    candle_range: Optional[str] = None
+    status: str
     reason: Optional[str] = None
     atr: Optional[float] = None
     supertrend_signal: Optional[str] = None
-    order_ids: Optional[Any] = None
-    order_messages: Optional[Any] = None
-    raw_response: Optional[Any] = None  # Expose raw broker API payload(s) in API response
+    lot_qty: Optional[int] = None
+    side: Optional[str] = None
+    qty: Optional[int] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    # Add any other fields from the orders table as needed
 
-    @field_serializer("signal_time", "entry_time", "exit_time")
+    @field_serializer("signal_time", "entry_time", "exit_time", "created_at", "updated_at")
     def serialize_dt(self, v):
-        if isinstance(v, str):
-            return v
-        return v.isoformat() if v else None
+        if v is None:
+            return None
+        ist_dt = to_ist(v)
+        return ist_dt.isoformat()
+
+    class Config:
+        from_attributes = True
+
+class BrokerExecutionResponse(BaseModel):
+    id: int
+    order_id: int
+    broker: Optional[str] = None
+    broker_name: Optional[str] = None
+    broker_id: Optional[int] = None
+    broker_order_ids: Optional[Any] = None
+    order_messages: Optional[Any] = None
+    status: str
+    raw_response: Optional[Any] = None
+    filled_qty: Optional[float] = None
+    avg_price: Optional[float] = None
+    executed_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+    @classmethod
+    def validate(cls, value):
+        # If 'broker' is missing but 'broker_name' is present, use that
+        if 'broker' not in value or value['broker'] is None:
+            if 'broker_name' in value and value['broker_name']:
+                value['broker'] = value['broker_name']
+        return value
+
+    @field_serializer("executed_at", "created_at", "updated_at")
+    def serialize_dt(self, v):
+        if v is None:
+            return None
+        ist_dt = to_ist(v)
+        return ist_dt.isoformat()
 
     class Config:
         from_attributes = True

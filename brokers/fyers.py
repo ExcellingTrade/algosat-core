@@ -73,14 +73,6 @@ PRODUCT_TYPE_MAP = {
     "MTF": "MTF",
 }
 
-# Only apply nest_asyncio if not running under uvloop (e.g., in Jupyter, not in production)
-try:
-    loop = asyncio.get_event_loop()
-    if loop.__class__.__module__ != 'uvloop.loop':
-        import nest_asyncio
-        nest_asyncio.apply()
-except Exception:
-    pass
 
 
 # Get the directory of the calling script
@@ -157,7 +149,7 @@ class FyersWrapper(BrokerInterface):
         :param data: Order details to check the margin for.
         :return: Parsed margin response.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         response = await loop.run_in_executor(None, FyersWrapper._make_margin_request, data)
         if response.get("s") != "ok":
             raise ValueError(f"Margin check failed: {response.get('message', 'Unknown error')}")
@@ -207,13 +199,19 @@ class FyersWrapper(BrokerInterface):
             fyers_creds = credentials
             access_token = fyers_creds.get("access_token")
             generated_on_str = fyers_creds.get("generated_on")
-            # Only reuse token if not forcing reauth
+            api_key = fyers_creds.get("api_key")
+            api_secret = fyers_creds.get("api_secret")
+            redirect_uri = fyers_creds.get("redirect_uri")
+            mobile_number = fyers_creds.get("client_id") # Updated to use client_id 
+            password_2fa = fyers_creds.get("pin") # Updated to use pin instead of password_2fa
+            totp_secret = fyers_creds.get("totp_secret")
+            # Only reuse token if not forcing reauth and token is still valid
             if not force_reauth and access_token and generated_on_str and can_reuse_token(generated_on_str):
                 try:
                     self.token = access_token
-                    self.appId = fyers_creds.get("api_key")
+                    self.appId = api_key
                     self.fyers = fyersModel.FyersModel(
-                        client_id=fyers_creds.get("api_key"),
+                        client_id=api_key,
                         is_async=self.is_async,
                         token=access_token,
                         log_path=constants.FYER_LOG_DIR
@@ -222,9 +220,42 @@ class FyersWrapper(BrokerInterface):
                     return True
                 except Exception as e:
                     logger.warning(f"Token reuse check failed: {e}, will generate new token")
-            logger.debug("Obtaining new Fyers access token")
-            result = await self.setup_auth()
-            return result is not None
+            # Need to reauthenticate: get auth_code using authenticate(), then generate access_token
+            logger.debug("Obtaining new Fyers access token via authentication flow")
+            # Step 1: Get auth_code using authenticate()
+            session = fyersModel.SessionModel(
+                client_id=api_key,
+                secret_key=api_secret,
+                redirect_uri=redirect_uri,
+                response_type="code",
+                grant_type="authorization_code",
+            )
+            auth_url = session.generate_authcode()
+            auth_code = self.authenticate(auth_url, mobile_number, password_2fa, totp_secret)
+            if not auth_code:
+                logger.error("Failed to obtain auth_code from Fyers authentication flow.")
+                return False
+            # Step 2: Exchange auth_code for access_token
+            session.set_token(auth_code)
+            response = session.generate_token()
+            # credentials["access_token"] = response["access_token"]
+        #   credentials["generated_on"] = get_ist_datetime().strftime("%d/%m/%Y %H:%M:%S")
+            # Save new token and update DB
+            fyers_creds["access_token"] = response["access_token"]
+            fyers_creds["generated_on"] = get_ist_datetime().strftime("%d/%m/%Y %H:%M:%S")
+            full_config["credentials"] = fyers_creds
+            await upsert_broker_credentials("fyers", full_config)
+            # Initialize fyersModel with new token
+            self.token = access_token
+            self.appId = api_key
+            self.fyers = fyersModel.FyersModel(
+                client_id=api_key,
+                is_async=self.is_async,
+                token=access_token,
+                log_path=constants.FYER_LOG_DIR
+            )
+            logger.debug("Successfully authenticated and stored new Fyers access token.")
+            return True
         except Exception as e:
             logger.error(f"Fyers authentication failed: {e}", exc_info=True)
             return False
@@ -236,27 +267,33 @@ class FyersWrapper(BrokerInterface):
         Set is_async=False to use synchronous mode.
         """
         self.is_async = is_async
-        if self.is_async:
-            return await self._setup_auth_async()
-        else:
-            return self._setup_auth_sync()  # No `await` needed
+        # Only async path is supported
+        return await self._setup_auth_async()
 
     async def _setup_auth_async(self):
-        """Authenticate asynchronously."""
-        return self._setup_auth_sync()
-
-    def _setup_auth_sync(self):
-        """Authenticate synchronously. Not supported in async server context."""
-        raise NotImplementedError("Synchronous Fyers authentication is not supported in async server context. Use the async version.")
-
-    async def _wrap_async(callable_func, *args, **kwargs):
-        """Wrapper for calling sync methods in async mode."""
-        return await asyncio.to_thread(callable_func, *args, **kwargs)
+        """
+        Authenticate asynchronously using async DB and Fyers API logic.
+        """
+        full_config = await get_broker_credentials("fyers")
+        credentials = full_config.get("credentials", {})
+        access_token = credentials.get("access_token")
+        self.token = access_token
+        self.appId = credentials.get("api_key")
+        from fyers_apiv3 import fyersModel
+        from algosat.common import constants
+        self.fyers = fyersModel.FyersModel(
+            client_id=credentials.get("api_key"),
+            is_async=True,
+            token=access_token,
+            log_path=constants.FYER_LOG_DIR
+        )
+        return True
 
     async def get_balance_async(self):
         """Fetch account balance asynchronously."""
         try:
-            response = await self.fyers.funds()  # Ensure it's awaited here
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, self.fyers.funds)
             return response
         except Exception as e:
             logger.error(f"Failed to fetch balance asynchronously: {e}")
@@ -279,12 +316,16 @@ class FyersWrapper(BrokerInterface):
             return self.get_balance_sync()
 
     async def get_profile_async(self):
-        """Fetch account balance asynchronously."""
+        """Fetch account profile asynchronously using Fyers async SDK."""
         try:
-            response = await self.fyers.get_profile()  # Ensure it's awaited here
+            result = self.fyers.get_profile()
+            if asyncio.iscoroutine(result):
+                response = await result
+            else:
+                response = result
             return response
         except Exception as e:
-            logger.error(f"Failed to fetch balance asynchronously: {e}")
+            logger.error(f"Failed to fetch profile asynchronously: {e}")
             return None
 
     def get_profile_sync(self):
@@ -308,14 +349,26 @@ class FyersWrapper(BrokerInterface):
             if not self.fyers:
                 logger.error("Fyers client not initialized, please call login() first")
                 return {}
-
-            # Dispatch to sync or async based on mode
-            if self.is_async:
-                profile_data = await self.get_profile_async()
-            else:
-                profile_data = self.get_profile_sync()
-
-            if profile_data and profile_data.get("code") == 200 and profile_data.get("s") == "ok":
+            # Always use async method and await it
+            profile_data = await self.get_profile_async()
+            # Check for authentication error and reauthenticate if needed
+            if (
+                profile_data
+                and isinstance(profile_data, dict)
+                and profile_data.get("message")
+                and "Could not authenticate the user" in profile_data.get("message")
+            ):
+                logger.warning("Fyers profile fetch failed due to authentication. Reauthenticating...")
+                await self.login(force_reauth=True)
+                profile_data = await self.get_profile_async()  # Retry once after reauth
+                if (
+                    not profile_data
+                    or not isinstance(profile_data, dict)
+                    or profile_data.get("message") and "Could not authenticate the user" in profile_data.get("message")
+                ):
+                    logger.error("Fyers reauthentication failed. Could not fetch profile after retry.")
+                    return {}
+            if profile_data and isinstance(profile_data, dict) and profile_data.get("code") == 200 and profile_data.get("s") == "ok":
                 return profile_data.get("data", {})
             else:
                 logger.error(f"Failed to get profile: {profile_data.get('message', 'Unknown error') if isinstance(profile_data, dict) else profile_data}")
@@ -332,7 +385,11 @@ class FyersWrapper(BrokerInterface):
                 "strikecount": strike_count,
                 "timestamp": "",
             }
-            response = await self.fyers.optionchain(data)
+            result = self.fyers.optionchain(data)
+            if asyncio.iscoroutine(result):
+                response = await result
+            else:
+                response = result
             return response
         except Exception as e:
             logger.error(f"Failed to fetch option chain for {symbol}: {e}")
@@ -372,10 +429,8 @@ class FyersWrapper(BrokerInterface):
 
     async def get_option_chain(self, symbol, strike_count):
         """Fetch the option chain dynamically based on async/sync mode."""
-        if self.is_async:
-            return await self.get_option_chain_async(symbol, strike_count)
-        else:
-            return self.get_option_chain_sync(symbol, strike_count)
+        # Always await the async method and return the result
+        return await self.get_option_chain_async(symbol, strike_count)
 
     async def get_history_async(self, symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
         """
@@ -413,7 +468,11 @@ class FyersWrapper(BrokerInterface):
             logger.debug(
                 f"Fetching async history for {formatted_symbol} from {from_date} to {to_date}... ")
 
-            response = await self.fyers.history(params)
+            result = self.fyers.history(params)
+            if asyncio.iscoroutine(result):
+                response = await result
+            else:
+                response = result
 
             if isinstance(response, dict) and response.get("code") == 200 and response.get("s") == "ok":
                 candles = response.get("candles", [])
@@ -435,17 +494,13 @@ class FyersWrapper(BrokerInterface):
                 logger.debug(f"Successfully fetched historical data for {formatted_symbol}.")
                 return df
             else:
-                error_message = response.get("message", "Unknown error") if isinstance(response, dict) else str(
-                    response)
-                logger.debug(
-                    f"Failed to fetch history for {formatted_symbol}: {error_message}")
+                error_message = response.get("message", "Unknown error") if isinstance(response, dict) else str(response)
+                logger.debug(f"Failed to fetch history for {formatted_symbol}: {error_message}")
                 if "request limit reached" in error_message.lower():
                     logger.debug("Getting 'request limit reached' error. Waiting 10 seconds before retrying...")
                     await asyncio.sleep(10)
-
         except Exception as e:
             logger.error(f"Exception while fetching async history for {symbol}: {e}")
-
         return None
 
     def get_history_sync(self, symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
@@ -534,7 +589,8 @@ class FyersWrapper(BrokerInterface):
         :return: Response from the Fyers API.
         """
         try:
-            response = await self.fyers.place_order(order_payload)
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, self.fyers.place_order, order_payload)
             # logger.debug(response)
             return response
         except Exception as e:
@@ -560,7 +616,14 @@ class FyersWrapper(BrokerInterface):
         fyers_payload = order_request.to_fyers_dict()
         fyers_payload = {k: v for k, v in fyers_payload.items() if v is not None}
         try:
-            response = await self.fyers.place_order(fyers_payload)
+            if self.is_async:
+                loop = asyncio.get_running_loop()
+                response = await loop.run_in_executor(None, self.fyers.place_order, fyers_payload)
+                # If Fyers returns a coroutine (async API), await it
+                if asyncio.iscoroutine(response):
+                    response = await response
+            else:
+                response = self.fyers.place_order(fyers_payload)
             logger.info(f"Fyers order placed: {response}")
             return OrderResponse.from_fyers(response, order_request=order_request).dict()
         except Exception as e:
@@ -577,8 +640,7 @@ class FyersWrapper(BrokerInterface):
                 order_type=getattr(order_request, 'order_type', None)
             ).dict()
 
-    @staticmethod
-    async def split_and_place_order(total_qty, max_nse_qty, trigger_price_diff, **order_params):
+    async def split_and_place_order(self, total_qty, max_nse_qty, trigger_price_diff, **order_params):
         """
         Split the order into chunks if the quantity exceeds max_nse_qty.
 
@@ -607,14 +669,12 @@ class FyersWrapper(BrokerInterface):
             if (current_price - original_price) < max_price_increase:
                 current_price = min(original_price + max_price_increase, current_price + price_increment)
             logger.debug(f"Placing order {order_params}")
-            response = await FyersWrapper.place_order(**order_params)
+            response = await self.place_order_async(order_params)
             responses.append(response)
             total_qty -= qty
         return responses
 
-    @staticmethod
-    async def place_split_orders_with_sl_tp(total_qty, max_nse_qty, stop_loss_price, target_price, trigger_price_diff,
-                                            **order_params):
+    async def place_split_orders_with_sl_tp(self, total_qty, max_nse_qty, stop_loss_price, target_price, trigger_price_diff, **order_params):
         """
         Place main orders and corresponding Stop-Loss (SL) & Target (TP) orders.
         - If total_qty > max_nse_qty, it splits the order into chunks.
@@ -653,7 +713,7 @@ class FyersWrapper(BrokerInterface):
             # Place entry order
             try:
                 logger.debug(f"Placing entry order {order_params}")
-                entry_response = await FyersWrapper.place_order(**order_params)
+                entry_response = await self.place_order_async(order_params)
                 if entry_response.get("s") == "ok":  # Check if order placement was successful
                     entry_responses.append(entry_response)
                     logger.debug(f"Entry order placed successfully at Rs.{current_price} for {qty} quantity")
@@ -679,7 +739,7 @@ class FyersWrapper(BrokerInterface):
                     # Place SL Order
                     try:
                         logger.debug(f"Placing SL order {sl_order}")
-                        sl_response = await FyersWrapper.place_order(**sl_order)
+                        sl_response = await self.place_order_async(sl_order)
                         if sl_response.get("s") == "ok":
                             sl_responses.append(sl_response)
                             logger.debug(f"Stop-Loss order placed: {sl_response}")
@@ -691,7 +751,7 @@ class FyersWrapper(BrokerInterface):
                     # Place Target Order
                     try:
                         logger.debug(f"Placing target order {target_order}")
-                        target_response = await FyersWrapper.place_order(**target_order)
+                        target_response = await self.place_order_async(target_order)
                         if target_response.get("s") == "ok":
                             target_responses.append(target_response)
                             logger.debug(f"Target order placed: {target_response}")
@@ -705,10 +765,8 @@ class FyersWrapper(BrokerInterface):
                         current_price = min(original_price + max_price_increase, current_price + price_increment)
                 else:
                     logger.error(f"Entry order failed: {entry_response}")
-                    # return []
             except Exception as e:
                 logger.error(f"Error placing entry order: {e}")
-                # return []
 
             # Reduce the remaining quantity
             total_qty -= qty
@@ -731,32 +789,38 @@ class FyersWrapper(BrokerInterface):
         Returns a list of strike symbols (filtered for calls and puts, excluding INDEX).
         """
         option_chain_response = await self.get_option_chain(symbol, max_strikes)
-        if not option_chain_response or not option_chain_response.get('data') or not option_chain_response['data'].get('optionsChain'):
+        if (
+            not option_chain_response
+            or not option_chain_response.get('data')
+            or not option_chain_response['data'].get('optionsChain')
+        ):
             return []
         option_chain_df = pd.DataFrame(option_chain_response['data']['optionsChain'])
         strike_symbols = option_chain_df[constants.COLUMN_SYMBOL].unique()
-        strike_symbols = [s for s in strike_symbols if (s.endswith(constants.OPTION_TYPE_CALL)
-                                                        or s.endswith(constants.OPTION_TYPE_PUT)) and "INDEX" not in s]
+        strike_symbols = [
+            s for s in strike_symbols
+            if (s.endswith(constants.OPTION_TYPE_CALL) or s.endswith(constants.OPTION_TYPE_PUT))
+            and "INDEX" not in s
+        ]
         return strike_symbols
 
-    @staticmethod
-    async def get_order_details_async(order_id=None):
+    async def get_order_details_async(self, order_id=None):
         """
         Fetch order details asynchronously.
         :param order_id: List of order IDs. If None, fetch the full order book.
         :return: Response from the Fyers API.
         """
         try:
+            loop = asyncio.get_running_loop()
             if not order_id:
-                response = await FyersWrapper.fyers.orderbook()
+                response = await loop.run_in_executor(None, self.fyers.orderbook)
             else:
-                response = await FyersWrapper.fyers.orderbook(data={"id": order_id})
+                response = await loop.run_in_executor(None, self.fyers.orderbook, {"id": order_id})
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to fetch order details (async): {e}")
 
-    @staticmethod
-    def get_order_details_sync(order_id=None):
+    def get_order_details_sync(self, order_id=None):
         """
         Fetch order details synchronously.
 
@@ -765,28 +829,26 @@ class FyersWrapper(BrokerInterface):
         """
         try:
             if not order_id:
-                response = FyersWrapper.fyers.orderbook()
+                response = self.fyers.orderbook()
             else:
-                response = FyersWrapper.fyers.orderbook(data={"id": order_id})
+                response = self.fyers.orderbook(data={"id": order_id})
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to fetch order details (sync): {e}")
 
-    @staticmethod
-    def get_order_details(order_id=None):
+    async def get_order_details(self, order_id=None):
         """
         Dynamically fetch order details based on the mode (sync/async).
 
         :param order_id: List of order IDs. If None, fetch the full order book.
         :return: Response from the Fyers API.
         """
-        if FyersWrapper.is_async:
-            return FyersWrapper.get_order_details_async(order_id)
+        if self.is_async:
+            return await self.get_order_details_async(order_id)
         else:
-            return FyersWrapper.get_order_details_sync(order_id)
+            return self.get_order_details_sync(order_id)
 
-    @staticmethod
-    async def modify_order_async(data: dict):
+    async def modify_order_async(self, data: dict):
         """
         Modify an existing order asynchronously.
 
@@ -794,13 +856,12 @@ class FyersWrapper(BrokerInterface):
         :return: Response from the Fyers API.
         """
         try:
-            response = await FyersWrapper.fyers.modify_order(data=data)
+            response = await self.fyers.modify_order(data=data)
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to modify order (async): {e}")
 
-    @staticmethod
-    def modify_order_sync(data: dict):
+    def modify_order_sync(self, data: dict):
         """
         Modify an existing order synchronously.
 
@@ -808,25 +869,23 @@ class FyersWrapper(BrokerInterface):
         :return: Response from the Fyers API.
         """
         try:
-            response = FyersWrapper.fyers.modify_order(data=data)
+            response = self.fyers.modify_order(data=data)
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to modify order (sync): {e}")
 
-    @staticmethod
-    async def modify_order(data: dict):
+    async def modify_order(self, data: dict):
         """
         Dynamically modify an existing order based on the mode (sync/async).
          :param data: Order id details
         :return: Response from the Fyers API.
         """
-        if FyersWrapper.is_async:
-            return await FyersWrapper.modify_order_async(data)
+        if self.is_async:
+            return await self.modify_order_async(data)
         else:
-            return FyersWrapper.modify_order_sync(data)
+            return self.modify_order_sync(data)
 
-    @staticmethod
-    async def cancel_order_async(order_id: str):
+    async def cancel_order_async(self, order_id: str):
         """
         Cancel an existing order asynchronously.
 
@@ -835,13 +894,12 @@ class FyersWrapper(BrokerInterface):
         """
         try:
             data = {"id": order_id}
-            response = await FyersWrapper.fyers.cancel_order(data=data)
+            response = await self.fyers.cancel_order(data=data)
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to cancel order (async): {e}")
 
-    @staticmethod
-    def cancel_order_sync(order_id: str):
+    def cancel_order_sync(self, order_id: str):
         """
         Cancel an existing order synchronously.
 
@@ -850,23 +908,22 @@ class FyersWrapper(BrokerInterface):
         """
         try:
             data = {"id": order_id}
-            response = FyersWrapper.fyers.cancel_order(data=data)
+            response = self.fyers.cancel_order(data=data)
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to cancel order (sync): {e}")
 
-    @staticmethod
-    async def cancel_order(order_id: str):
+    async def cancel_order(self, order_id: str):
         """
         Dynamically cancel an existing order based on the mode (sync/async).
 
         :param order_id: Order ID to be canceled.
         :return: Response from the Fyers API.
         """
-        if FyersWrapper.is_async:
-            return await FyersWrapper.cancel_order_async(order_id)
+        if self.is_async:
+            return await self.cancel_order_async(order_id)
         else:
-            return FyersWrapper.cancel_order_async(order_id)
+            return self.cancel_order_sync(order_id)
 
     @staticmethod
     async def exit_positions_async(data: dict):
@@ -966,13 +1023,13 @@ class FyersWrapper(BrokerInterface):
                 try:
                     sb.uc_open_with_reconnect(url, 20)
                     sb.wait_for_ready_state_complete(20)
+                    sb.save_screenshot("fyers_auth_before_captcha.png")
                     sb.wait_for_text("Let's begin!", timeout=15)
-                    sb.sleep(2)
                     sb.uc_gui_handle_captcha()
                     sb.save_screenshot("fyers_auth_after_captcha.png")
-                    sb.sleep(3)
                     sb.save_screenshot("fyers_auth_new.png")
-                    sb.sleep(20)
+                    sb.sleep(2)
+                    # sb.sleep(20)
 
                     if sb.is_element_enabled("#mobileNumberSubmit"):
                         sb.wait_for_element_visible("#mobile-code", timeout=10)
@@ -1016,6 +1073,7 @@ class FyersWrapper(BrokerInterface):
                     if auth_code:
                         return auth_code
                 except Exception as e:
+                    logger.error(f"Fyers authentication failed on attempt {attempt + 1}: {e}", exc_info=True)
                     sb.disconnect()
                     sb.sleep(2)
         return None
@@ -1034,3 +1092,18 @@ def convert_to_epoch(date_value):
         date_value = datetime.strptime(date_value, "%d/%m/%Y %H:%M:%S")
     ist_aware_dt = localize_to_ist(date_value)
     return int(ist_aware_dt.timestamp())
+
+# Patch: KeyboardInterrupt-safe shutdown for asyncio event loop
+import signal
+import sys
+
+def _handle_keyboard_interrupt(signum, frame):
+    print("\n[INFO] KeyboardInterrupt received. Shutting down gracefully...")
+    try:
+        loop = asyncio.get_event_loop()
+        loop.stop()
+    except Exception:
+        pass
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, _handle_keyboard_interrupt)

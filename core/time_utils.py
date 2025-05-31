@@ -69,3 +69,16 @@ def convert_epoch_to_ist_datetime(epoch_timestamp: int) -> datetime:
     utc_dt = datetime.fromtimestamp(epoch_timestamp, tz=pytz.utc)
     ist_timezone = pytz.timezone("Asia/Kolkata")
     return utc_dt.astimezone(ist_timezone)
+
+def to_ist(dt: Optional[datetime]) -> Optional[datetime]:
+    """
+    Convert a datetime (naive or aware) to IST timezone.
+    Returns None if input is None.
+    """
+    if dt is None:
+        return None
+    ist_timezone = pytz.timezone("Asia/Kolkata")
+    if dt.tzinfo is None:
+        # Assume UTC if naive
+        dt = dt.replace(tzinfo=pytz.UTC)
+    return dt.astimezone(ist_timezone)

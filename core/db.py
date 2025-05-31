@@ -152,6 +152,12 @@ async def delete_broker(session, broker_name):
     await session.commit()
     return True
 
+async def get_broker_by_id(session, broker_id):
+    from algosat.core.dbschema import broker_credentials
+    result = await session.execute(select(broker_credentials).where(broker_credentials.c.id == broker_id))
+    row = result.first()
+    return dict(row._mapping) if row else None
+
 # --- Strategy Config CRUD ---
 async def get_all_strategy_configs(session):
     result = await session.execute(select(strategy_configs))
@@ -396,22 +402,10 @@ async def insert_order(session, order_data):
 
 async def get_all_orders(session: AsyncSession):
     """
-    Retrieve all orders with broker_name.
-    Joins orders with broker_credentials to get broker_name.
+    Retrieve all orders (no broker join).
     """
     stmt = (
-        select(
-            orders.c.id,
-            orders.c.symbol,
-            orders.c.status,
-            orders.c.side,
-            broker_credentials.c.broker_name,
-            orders.c.entry_price,
-            orders.c.lot_qty,
-            orders.c.signal_time,
-            orders.c.entry_time,
-        )
-        .select_from(orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id))
+        select(orders)
         .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
     )
     result = await session.execute(stmt)
@@ -427,42 +421,10 @@ async def get_all_orders(session: AsyncSession):
 
 async def get_order_by_id(session: AsyncSession, order_id: int):
     """
-    Retrieve a specific order by its ID, including broker_name and strategy_name.
-    Joins orders with broker_credentials, strategy_configs, and strategies.
+    Retrieve a specific order by its ID (logical order only, no broker join).
     """
-    stmt = (
-        select(
-            orders.c.id,
-            orders.c.symbol,
-            orders.c.status,
-            orders.c.side,
-            broker_credentials.c.broker_name,
-            strategies.c.name.label("strategy_name"),
-            strategy_configs.c.symbol.label("config_symbol"),
-            strategy_configs.c.exchange,
-            orders.c.entry_price,
-            orders.c.stop_loss,
-            orders.c.target_price,
-            orders.c.lot_qty,
-            orders.c.signal_time,
-            orders.c.entry_time,
-            orders.c.exit_time,
-            orders.c.exit_price,
-            orders.c.candle_range,
-            orders.c.reason,
-            orders.c.atr,
-            orders.c.supertrend_signal,
-            orders.c.order_ids,
-            orders.c.order_messages
-        )
-        .select_from(
-            orders
-            .join(broker_credentials, orders.c.broker_id == broker_credentials.c.id)
-            .join(strategy_configs, orders.c.strategy_config_id == strategy_configs.c.id)
-            .join(strategies, strategy_configs.c.strategy_id == strategies.c.id)
-        )
-        .where(orders.c.id == order_id)
-    )
+    from algosat.core.dbschema import orders
+    stmt = select(orders).where(orders.c.id == order_id)
     result = await session.execute(stmt)
     row = result.first()
     return dict(row._mapping) if row else None
@@ -560,17 +522,24 @@ async def get_open_orders_for_symbol(session, symbol: str):
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
 
-async def get_open_orders_for_symbol_and_tradeday(session, symbol: str, trade_day):
-    """Return all open orders for a given symbol and trade day (status = 'OPEN' or equivalent)."""
+async def get_open_orders_for_symbol_and_tradeday(session, symbol: str, trade_day, strategy_config_id: int = None):
+    """Return all open orders for a given symbol, strategy, and trade day (status = 'OPEN' or equivalent)."""
     from datetime import datetime
-    start_dt = datetime.combine(trade_day, datetime.min.time())
-    end_dt = datetime.combine(trade_day, datetime.max.time())
-    stmt = select(orders).where(
+    from sqlalchemy import and_
+    from algosat.core.time_utils import to_ist
+    # Convert trade_day to IST date if not already
+    ist_day = to_ist(datetime.combine(trade_day, datetime.min.time())).date()
+    start_dt = to_ist(datetime.combine(ist_day, datetime.min.time()))
+    end_dt = to_ist(datetime.combine(ist_day, datetime.max.time()))
+    filters = [
         orders.c.symbol == symbol,
-        orders.c.status.in_(["OPEN", "PARTIALLY_FILLED"]),
-        orders.c.entry_time >= start_dt,
-        orders.c.entry_time <= end_dt
-    )
+        orders.c.status.in_(["AWAITING_ENTRY", "OPEN", "PARTIALLY_FILLED"]),
+        orders.c.signal_time >= start_dt,
+        orders.c.signal_time <= end_dt
+    ]
+    if strategy_config_id is not None:
+        filters.append(orders.c.strategy_config_id == strategy_config_id)
+    stmt = select(orders).where(and_(*filters))
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
 
@@ -587,3 +556,12 @@ async def get_data_enabled_broker(session):
     )
     row = result.first()
     return dict(row._mapping) if row else None
+
+async def get_broker_executions_by_order_id(session, order_id: int):
+    """
+    Return all broker_executions rows for a given logical order_id, including broker_id for downstream use.
+    """
+    from algosat.core.dbschema import broker_executions
+    stmt = select(broker_executions).where(broker_executions.c.order_id == order_id)
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]

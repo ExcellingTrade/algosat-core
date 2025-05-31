@@ -1,14 +1,16 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from typing import Dict, Any, List, Optional
 
-from algosat.core.db import get_all_orders, get_order_by_id, get_orders_by_broker, get_orders_by_broker_and_strategy
-from algosat.api.schemas import OrderListResponse, OrderDetailResponse
+from algosat.core.db import get_all_orders, get_order_by_id, get_orders_by_broker, get_orders_by_broker_and_strategy, get_broker_executions_by_order_id
+from algosat.api.schemas import OrderListResponse, OrderDetailResponse, BrokerExecutionResponse
 from algosat.api.dependencies import get_db
 from algosat.api.auth_dependencies import get_current_user
 from algosat.core.security import EnhancedInputValidator, InvalidInputError
+from algosat.common.logger import get_logger
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 input_validator = EnhancedInputValidator()
+logger = get_logger("api.orders")
 
 @router.get("/", response_model=List[OrderListResponse])
 async def list_orders(
@@ -39,9 +41,7 @@ async def list_orders(
             )
         
         if strategy_config_id:
-            validated_strategy_config_id = input_validator.validate_and_sanitize(
-                strategy_config_id, "strategy_config_id", expected_type=int, min_value=1
-            )
+            validated_strategy_config_id = input_validator.validate_integer(strategy_config_id, "strategy_config_id", min_value=1)
         
         # Execute query based on filters
         if validated_broker and validated_strategy_config_id:
@@ -67,6 +67,7 @@ async def list_orders(
     except InvalidInputError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        logger.error(f"Error in list_orders: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve orders")
 
 @router.get("/{order_id}", response_model=OrderDetailResponse)
@@ -82,7 +83,7 @@ async def get_order(
     try:
         # Validate order_id
         validated_order_id = input_validator.validate_and_sanitize(
-            order_id, "order_id", expected_type=int, min_value=1
+            order_id, "order_id", expected_type=int
         )
         
         row = await get_order_by_id(db, validated_order_id)
@@ -96,4 +97,21 @@ async def get_order(
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Error in get_order: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve order details")
+
+@router.get("/{order_id}/executions", response_model=List[BrokerExecutionResponse])
+async def get_broker_executions(
+    order_id: int,
+    db=Depends(get_db),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get all broker executions for a given logical order.
+    """
+    try:
+        executions = await get_broker_executions_by_order_id(db, order_id)
+        return executions
+    except Exception as e:
+        logger.error(f"Error in get_broker_executions: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve broker executions")

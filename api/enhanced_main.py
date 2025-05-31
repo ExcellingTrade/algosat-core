@@ -14,7 +14,9 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-import structlog
+
+from algosat.common.logger import get_logger
+from algosat.core.config_manager import ConfigManager
 
 from core.config_manager import config_manager, settings
 from core.security import security_manager, InputValidator
@@ -22,7 +24,7 @@ from core.monitoring import trading_metrics, health_checker, performance_monitor
 from core.resilience import exception_handler
 from api.routes import orders, strategies, brokers, health
 
-logger = structlog.get_logger(__name__)
+logger = get_logger("api.main")
 
 # Security
 security = HTTPBearer()
@@ -31,23 +33,23 @@ security = HTTPBearer()
 async def lifespan(app: FastAPI):
     """Application lifespan management."""
     # Startup
-    logger.info("Starting Algosat Trading System", version=settings.app_version)
+    logger.info("Starting Algosat Trading System")
     
     # Validate configuration
     config_issues = config_manager.validate_configuration()
     if config_issues:
-        logger.warning("Configuration issues detected", issues=config_issues)
+        logger.warning(f"Configuration issues detected: {config_issues}")
         if settings.is_production:
             logger.error("Configuration issues in production - startup aborted")
             raise RuntimeError("Invalid production configuration")
     
     # Initialize monitoring
     if config_manager.monitoring.prometheus_enabled:
-        logger.info("Prometheus metrics enabled", port=config_manager.monitoring.metrics_port)
+        logger.info(f"Prometheus metrics enabled on port {config_manager.monitoring.metrics_port}")
     
     # Initialize health checks
     if config_manager.monitoring.enable_health_checks:
-        logger.info("Health checks enabled", interval=config_manager.monitoring.health_check_interval)
+        logger.info(f"Health checks enabled with interval {config_manager.monitoring.health_check_interval}")
     
     # Startup complete
     logger.info("Algosat Trading System started successfully")
@@ -120,11 +122,8 @@ async def monitoring_middleware(request: Request, call_next):
         ).inc()
         
         logger.error(
-            "Request failed",
-            method=method,
-            endpoint=endpoint,
-            error=str(e),
-            traceback=traceback.format_exc()
+            f"Request failed | method={method} | endpoint={endpoint} | error={str(e)}",
+            exc_info=True
         )
         
         raise HTTPException(
@@ -150,7 +149,7 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         return payload
         
     except Exception as e:
-        logger.warning("Authentication failed", error=str(e))
+        logger.warning(f"Authentication failed | error={str(e)}")
         raise HTTPException(
             status_code=401,
             detail="Could not validate credentials",
@@ -255,7 +254,7 @@ async def reload_configuration(user: dict = Depends(get_current_user)):
         }
         
     except Exception as e:
-        logger.error("Configuration reload failed", error=str(e))
+        logger.error(f"Configuration reload failed | error={str(e)}")
         raise HTTPException(status_code=500, detail=f"Reload failed: {str(e)}")
 
 
@@ -283,11 +282,7 @@ async def get_performance_metrics(user: dict = Depends(get_current_user)):
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions with proper logging."""
     logger.warning(
-        "HTTP exception",
-        status_code=exc.status_code,
-        detail=exc.detail,
-        path=request.url.path,
-        method=request.method
+        f"HTTP exception | status_code={exc.status_code} | detail={exc.detail} | path={request.url.path} | method={request.method}"
     )
     
     return JSONResponse(
@@ -306,13 +301,8 @@ async def general_exception_handler(request: Request, exc: Exception):
     error_id = str(uuid.uuid4())
     
     logger.error(
-        "Unhandled exception",
-        error_id=error_id,
-        error_type=type(exc).__name__,
-        error_message=str(exc),
-        path=request.url.path,
-        method=request.method,
-        traceback=traceback.format_exc()
+        f"Unhandled exception | error_id={error_id} | error_type={type(exc).__name__} | error_message={str(exc)} | path={request.url.path} | method={request.method}",
+        exc_info=True
     )
     
     # Record error metrics
@@ -371,11 +361,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     })
                     
             except Exception as e:
-                logger.error("WebSocket error", error=str(e))
+                logger.error(f"WebSocket error | error={str(e)}")
                 break
                 
     except Exception as e:
-        logger.error("WebSocket connection error", error=str(e))
+        logger.error(f"WebSocket connection error | error={str(e)}")
     finally:
         try:
             await websocket.close()

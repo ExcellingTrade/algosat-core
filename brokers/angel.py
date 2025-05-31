@@ -356,3 +356,18 @@ class AngelWrapper(BrokerInterface):
         """
         logger.warning("Angel get_strike_list is a placeholder. Not implemented.")
         return []
+
+    async def get_order_details(self) -> list[dict]:
+        """
+        Fetch all order details for the current account/session from Angel One.
+        Returns a list of order dicts.
+        """
+        loop = asyncio.get_event_loop()
+        try:
+            orders = await loop.run_in_executor(None, self.smart_api.orderBook)
+            if isinstance(orders, dict):
+                return orders.get("data", []) or []
+            return []
+        except Exception as e:
+            logger.error(f"Error fetching Angel order details: {e}")
+            return []

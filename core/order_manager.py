@@ -14,6 +14,10 @@ from algosat.models.strategy_config import StrategyConfig
 from algosat.models.order_aggregate import OrderAggregate, BrokerOrder
 import json
 import numpy as np
+import pandas as pd
+from datetime import datetime
+from algosat.core.time_utils import to_ist
+import pytz
 
 logger = get_logger("OrderManager")
 
@@ -57,7 +61,8 @@ class OrderManager:
     ) -> Dict[str, Any]:
         """
         Places an order by building a canonical OrderRequest and delegating to BrokerManager for broker routing.
-        OrderManager is not responsible for broker selection or looping; BrokerManager handles all broker logic.
+        Inserts one row in orders (logical trade), and one row per broker in broker_executions.
+        Returns the logical order id (orders.id) as canonical reference.
 
         Args:
             config: The strategy configuration (StrategyConfig instance).
@@ -81,46 +86,26 @@ class OrderManager:
                 "message": "Invalid order_payload type.",
                 "broker_responses": {}
             }
-
-        # Delegate to BrokerManager for actual broker routing and placement
-        try:
+        # 1. Insert logical order row (orders)
+        async with AsyncSessionLocal() as session:
+            order_id = await self._insert_and_get_order_id(
+                config=config,
+                order_payload=order_payload,
+                broker_name=None,
+                result=None,
+                parent_order_id=None
+            )
+            if not order_id:
+                logger.error("Failed to insert logical order row.")
+                return None
+            # 2. Place order(s) with brokers
             broker_manager = self.broker_manager
             broker_responses = await broker_manager.place_order(order_payload, strategy_name=strategy_name)
-        except Exception as e:
-            logger.error(f"BrokerManager.place_order failed: {e}", exc_info=True)
-            broker_responses = {"error": str(e)}
-
-        # After broker responses, insert order(s) into DB with broker info
-        # (This replaces the pre-broker DB insert logic)
-        inserted_order_ids = []
-        broker_to_local_id = {}
-        for broker_name, response in broker_responses.items():
-            # Only insert if broker attempted execution
-            if response and isinstance(response, dict):
-                # Always pass OrderRequest and models, never dicts, to DB insert
-                order_id = await self._insert_and_get_order_id(
-                    config=config,
-                    order_payload=order_payload,
-                    broker_name=broker_name,
-                    result=response,
-                    parent_order_id=None
-                )
-                if order_id:
-                    inserted_order_ids.append(order_id)
-                    broker_to_local_id[broker_name] = order_id
-        # Set parent_order_id: use the first inserted id as parent for all
-        if inserted_order_ids:
-            parent_id = inserted_order_ids[0]
-            # Update all orders (including the first) to have parent_order_id = parent_id
-            for oid in inserted_order_ids:
-                await self._set_parent_order_id(oid, parent_id)
-        return {
-            "overall_status": "success" if any(r.get("status") in ("success", True) for r in broker_responses.values()) else "error",
-            "message": f"Order placement attempted via BrokerManager.",
-            "broker_responses": broker_responses,
-            "local_order_ids": inserted_order_ids,
-            "parent_order_id": inserted_order_ids[0] if inserted_order_ids else None
-        }
+            # 3. Insert broker_executions rows
+            for broker_name, response in broker_responses.items():
+                await self._insert_broker_execution(session, order_id, broker_name, response)
+            await session.commit()
+        return {"order_id": order_id}
 
     async def _set_parent_order_id(self, order_id, parent_order_id):
         """
@@ -163,98 +148,69 @@ class OrderManager:
                     return pd.to_datetime(val).to_pydatetime()
             return val
 
+        def ensure_utc_aware(val):
+            import pandas as pd
+            if isinstance(val, (pd.Timestamp, np.datetime64)):
+                if hasattr(val, 'to_pydatetime'):
+                    val = val.to_pydatetime()
+                else:
+                    val = pd.to_datetime(val).to_pydatetime()
+            if isinstance(val, datetime):
+                if val.tzinfo is None:
+                    # Assume IST if naive, convert to UTC
+                    val = pytz.timezone("Asia/Kolkata").localize(val)
+                return val.astimezone(pytz.UTC)
+            return val
+
         async with AsyncSessionLocal() as sess:
-            broker_id = None
-            if broker_name:
-                broker_row = await get_broker_by_name(sess, broker_name)
-                broker_id = broker_row["id"] if broker_row else None
-            else:
-                brokers = await get_trade_enabled_brokers(sess)
-                if brokers:
-                    broker_id = brokers[0]["id"]
+            # Only set broker_id if broker_name is provided (for broker_executions, not logical order)
             strategy_config_id = config.id if isinstance(config, StrategyConfig) else self.extract_strategy_config_id(config)
             if not strategy_config_id:
                 logger.error(f"[OrderManager] Could not extract strategy_config_id from config: {repr(config)}. Order will not be inserted.")
                 return None
 
-            # --- Build order_data from OrderRequest and broker result ---
+            # --- Build order_data for logical order (orders table) ---
             order_data = {
-                "strategy_config_id": to_native(strategy_config_id),
-                "broker_id": to_native(broker_id),
-                "parent_order_id": parent_order_id,
+                "strategy_config_id": strategy_config_id,
                 "symbol": order_payload.symbol,
+                "candle_range": order_payload.extra.get("candle_range"),
+                "entry_price": order_payload.extra.get("entry_price", order_payload.price),
+                "stop_loss": order_payload.extra.get("stop_loss"),
+                "target_price": order_payload.extra.get("target_price"),
+                "signal_time": ensure_utc_aware(order_payload.extra.get("signal_time")),
+                "entry_time": ensure_utc_aware(order_payload.extra.get("entry_time")),
+                "exit_time": ensure_utc_aware(order_payload.extra.get("exit_time")),
+                "exit_price": order_payload.extra.get("exit_price"),
+                "status": order_payload.extra.get("status", "AWAITING_ENTRY"),
+                "reason": order_payload.extra.get("reason"),
+                "atr": order_payload.extra.get("atr"),
+                "supertrend_signal": order_payload.extra.get("supertrend_signal"),
+                "lot_qty": order_payload.extra.get("lot_qty"),
+                "side": order_payload.side.value if hasattr(order_payload.side, 'value') else str(order_payload.side),
                 "qty": order_payload.quantity,
-                "lot_qty": order_payload.quantity,
-                "side": order_payload.side.value if isinstance(order_payload.side, Side) else str(order_payload.side),
-                "order_ids": json.dumps([]),
-                "order_messages": json.dumps({}),
             }
-            # Core fields from OrderRequest
-            if order_payload.price is not None:
-                order_data["entry_price"] = to_native(order_payload.price)
-            if order_payload.trigger_price is not None:
-                order_data["trigger_price"] = to_native(order_payload.trigger_price)
-            # Extra fields from OrderRequest.extra
-            extra_data = order_payload.extra if order_payload.extra else {}
-            for k in [
-                "candle_range", "entry_price", "stop_loss", "target_price", "profit", "signal_time", "entry_time", "exit_time", "exit_price", "status", "reason", "atr", "supertrend_signal", "lot_qty"]:
-                v = extra_data.get(k)
-                if v is not None:
-                    order_data[k] = to_native(v)
-            # --- Broker result: order_ids and order_messages ---
-            order_ids = []
-            order_messages = {}
-            raw_response = None
-            if result:
-                # Accept both canonical OrderResponse and dict
-                ids = result.get("order_ids")
-                if ids:
-                    order_ids = [str(i) for i in ids]
-                msgs = result.get("order_messages")
-                if msgs:
-                    order_messages = {str(k): str(v) for k, v in msgs.items()}
-                # If there are failed/success for each orderid, ensure all are present
-                # If only error, put under 'error' key
-                if not order_ids and not order_messages and result.get("status") == "FAILED":
-                    msg = result.get("message") or result.get("raw_response") or "Broker returned error"
-                    order_messages = {"error": str(msg)}
-                # If partial, ensure all orderids have a message
-                if order_ids and order_messages:
-                    for oid in order_ids:
-                        if oid not in order_messages:
-                            order_messages[oid] = "Order placed"
-                # --- Store full broker API payload(s) ---
-                if "raw_response" in result:
-                    raw_response = result["raw_response"]
-                else:
-                    raw_response = result
-            order_data["order_ids"] = json.dumps(order_ids)
-            order_data["order_messages"] = json.dumps(order_messages)
-            order_data["raw_response"] = raw_response
-            # Status
-            if result and result.get("status"):
-                order_data["status"] = str(result.get("status"))
-            else:
-                order_data["status"] = to_native(extra_data.get("status", "AWAITING_ENTRY"))
-            # Final check for side, ensuring it's a string like "BUY" or "SELL" (DB expects string, not Side enum)
-            if isinstance(order_data.get("side"), Side):
-                order_data["side"] = order_data["side"].value
-            elif isinstance(order_data.get("side"), str):
-                # Accept only 'BUY' or 'SELL', else fallback to error
-                side_str = order_data["side"].upper()
-                if side_str in ("BUY", "SELL"):
-                    order_data["side"] = side_str
-                else:
-                    logger.error(f"Invalid side value for DB insert: {order_data['side']}")
-                    order_data["side"] = "BUY"  # fallback or raise error
-            else:
-                logger.error(f"Side value is not a string or Side enum: {order_data['side']}")
-                order_data["side"] = "BUY"  # fallback or raise error
-            # Remove unconsumed columns for DB insert
-            if "order_type" in order_data:
-                del order_data["order_type"]
             inserted = await insert_order(sess, order_data)
             return inserted["id"] if inserted else None
+
+    async def _insert_broker_execution(self, session, order_id, broker_name, response):
+        """
+        Insert a row into broker_executions for a broker's response to an order.
+        """
+        from algosat.core.dbschema import broker_executions
+        broker_id = response.get("broker_id")
+        if broker_id is None:
+            broker_id = await self._get_broker_id(broker_name)
+        broker_exec_data = {
+            "order_id": order_id,
+            "broker_id": broker_id,
+            # Deprecated: broker_name, keep for migration only
+            "broker_name": broker_name,
+            "broker_order_ids": response.get("order_ids"),
+            "order_messages": response.get("order_messages"),
+            "status": str(response.get("status", "FAILED")),
+            "raw_response": response,
+        }
+        await session.execute(broker_executions.insert().values(**broker_exec_data))
 
     async def _get_broker_id(self, broker_name):
         async with AsyncSessionLocal() as sess:

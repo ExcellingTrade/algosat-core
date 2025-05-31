@@ -153,7 +153,7 @@ class BrokerManager:
         for broker_key in list(self.brokers.keys()):
             await self.reauthenticate_broker(broker_key)
 
-    def get_data_broker(self, broker_name: Optional[str] = None):
+    async def get_data_broker(self, broker_name: Optional[str] = None):
         """
         Returns the broker instance to be used for fetching data.
         If broker_name is given, return that broker if available and valid.
@@ -163,19 +163,12 @@ class BrokerManager:
             return self.brokers[broker_name]
         # Find the broker with is_data_provider enabled in the DB
         from algosat.core.db import get_data_enabled_broker, AsyncSessionLocal
-        import asyncio
-        try:
-            loop = asyncio.get_event_loop()
-            async def _get():
-                async with AsyncSessionLocal() as session:
-                    return await get_data_enabled_broker(session)
-            broker_row = loop.run_until_complete(_get())
+        async with AsyncSessionLocal() as session:
+            broker_row = await get_data_enabled_broker(session)
             if broker_row:
                 bname = broker_row.get("broker_name")
                 if bname in self.brokers and self.brokers[bname]:
                     return self.brokers[bname]
-        except Exception as e:
-            logger.error(f"Error fetching data provider broker from DB: {e}")
         return None
 
     async def get_all_trade_enabled_brokers(self) -> Dict[str, object]:
@@ -190,24 +183,29 @@ class BrokerManager:
         """
         Place order in all trade-enabled brokers (even if not authenticated), with retry on retryable errors.
         Accepts an OrderRequest object and passes it to each broker's place_order.
-        Returns a dict of broker_name -> order result.
+        Returns a dict of broker_name -> order result, with broker_id included.
         """
         if not isinstance(order_payload, OrderRequest):
             raise ValueError("order_payload must be an OrderRequest instance")
         results = {}
         all_brokers = await self.get_all_trade_enabled_brokers()
-        for broker_name, broker in all_brokers.items():
-            if not broker:
-                results[broker_name] = {"status": False, "message": "Broker not initialized or not authenticated"}
-                continue
-            if not hasattr(broker, "place_order") or not callable(getattr(broker, "place_order", None)):
-                results[broker_name] = {"status": False, "message": "place_order not implemented"}
-                continue
-            try:
-                result = await async_retry(broker.place_order, order_payload, retries=retries, delay=delay)
-                results[broker_name] = result
-            except Exception as e:
-                results[broker_name] = {"status": False, "message": str(e)}
+        from algosat.core.db import AsyncSessionLocal, get_broker_by_name
+        async with AsyncSessionLocal() as session:
+            for broker_name, broker in all_brokers.items():
+                if not broker:
+                    results[broker_name] = {"status": False, "message": "Broker not initialized or not authenticated"}
+                    continue
+                if not hasattr(broker, "place_order") or not callable(getattr(broker, "place_order", None)):
+                    results[broker_name] = {"status": False, "message": "place_order not implemented"}
+                    continue
+                try:
+                    result = await async_retry(broker.place_order, order_payload, retries=retries, delay=delay)
+                    broker_row = await get_broker_by_name(session, broker_name)
+                    broker_id = broker_row["id"] if broker_row else None
+                    result["broker_id"] = broker_id
+                    results[broker_name] = result
+                except Exception as e:
+                    results[broker_name] = {"status": False, "message": str(e)}
         return results
 
     async def get_profile(self, broker_name, retries=3, delay=1):

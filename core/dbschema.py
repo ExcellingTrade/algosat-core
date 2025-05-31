@@ -125,15 +125,13 @@ Index(
     postgresql_where=text("is_data_provider = true"),
 )
 
+# Orders table: logical orders (no broker-specific info)
 orders = Table(
-    "orders",
-    metadata,
+    "orders", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("parent_order_id", Integer, nullable=True, index=True),  # New: group logical trades
     Column("strategy_config_id", Integer, ForeignKey("strategy_configs.id"), nullable=False, index=True),
-    Column("broker_id", Integer, ForeignKey("broker_credentials.id"), nullable=False, index=True),
     Column("symbol", String, nullable=False, index=True),
-    Column("candle_range",  Float, nullable=True),  # Changed from String to Float
+    Column("candle_range",  Float, nullable=True),
     Column("entry_price",  Float, nullable=True),
     Column("stop_loss",  Float, nullable=True),
     Column("target_price",  Float, nullable=True),
@@ -146,11 +144,26 @@ orders = Table(
     Column("atr", Float, nullable=True),
     Column("supertrend_signal", String, nullable=True),
     Column("lot_qty", Integer, nullable=True),
-    Column("side", String, nullable=True),  # Changed from Integer to String for broker-agnostic side
-    Column("order_ids", JSONB, nullable=True),
-    Column("order_messages", JSONB, nullable=True),
+    Column("side", String, nullable=True),
     Column("qty", Integer, nullable=True),
-    Column("raw_response", JSONB, nullable=True),  # NEW: store full broker API payload(s)
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+)
+
+# Broker executions table: one row per broker per order
+broker_executions = Table(
+    "broker_executions", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("order_id", Integer, ForeignKey("orders.id"), nullable=False, index=True),
+    Column("broker_id", Integer, ForeignKey("broker_credentials.id"), nullable=False, index=True),
+    # Deprecated: broker_name, keep for migration only
+    Column("broker_name", String, nullable=True, index=True),
+    Column("broker_order_ids", JSONB, nullable=True),  # List of order ids for this broker
+    Column("order_messages", JSONB, nullable=True),
+    Column("status", String, nullable=False, index=True),
+    Column("raw_response", JSONB, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 )
 
 users = Table(

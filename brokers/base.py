@@ -78,3 +78,11 @@ class BrokerInterface(ABC):
         ATM, ITM, and OTM based on counts.
         """
         pass
+
+    @abstractmethod
+    async def get_order_details(self) -> list[dict]:
+        """
+        Fetch all order details for the current account/session from the broker.
+        Returns a list of order dicts (structure broker-specific).
+        """
+        ...

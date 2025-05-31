@@ -7,6 +7,9 @@ from cachetools import TTLCache
 import inspect
 import pandas as pd
 from algosat.common.logger import get_logger
+from algosat.models.order_aggregate import OrderAggregate, BrokerOrder
+from typing import List, Dict, Any
+from algosat.core.db import get_order_by_id, get_broker_executions_by_order_id
 
 logger = get_logger("data_manager")
 
@@ -154,7 +157,7 @@ class DataManager:
         if self.broker_manager:
             logger.debug(f"Attempting to get broker from broker_manager with broker_name: {self.broker_name}")
             try:
-                self.broker = self.broker_manager.get_data_broker(broker_name=self.broker_name)
+                self.broker = await self.broker_manager.get_data_broker(broker_name=self.broker_name)
                 logger.debug(f"Broker set from manager: {self.broker} (type: {type(self.broker)})")
             except Exception as e:
                 logger.error(f"Exception in get_data_broker: {e}", exc_info=True)
@@ -227,8 +230,7 @@ class DataManager:
         if not self.broker:
             raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
         if hasattr(self.broker, "get_strike_list"):
-            result = self.broker.get_strike_list(symbol, max_strikes)
-            return await result if inspect.isawaitable(result) else result
+            return await self.broker.get_strike_list(symbol, max_strikes)
         raise NotImplementedError(f"Broker {self.get_current_broker_name()} does not implement get_strike_list.")
 
     async def get_broker_symbol(self, symbol, instrument_type=None):
@@ -236,6 +238,40 @@ class DataManager:
         if not self.broker_manager or not broker_name:
             raise RuntimeError("BrokerManager or broker_name not set in DataManager.")
         return await self.broker_manager.get_symbol_info(broker_name, symbol, instrument_type)
+
+    async def get_order_aggregate(self, parent_order_id: int) -> OrderAggregate:
+        """
+        Return an OrderAggregate for the given parent_order_id, including broker execution info.
+        """
+        from algosat.core.db import AsyncSessionLocal
+        async with AsyncSessionLocal() as session:
+            order_row = await get_order_by_id(session, parent_order_id)
+            broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
+            broker_orders: List[BrokerOrder] = []
+            for be in broker_execs:
+                broker_orders.append(BrokerOrder(
+                    broker_id=be.get("broker_id"),
+                    order_id=be.get("id"),
+                    status=be.get("status"),
+                    raw_response=be.get("raw_response")
+                ))
+            return OrderAggregate(
+                strategy_config_id=order_row.get("strategy_config_id"),
+                parent_order_id=parent_order_id,
+                symbol=order_row.get("symbol"),
+                entry_price=order_row.get("entry_price"),
+                side=order_row.get("side"),
+                broker_orders=broker_orders
+            )
+
+    async def get_broker_name_by_id(self, broker_id: int) -> str:
+        """
+        Utility to map broker_id to broker_name using the broker_credentials table.
+        """
+        from algosat.core.db import AsyncSessionLocal, get_broker_by_id
+        async with AsyncSessionLocal() as session:
+            broker = await get_broker_by_id(session, broker_id)
+            return broker["broker_name"] if broker else None
 
 
 # Example: instantiate a global DataManager with per-broker rate limiting

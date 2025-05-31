@@ -8,6 +8,8 @@ from algosat.core.dbschema import strategy_configs
 from algosat.core.order_manager import OrderManager
 from algosat.core.broker_manager import BrokerManager
 from algosat.core.order_request import Side
+from algosat.core.db import AsyncSessionLocal, get_order_by_id
+from algosat.core.signal import TradeSignal, SignalType
 from algosat.common.strategy_utils import (
     calculate_end_date,
     wait_for_first_candle_completion,
@@ -122,7 +124,7 @@ class OptionBuyStrategy(StrategyBase):
         # 1. Wait for first candle completion
         # await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
         # 2. Calculate first candle data using the correct trade day
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=0)
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=1)
         # 3. Fetch option chain and identify strikes
         cache = load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
@@ -162,9 +164,10 @@ class OptionBuyStrategy(StrategyBase):
         """Synchronize self._positions with open orders in the database for all strikes for the current trade day."""
         self._positions = {}
         async with AsyncSessionLocal() as session:
-            trade_day = get_trade_day(get_ist_datetime())
+            trade_day = get_trade_day(get_ist_datetime() - timedelta(days=2))
+            strategy_config_id = self.get_config_id()
             for strike in self._strikes:
-                open_orders = await get_open_orders_for_symbol_and_tradeday(session, strike, trade_day)
+                open_orders = await get_open_orders_for_symbol_and_tradeday(session, strike, trade_day, strategy_config_id)
                 if open_orders:
                     self._positions[strike] = open_orders
 
@@ -179,7 +182,7 @@ class OptionBuyStrategy(StrategyBase):
             return None
         trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=0)
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=1)
         # 1. Fetch history for all strikes
         history_data = await self.fetch_history_data(
             self.dp, self._strikes, trade_day, trade_config
@@ -201,14 +204,13 @@ class OptionBuyStrategy(StrategyBase):
                 if self._positions.get(strike):
                     logger.info(f"DB: Position already open for {strike}, skipping signal evaluation and order placement.")
                     continue
-                # Only evaluate signal and place order if no open position for this strike
-                if self._position is not None and self._position.get('strike') == strike:
-                    logger.info(f"Position already open for {strike}, skipping signal evaluation and order placement.")
-                    continue
                 signal_payload = self.evaluate_trade_signal(data, trade_config, strike)
                 # 4. Place order if signal
                 order_info = await self.process_order(signal_payload, data, strike)
                 if order_info:
+                    # Immediately update in-memory _positions for this strike to prevent duplicate signals in next run
+                    self._positions[strike] = [order_info]
+                    logger.info(f"Updated in-memory _positions for {strike} after order placement: {self._positions[strike]}")
                     return order_info  # Return as soon as an order is placed
             except Exception as e:
                 logger.error(f"Error during signal evaluation or order for {strike}: {e}")
@@ -295,7 +297,7 @@ class OptionBuyStrategy(StrategyBase):
         Skips entry if previous candle was SELL and current is BUY (fresh reversal).
         """
         # Prevent duplicate entry signals for the same strike if a position is already open
-        if self._position is not None and self._position.get('strike') == strike:
+        if self._positions.get(strike):
             return None
         try:
             prev = data.iloc[-2]
@@ -324,11 +326,12 @@ class OptionBuyStrategy(StrategyBase):
                 and curr['high'] < 500
             ):
                 trade_dict = calculate_trade(curr, data, strike, config, side=Side.BUY)
-                self._position = {
+                # When signal is formed:
+                self._positions[strike] = [{
                     'strike': strike,
                     'entry_price': trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
                     'timestamp': curr.get('timestamp')
-                }
+                }]
                 logger.info(f"🟢 Signal formed for {strike} at {curr.get('timestamp')}: Entry at {trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE)}")
                 return TradeSignal(
                     symbol=strike,
@@ -361,16 +364,18 @@ class OptionBuyStrategy(StrategyBase):
         """
         Exit logic: trigger on Supertrend flip down, stoploss, or target hit.
         """
-        if self._position is None:
+        # Only exit if there is an open position for this strike
+        if not self._positions.get(strike):
             return None
         try:
             prev = data.iloc[-2]
             curr = data.iloc[-1]
-            entry_price = self._position.get('entry_price', 0)
+            entry_price = self._positions[strike][0].get('entry_price', 0)
             # 1) Supertrend reversal down
             if prev.get('in_uptrend') and not curr.get('in_uptrend'):
                 exit_price = curr['close']
-                self._position = None
+                # When exit is triggered:
+                self._positions.pop(strike, None)
                 return TradeSignal(
                     symbol=strike,
                     side=-1,  # SELL
@@ -381,7 +386,7 @@ class OptionBuyStrategy(StrategyBase):
             max_loss_pct = config.get('max_loss_percentage', 25)
             stoploss_price = entry_price * (1 - max_loss_pct / 100)
             if curr['low'] <= stoploss_price:
-                self._position = None
+                self._positions.pop(strike, None)
                 return TradeSignal(
                     symbol=strike,
                     side=-1,  # SELL
@@ -392,7 +397,7 @@ class OptionBuyStrategy(StrategyBase):
             atr_multiplier = config.get('atr_target_multiplier', 3)
             target_price = entry_price + curr.get('atr', 0) * atr_multiplier
             if curr['high'] >= target_price:
-                self._position = None
+                self._positions.pop(strike, None)
                 return TradeSignal(
                     symbol=strike,
                     side=-1,  # SELL
@@ -405,10 +410,54 @@ class OptionBuyStrategy(StrategyBase):
 
     def evaluate_trade_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
         """
-        Decide whether to enter, exit, or do nothing based on the latest candle.
+        Decide whether to enter or do nothing based on the latest candle.
         Returns a TradeSignal when a signal is generated, otherwise None.
+        Only entry logic is handled here; exit logic is handled by OrderMonitor.
         """
-        if self._position is None:
+        if not self._positions.get(strike):
             return self.evaluate_signal(data, config, strike)
         else:
-            return self.evaluate_exit(data, config, strike)
+            return None
+
+    async def evaluate_price_exit(self, parent_order_id: int, last_price: float):
+        """
+        Exit based on last price hitting stop_loss or target_price stored in DB.
+        """
+        async with AsyncSessionLocal() as session:
+            order = await get_order_by_id(session, parent_order_id)
+        stop_loss = order.get("stop_loss")
+        target_price = order.get("target_price")
+        symbol = order.get("symbol")
+        if stop_loss is not None and last_price <= stop_loss:
+            ts = TradeSignal(
+                symbol=symbol,
+                side=Side.SELL,
+                price=stop_loss,
+                signal_type=SignalType.STOPLOSS
+            )
+            return self.order_manager.broker_manager.build_order_request_from_signal(ts, self.cfg)
+        if target_price is not None and last_price >= target_price:
+            ts = TradeSignal(
+                symbol=symbol,
+                side=Side.SELL,
+                price=target_price,
+                signal_type=SignalType.TRAIL
+            )
+            return self.order_manager.broker_manager.build_order_request_from_signal(ts, self.cfg)
+        return None
+
+    async def evaluate_candle_exit(self, parent_order_id: int, history: dict):
+        """
+        Exit based on candle history: uses existing evaluate_exit logic.
+        """
+        # Determine strike from in-memory position
+        strike = self._position.get('strike') if self._position else None
+        if not strike:
+            return None
+        df = history.get(strike)
+        if df is None or len(df) < 2:
+            return None
+        tsignal = self.evaluate_exit(df, self.trade, strike)
+        if tsignal:
+            return self.order_manager.broker_manager.build_order_request_from_signal(tsignal, self.cfg)
+        return None

@@ -127,16 +127,14 @@ async def run_strategy_config(config_row, data_manager: DataManager, order_manag
 
     while True:
         try:
-            order_ids = await strategy.process_cycle()
-            logger.info(f"Processed cycle for strategy '{strategy_name}' with order ids: {order_ids}")
-            # If orders were placed, put each order_id in the order_queue for the manager to monitor
-            if order_ids and isinstance(order_ids, list):
-                for order_id in order_ids:
-                    await order_queue.put({
-                        "order_id": order_id,
-                        "config": config,
-                        "interval_minutes": interval_minutes
-                    })
+            order_result = await strategy.process_cycle()
+            logger.info(f"Processed cycle for strategy '{strategy_name}' with order result: {order_result}")
+            # Only push to queue if order was placed successfully
+            if order_result and isinstance(order_result, dict) and order_result.get("order_id"):
+                await order_queue.put({
+                    "order_id": order_result["order_id"],
+                    "strategy": strategy
+                })
         except Exception as e:
             logger.error(f"Error in run_tick for '{strategy_name}': {e}", exc_info=True)
         try:
