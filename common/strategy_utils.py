@@ -497,3 +497,29 @@ async def get_broker_symbol(broker_manager, broker_name, symbol, instrument_type
     Utility to get the correct symbol/token for a broker using BrokerManager.get_symbol_info.
     """
     return await broker_manager.get_symbol_info(broker_name, symbol, instrument_type)
+
+async def wait_for_next_candle(interval_minutes: int) -> float:
+    """
+    Wait until the next candle boundary for the given interval in minutes.
+    Returns the wait time in seconds.
+    """
+    now = get_ist_datetime() # Get current IST datetime     
+    minutes = now.minute % interval_minutes
+    seconds = now.second
+    microseconds = now.microsecond
+    # Time until next candle
+    delta = timedelta(
+        minutes=interval_minutes - minutes if minutes > 0 or seconds > 0 or microseconds > 0 else 0,
+        seconds=-seconds,
+        microseconds=-microseconds
+    )
+    if delta.total_seconds() <= 0:
+        delta = timedelta(minutes=interval_minutes)
+    wait_time = delta.total_seconds()
+    logger.info(f"Waiting for next candle: {wait_time} seconds (interval: {interval_minutes} minutes)")
+    # Use asyncio.sleep to wait for the next candle
+    if wait_time < 0:
+        logger.warning(f"Negative wait time calculated: {wait_time} seconds. Adjusting to 0.")
+        wait_time = 0
+    await asyncio.sleep(wait_time)
+    return wait_time

@@ -14,7 +14,6 @@ from algosat.core.order_monitor import OrderMonitor
 from algosat.core.time_utils import get_ist_datetime
 from algosat.models.strategy_config import StrategyConfig
 from algosat.core.order_cache import OrderCache
-from algosat.core.broker_manager import BrokerManager
 
 logger = get_logger("strategy_manager")
 
@@ -47,13 +46,20 @@ async def order_monitor_loop(order_queue, data_manager, order_manager):
 
 async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
     global order_cache
-    # Initialize OrderCache with the broker_manager from data_manager
+    # Initialize OrderCache with the order_manager
     if order_cache is None:
-        broker_manager = getattr(data_manager, 'broker_manager', None)
-        if broker_manager is None:
-            raise RuntimeError("DataManager must have a broker_manager attribute for OrderCache initialization.")
-        order_cache = OrderCache(broker_manager)
+        order_cache = OrderCache(order_manager)
         await order_cache.start()
+    # --- Start monitors for existing open orders on startup ---
+    from algosat.core.db import get_all_open_orders
+    async with AsyncSessionLocal() as session:
+        open_orders = await get_all_open_orders(session)
+        for order in open_orders:
+            # You may need to fetch the strategy instance/config for this order
+            # For now, pass None or fetch as needed
+            order_info = {"order_id": order["id"], "strategy": None}
+            await order_queue.put(order_info)
+    # --- Existing: Start monitor loop for new orders ---
     asyncio.create_task(order_monitor_loop(order_queue, data_manager, order_manager))
     try:
         async with AsyncSessionLocal() as session:

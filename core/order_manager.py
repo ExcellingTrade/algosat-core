@@ -18,8 +18,50 @@ import pandas as pd
 from datetime import datetime
 from algosat.core.time_utils import to_ist
 import pytz
+from enum import Enum
 
 logger = get_logger("OrderManager")
+
+class OrderStatusEnum(str, Enum):
+    AWAITING_ENTRY = "AWAITING_ENTRY"
+    OPEN = "OPEN"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    FILLED = "FILLED"
+    COMPLETE = "COMPLETE"
+    CANCELLED = "CANCELLED"
+    REJECTED = "REJECTED"
+    PENDING = "PENDING"
+    TRIGGER_PENDING = "TRIGGER_PENDING"
+    AMO_REQ_RECEIVED = "AMO_REQ_RECEIVED"
+    # Add more as needed
+
+# Fyers status code mapping (example, update as per Fyers API)
+FYERS_STATUS_MAP = {
+    1: OrderStatusEnum.AWAITING_ENTRY,  # Example: 1 = pending
+    2: OrderStatusEnum.OPEN,           # Example: 2 = open
+    3: OrderStatusEnum.PARTIALLY_FILLED,
+    4: OrderStatusEnum.FILLED,
+    5: OrderStatusEnum.CANCELLED,
+    6: OrderStatusEnum.REJECTED,
+    # Add more mappings as per Fyers API
+}
+
+# Zerodha status mapping (partial, based on image)
+ZERODHA_STATUS_MAP = {
+    "PUT ORDER REQ RECEIVED": OrderStatusEnum.AWAITING_ENTRY,
+    "AMO REQ RECEIVED": OrderStatusEnum.AWAITING_ENTRY,
+    "VALIDATION PENDING": OrderStatusEnum.PENDING,
+    "OPEN PENDING": OrderStatusEnum.PENDING,
+    "MODIFY VALIDATION PENDING": OrderStatusEnum.PENDING,
+    "MODIFY PENDING": OrderStatusEnum.PENDING,
+    "TRIGGER PENDING": OrderStatusEnum.TRIGGER_PENDING,
+    "CANCEL PENDING": OrderStatusEnum.PENDING,
+    "OPEN": OrderStatusEnum.OPEN,
+    "COMPLETE": OrderStatusEnum.COMPLETE,
+    "CANCELLED": OrderStatusEnum.CANCELLED,
+    "REJECTED": OrderStatusEnum.REJECTED,
+    # Add more as needed
+}
 
 class OrderManager:
     def __init__(self, broker_manager: BrokerManager):
@@ -245,6 +287,62 @@ class OrderManager:
                 new_values={"status": status}
             )
             logger.debug(f"Order {order_id} status updated to {status} in DB.")
+
+    async def get_all_broker_order_details(self) -> list:
+        """
+        Fetch and normalize order details from all trade-enabled brokers via BrokerManager.
+        Returns a list of dicts with common fields: broker_name, broker_id, order_id, status, symbol, raw.
+        """
+        broker_orders_raw = await self.broker_manager.get_all_broker_order_details()
+        normalized_orders = []
+        # You may want to cache broker_id lookups for efficiency
+        broker_name_to_id = {}
+        async def get_broker_id_cached(broker_name):
+            if broker_name in broker_name_to_id:
+                return broker_name_to_id[broker_name]
+            broker_id = await self._get_broker_id(broker_name)
+            broker_name_to_id[broker_name] = broker_id
+            return broker_id
+        for broker_name, orders in broker_orders_raw.items():
+            broker_id = await get_broker_id_cached(broker_name)
+            # Fyers: orders is a dict with 'orderBook' key
+            if broker_name.lower() == "fyers" and isinstance(orders, dict) and "orderBook" in orders:
+                for o in orders["orderBook"]:
+                    status = FYERS_STATUS_MAP.get(o.get("status"), str(o.get("status")))
+                    normalized_orders.append({
+                        "broker_name": broker_name,
+                        "broker_id": broker_id,
+                        "order_id": o.get("id"),
+                        "status": status,
+                        "symbol": o.get("symbol"),
+                        "raw": o
+                    })
+            # Zerodha: orders is a list of dicts
+            elif broker_name.lower() == "zerodha" and isinstance(orders, list):
+                for o in orders:
+                    status = ZERODHA_STATUS_MAP.get(o.get("status"), o.get("status"))
+                    normalized_orders.append({
+                        "broker_name": broker_name,
+                        "broker_id": broker_id,
+                        "order_id": o.get("order_id"),
+                        "status": status,
+                        "symbol": o.get("tradingsymbol"),
+                        "raw": o
+                    })
+            # Add more brokers as needed
+            else:
+                # Fallback: treat as list of dicts
+                if isinstance(orders, list):
+                    for o in orders:
+                        normalized_orders.append({
+                            "broker_name": broker_name,
+                            "broker_id": broker_id,
+                            "order_id": o.get("order_id") or o.get("id"),
+                            "status": o.get("status"),
+                            "symbol": o.get("symbol") or o.get("tradingsymbol"),
+                            "raw": o
+                        })
+        return normalized_orders
 
 _order_manager_instance = None
 

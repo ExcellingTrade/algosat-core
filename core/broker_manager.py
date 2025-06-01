@@ -423,3 +423,23 @@ class BrokerManager:
             extra.update({k: v for k, v in config.extra.items() if v is not None})
         order_kwargs['extra'] = extra
         return OrderRequest(**order_kwargs)
+
+    async def get_all_broker_order_details(self) -> dict:
+        """
+        Fetch order details from all trade-enabled brokers.
+        Returns a dict: broker_name -> list of order dicts.
+        """
+        enabled_brokers = await self.get_all_trade_enabled_brokers()
+        broker_orders = {}
+        for broker_name, broker in enabled_brokers.items():
+            try:
+                orders = broker.get_order_details()
+                while asyncio.iscoroutine(orders):
+                    orders = await orders
+                broker_orders[broker_name] = orders
+            except Exception as e:
+                from algosat.common.logger import get_logger
+                logger = get_logger("BrokerManager")
+                logger.error(f"BrokerManager: Failed to fetch orders for {broker_name}: {e}")
+                broker_orders[broker_name] = []
+        return broker_orders

@@ -8,6 +8,7 @@ from algosat.models.order_aggregate import OrderAggregate
 from algosat.core.data_manager import DataManager
 from algosat.core.order_manager import OrderManager
 from algosat.core.order_cache import OrderCache
+from algosat.common.strategy_utils import wait_for_next_candle
 
 logger = get_logger("OrderMonitor")
 
@@ -19,7 +20,8 @@ class OrderMonitor:
         data_manager: DataManager,
         order_manager: OrderManager,
         order_cache: OrderCache,  # new dependency
-        fast_interval: float = 60.0
+        fast_interval: float = 60.0,
+        fast_interval_minutes: int = 1  # new: candle timeframe in minutes
     ):
         self.order_id: int = order_id
         self.strategy: Any = strategy
@@ -27,20 +29,31 @@ class OrderMonitor:
         self.order_manager: OrderManager = order_manager
         self.order_cache: OrderCache = order_cache
         self.fast_interval: float = fast_interval
+        self.fast_interval_minutes: int = fast_interval_minutes
         self.monitor_interval: float = getattr(strategy, "monitor_interval", 1) * 60
         self.entry_interval: float = getattr(strategy, "entry_interval", 1) * 60
         self._running: bool = True
 
     async def _fast_monitor(self) -> None:
+        from algosat.core.order_manager import OrderStatusEnum
         while self._running:
             # Load aggregated order data
             agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
+            broker_statuses = []
             for bro in agg.broker_orders:
-                # Use order_cache to get order details
-                broker_name = self.data_manager.get_broker_name_by_id(bro.broker_id)  # You may need to implement this
+                broker_name = await self.data_manager.get_broker_name_by_id(bro.broker_id)
                 order_details = await self.order_cache.get_order_by_id(broker_name, bro.order_id)
-                resp = order_details.get("status") if order_details else None
-                await self.data_manager.update_order_status(self.order_id, bro.broker_id, resp)
+                status = order_details.get("status") if order_details else None
+                broker_statuses.append(status)
+            # Aggregate status logic
+            if broker_statuses and all(s == OrderStatusEnum.FILLED for s in broker_statuses):
+                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatusEnum.FILLED)
+            elif any(s == OrderStatusEnum.PARTIALLY_FILLED for s in broker_statuses):
+                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatusEnum.PARTIALLY_FILLED)
+            elif any(s == OrderStatusEnum.REJECTED for s in broker_statuses):
+                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatusEnum.REJECTED)
+            elif any(s == OrderStatusEnum.CANCELLED for s in broker_statuses):
+                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatusEnum.CANCELLED)
             # Let strategy decide exit based on latest price
             ltp = await self.data_manager.get_ltp(agg.symbol, self.order_id)
             if ltp is not None:
@@ -49,7 +62,7 @@ class OrderMonitor:
                     await self.order_manager.place_order(exit_req, strategy_name=self.strategy.name)
                     self.stop()
                     return
-            await asyncio.sleep(self.fast_interval)
+            await wait_for_next_candle(self.fast_interval_minutes)
 
     async def _slow_monitor(self) -> None:
         while self._running:

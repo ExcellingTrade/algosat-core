@@ -1,9 +1,9 @@
 from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 
 class BrokerOrder(BaseModel):
     broker_id: int
-    order_id: Optional[int]  # local DB order id
+    order_id: Union[str, int, List[Union[str, int]], None]  # Accepts str, int, or list
     status: str
     raw_response: Dict[str, Any]
 

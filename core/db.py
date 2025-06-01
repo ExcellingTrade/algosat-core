@@ -565,3 +565,19 @@ async def get_broker_executions_by_order_id(session, order_id: int):
     stmt = select(broker_executions).where(broker_executions.c.order_id == order_id)
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_all_open_orders(session):
+    """
+    Return all orders that are not in a final state (FILLED, CANCELLED, REJECTED, COMPLETE).
+    """
+    from algosat.core.dbschema import orders
+    from algosat.core.order_manager import OrderStatusEnum
+    final_statuses = [
+        OrderStatusEnum.FILLED,
+        OrderStatusEnum.CANCELLED,
+        OrderStatusEnum.REJECTED,
+        OrderStatusEnum.COMPLETE
+    ]
+    stmt = select(orders).where(~orders.c.status.in_([s.value for s in final_statuses]))
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]

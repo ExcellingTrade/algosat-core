@@ -9,7 +9,7 @@ from datetime import datetime
 from algosat.brokers.base import BrokerInterface
 from algosat.common.broker_utils import get_broker_credentials, upsert_broker_credentials, can_reuse_token
 from algosat.common.logger import get_logger
-from kiteconnect import KiteConnect
+from kiteconnect import KiteConnect, exceptions as kite_exceptions
 import pyotp
 from selenium.webdriver.common.by import By
 from seleniumbase import SB
@@ -174,8 +174,15 @@ class ZerodhaWrapper(BrokerInterface):
                 logger.error("Kite client not initialized. Please login first.")
                 return [{"error": "Kite client not initialized"}]
             loop = asyncio.get_event_loop()
-            positions = await loop.run_in_executor(None, self.kite.positions)
-            # Flatten the positions dict to a list of all positions (day + net)
+            try:
+                positions = await loop.run_in_executor(None, self.kite.positions)
+            except kite_exceptions.PermissionException:
+                logger.warning("Zerodha: PermissionException in get_positions, attempting reauth...")
+                if await self.login(force_reauth=True):
+                    positions = await loop.run_in_executor(None, self.kite.positions)
+                else:
+                    logger.error("Zerodha: Reauth failed in get_positions.")
+                    return [{"error": "Reauth failed"}]
             all_positions = []
             for segment in ("day", "net"):
                 segment_positions = positions.get(segment, [])
@@ -225,22 +232,31 @@ class ZerodhaWrapper(BrokerInterface):
                     return i["instrument_token"]
             raise Exception(f"Token not found for {symbol}")
         loop = asyncio.get_event_loop()
-        token = await loop.run_in_executor(None, get_token, self.kite, symbol)
-        # Calculate interval in minutes for to_date adjustment
-        interval_minutes_map = {
-            "minute": 1, "3minute": 3, "5minute": 5, "10minute": 10, "15minute": 15, "30minute": 30, "60minute": 60, "day": 1440
-        }
-        interval_minutes = interval_minutes_map.get(interval, 5)
-        # Format from_date and to_date as 'yyyy-mm-dd hh:mm:ss'
-        from_dt = pd.to_datetime(from_date)
-        to_dt = pd.to_datetime(to_date)
-        # If from and to are the same, add interval_minutes to to_dt
-        if from_dt == to_dt:
-            to_dt = from_dt + pd.Timedelta(minutes=interval_minutes)
-        from_date_fmt = from_dt.strftime("%Y-%m-%d %H:%M:%S")
-        to_date_fmt = to_dt.strftime("%Y-%m-%d %H:%M:%S")
-        logger.debug(f"Fetching historical data for {symbol} from {from_date_fmt} to {to_date_fmt} with interval {interval}")
-        candles = await loop.run_in_executor(None, self.kite.historical_data, token, from_date_fmt, to_date_fmt, interval)
+        try:
+            token = await loop.run_in_executor(None, get_token, self.kite, symbol)
+            # Calculate interval in minutes for to_date adjustment
+            interval_minutes_map = {
+                "minute": 1, "3minute": 3, "5minute": 5, "10minute": 10, "15minute": 15, "30minute": 30, "60minute": 60, "day": 1440
+            }
+            interval_minutes = interval_minutes_map.get(interval, 5)
+            # Format from_date and to_date as 'yyyy-mm-dd hh:mm:ss'
+            from_dt = pd.to_datetime(from_date)
+            to_dt = pd.to_datetime(to_date)
+            # If from and to are the same, add interval_minutes to to_dt
+            if from_dt == to_dt:
+                to_dt = from_dt + pd.Timedelta(minutes=interval_minutes)
+            from_date_fmt = from_dt.strftime("%Y-%m-%d %H:%M:%S")
+            to_date_fmt = to_dt.strftime("%Y-%m-%d %H:%M:%S")
+            logger.debug(f"Fetching historical data for {symbol} from {from_date_fmt} to {to_date_fmt} with interval {interval}")
+            candles = await loop.run_in_executor(None, self.kite.historical_data, token, from_date_fmt, to_date_fmt, interval)
+        except kite_exceptions.PermissionException:
+            logger.warning("Zerodha: PermissionException in get_history, attempting reauth...")
+            if await self.login(force_reauth=True):
+                token = await loop.run_in_executor(None, get_token, self.kite, symbol)
+                candles = await loop.run_in_executor(None, self.kite.historical_data, token, from_date_fmt, to_date_fmt, interval)
+            else:
+                logger.error("Zerodha: Reauth failed in get_history.")
+                return []
         # print("ZERODHA RAW CANDLES:", candles, token, from_date_fmt, to_date_fmt, interval)
         # Convert to DataFrame
         if candles and isinstance(candles, list):
@@ -267,8 +283,17 @@ class ZerodhaWrapper(BrokerInterface):
                 logger.error("Kite client not initialized. Please login first.")
                 return {"error": "Kite client not initialized"}
             loop = asyncio.get_event_loop()
-            profile = await loop.run_in_executor(None, self.kite.profile)
+            try:
+                profile = await loop.run_in_executor(None, self.kite.profile)
+            except (kite_exceptions.PermissionException, kite_exceptions.TokenException):
+                logger.warning("Zerodha: PermissionException or TokenException in get_profile, attempting reauth...")
+                if await self.login(force_reauth=True):
+                    profile = await loop.run_in_executor(None, self.kite.profile)
+                else:
+                    logger.error("Zerodha: Reauth failed in get_profile.")
+                    return {"error": "Reauth failed"}
             return profile
+        
         except Exception as e:
             logger.error(f"Failed to fetch Zerodha profile: {e}")
             return {"error": str(e)}
@@ -278,15 +303,30 @@ class ZerodhaWrapper(BrokerInterface):
         Fetch a full quote for the given symbol via Kite Connect.
         """
         loop = asyncio.get_event_loop()
-        # KiteConnect.quote takes a list of symbols
-        return await loop.run_in_executor(None, self.kite.quote, [symbol])
+        try:
+            return await loop.run_in_executor(None, self.kite.quote, [symbol])
+        except kite_exceptions.PermissionException:
+            logger.warning("Zerodha: PermissionException in get_quote, attempting reauth...")
+            if await self.login(force_reauth=True):
+                return await loop.run_in_executor(None, self.kite.quote, [symbol])
+            else:
+                logger.error("Zerodha: Reauth failed in get_quote.")
+                return {"error": "Reauth failed"}
 
     async def get_ltp(self, symbol: str) -> Any:
         """
         Fetch the last traded price for the given symbol via Kite Connect.
         """
         loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(None, self.kite.ltp, symbol)
+        try:
+            return await loop.run_in_executor(None, self.kite.ltp, symbol)
+        except kite_exceptions.PermissionException:
+            logger.warning("Zerodha: PermissionException in get_ltp, attempting reauth...")
+            if await self.login(force_reauth=True):
+                return await loop.run_in_executor(None, self.kite.ltp, symbol)
+            else:
+                logger.error("Zerodha: Reauth failed in get_ltp.")
+                return {"error": "Reauth failed"}
 
     async def get_strike_list(self, symbol: str, max_strikes: int) -> List[str]:
         """
@@ -297,7 +337,15 @@ class ZerodhaWrapper(BrokerInterface):
         """
         import datetime
         loop = asyncio.get_event_loop()
-        instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(self.kite.instruments("NFO")))
+        try:
+            instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(self.kite.instruments("NFO")))
+        except kite_exceptions.PermissionException:
+            logger.warning("Zerodha: PermissionException in get_strike_list (instruments), attempting reauth...")
+            if await self.login(force_reauth=True):
+                instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(self.kite.instruments("NFO")))
+            else:
+                logger.error("Zerodha: Reauth failed in get_strike_list (instruments).")
+                return []
         instruments['expiry'] = pd.to_datetime(instruments['expiry'])
 
         # Symbol normalization for filtering instruments
@@ -342,7 +390,15 @@ class ZerodhaWrapper(BrokerInterface):
         ltp_symbol = f"NSE:{symbol.upper()}"
         if symbol.upper() == 'NIFTY':
             ltp_symbol = f"NSE:{symbol.upper()} 50"
-        ltp = await loop.run_in_executor(None, self.kite.ltp, ltp_symbol)
+        try:
+            ltp = await loop.run_in_executor(None, self.kite.ltp, ltp_symbol)
+        except kite_exceptions.PermissionException:
+            logger.warning("Zerodha: PermissionException in get_strike_list (ltp), attempting reauth...")
+            if await self.login(force_reauth=True):
+                ltp = await loop.run_in_executor(None, self.kite.ltp, ltp_symbol)
+            else:
+                logger.error("Zerodha: Reauth failed in get_strike_list (ltp).")
+                return []
         spot = ltp[ltp_symbol]["last_price"]
         df["_strike_val"] = df["strike"].astype(float)
         ce = df[df["instrument_type"] == "CE"]
@@ -371,8 +427,17 @@ class ZerodhaWrapper(BrokerInterface):
         Returns a list of order dicts.
         """
         loop = asyncio.get_event_loop()
-        orders = await loop.run_in_executor(None, self.kite.orders)
-        return orders
+        try:
+            orders = await loop.run_in_executor(None, self.kite.orders)
+            return orders
+        except kite_exceptions.PermissionException as e:
+            logger.warning("Zerodha: PermissionException in get_order_details, attempting reauth...")
+            if await self.login(force_reauth=True):
+                orders = await loop.run_in_executor(None, self.kite.orders)
+                return orders
+            else:
+                logger.error("Zerodha: Reauth failed in get_order_details.")
+                raise
 
 # === Broker-specific API code mapping ===
 # These mappings translate generic enums to Zerodha API codes. Do not move these to order_defaults.py.

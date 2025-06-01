@@ -14,6 +14,7 @@ from algosat.core.time_utils import get_ist_datetime, localize_to_ist
 from algosat.core.order_manager import OrderManager
 from algosat.core.order_monitor import OrderMonitor
 from algosat.models.strategy_config import StrategyConfig
+from algosat.common.strategy_utils import wait_for_next_candle
 
 
 logger = get_logger("strategy_runner")
@@ -113,17 +114,7 @@ async def run_strategy_config(config_row, data_manager: DataManager, order_manag
 
     # Only show progress bar for the first strategy instance (e.g., first symbol)
     # For others, just log the wait time
-    async def wait_for_next_candle(interval_minutes):
-        try:
-            current_time = get_ist_datetime()
-            next_candle_start = (
-                current_time + timedelta(minutes=interval_minutes - current_time.minute % interval_minutes)
-            ).replace(second=0, microsecond=0)
-            wait_time = max(1, math.ceil((localize_to_ist(next_candle_start) - current_time).total_seconds()))
-            logger.info(f"Waiting {wait_time} seconds for the next candle ({getattr(strategy, 'symbol', 'Unknown')}).")
-            await asyncio.sleep(wait_time)
-        except Exception as e:
-            logger.error(f"Error in wait_for_next_candle: {e}", exc_info=True)
+    # Use shared wait_for_next_candle from time_utils
 
     while True:
         try:

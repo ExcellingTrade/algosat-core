@@ -1,13 +1,12 @@
 import asyncio
 from typing import Dict, List, Any, Optional
-from algosat.core.broker_manager import BrokerManager
 from algosat.common.logger import get_logger
 
 logger = get_logger("OrderCache")
 
 class OrderCache:
-    def __init__(self, broker_manager: BrokerManager, refresh_interval: float = 60.0):
-        self.broker_manager = broker_manager
+    def __init__(self, order_manager, refresh_interval: float = 60.0):
+        self.order_manager = order_manager
         self.refresh_interval = refresh_interval
         self._cache: Dict[str, List[dict]] = {}  # broker_name -> list of order dicts
         self._locks: Dict[str, asyncio.Lock] = {}  # broker_name -> lock
@@ -17,14 +16,17 @@ class OrderCache:
 
     async def start(self):
         self._running = True
-        enabled_brokers = await self.broker_manager.get_all_trade_enabled_brokers()
-        for broker_name, broker in enabled_brokers.items():
+        broker_orders = await self.order_manager.get_all_broker_order_details()
+        # logger.info(f"Starting OrderCache with brokers: {broker_orders}")
+        # broker_orders is now a list of dicts, not a dict
+        for order in broker_orders:
+            broker_name = order["broker_name"]
             if broker_name not in self._locks:
                 self._locks[broker_name] = asyncio.Lock()
             if broker_name not in self._update_events:
                 self._update_events[broker_name] = asyncio.Event()
             if broker_name not in self._tasks:
-                self._tasks[broker_name] = asyncio.create_task(self._refresh_broker_orders(broker_name, broker))
+                self._tasks[broker_name] = asyncio.create_task(self._refresh_broker_orders(broker_name))
 
     async def stop(self):
         self._running = False
@@ -32,16 +34,16 @@ class OrderCache:
             task.cancel()
         self._tasks.clear()
 
-    async def _refresh_broker_orders(self, broker_name: str, broker):
+    async def _refresh_broker_orders(self, broker_name: str):
         while self._running:
             lock = self._locks[broker_name]
             event = self._update_events[broker_name]
             async with lock:
                 try:
-                    orders = broker.get_order_details()
-                    # Recursively await if orders is a coroutine
-                    while asyncio.iscoroutine(orders):
-                        orders = await orders
+                    broker_orders = await self.order_manager.get_all_broker_order_details()
+                    # broker_orders is a list of dicts, filter for this broker_name
+                    orders = [o for o in broker_orders if o["broker_name"] == broker_name]
+                    # logger.info(f"Starting OrderCache with brokers: {broker_orders}")
                     self._cache[broker_name] = orders
                     logger.debug(f"OrderCache updated for {broker_name} with {len(orders)} orders.")
                 except Exception as e:
@@ -55,15 +57,29 @@ class OrderCache:
         lock = self._locks.get(broker_name)
         event = self._update_events.get(broker_name)
         if lock is None or event is None:
+            logger.error(f"OrderCache not started or broker {broker_name} not enabled.")
             raise RuntimeError(f"OrderCache not started or broker {broker_name} not enabled.")
-        # Wait if update in progress
-        while lock.locked():
-            await event.wait()
-        return self._cache.get(broker_name, [])
+        try:
+            # Wait if update in progress
+            while lock.locked():
+                await event.wait()
+            return self._cache.get(broker_name, [])
+        except Exception as e:
+            logger.error(f"OrderCache.get_orders failed for {broker_name}: {e}")
+            return []
 
     async def get_order_by_id(self, broker_name: str, order_id: Any) -> Optional[dict]:
-        orders = await self.get_orders(broker_name)
-        for order in orders:
-            if str(order.get("id")) == str(order_id) or str(order.get("order_id")) == str(order_id):
-                return order
-        return None
+        try:
+            orders = await self.get_orders(broker_name)
+            for order in orders:
+                # Only match on broker's order id fields, not local DB id
+                broker_order_id = order.get("order_id") or order.get("id")
+                if broker_order_id is not None and str(broker_order_id) == str(order_id):
+                    return order
+            return None
+        except RuntimeError as re:
+            logger.error(f"OrderCache.get_order_by_id RuntimeError for {broker_name}, order_id {order_id}: {re}")
+            return None
+        except Exception as e:
+            logger.error(f"OrderCache.get_order_by_id failed for {broker_name}, order_id {order_id}: {e}")
+            return None

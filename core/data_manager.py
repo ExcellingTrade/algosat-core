@@ -249,9 +249,10 @@ class DataManager:
             broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
             broker_orders: List[BrokerOrder] = []
             for be in broker_execs:
+                # Use broker_order_ids (actual broker order id(s)), not local DB id
                 broker_orders.append(BrokerOrder(
                     broker_id=be.get("broker_id"),
-                    order_id=be.get("id"),
+                    order_id=be.get("broker_order_ids"),  # This may be a list or str
                     status=be.get("status"),
                     raw_response=be.get("raw_response")
                 ))
