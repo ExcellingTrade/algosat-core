@@ -33,10 +33,13 @@ class OrderStatus(str, Enum):
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     FILLED = "FILLED"
     COMPLETED = "COMPLETED"
+    COMPLETE = "COMPLETE"
     CANCELLED = "CANCELLED"
     REJECTED = "REJECTED"
     FAILED = "FAILED"
     EXPIRED = "EXPIRED"
+    TRIGGER_PENDING = "TRIGGER_PENDING"
+    AMO_REQ_RECEIVED = "AMO_REQ_RECEIVED"
 
 class OrderRequest(BaseModel):
     symbol: str
@@ -155,7 +158,7 @@ PRODUCT_TYPE_MAP = {
 }
 
 class OrderResponse(BaseModel):
-    status: OrderStatus | str
+    status: OrderStatus
     order_ids: List[str] = Field(default_factory=list)
     order_messages: Dict[str, str] = Field(default_factory=dict)
     broker: Optional[str] = None
@@ -168,6 +171,20 @@ class OrderResponse(BaseModel):
     strategy_id: Optional[Any] = None
     signal_id: Optional[Any] = None
     # Add more fields as needed for DB
+
+    @field_validator('status', mode='before')
+    def ensure_enum_status(cls, v):
+        if isinstance(v, OrderStatus):
+            return v
+        if isinstance(v, str):
+            # Accept 'OrderStatus.FAILED' or 'FAILED'
+            if v.startswith('OrderStatus.'):
+                v = v.split('.')[-1]
+            try:
+                return OrderStatus(v)
+            except ValueError:
+                raise ValueError(f"Invalid status value: {v}")
+        raise ValueError(f"Invalid status type: {type(v)}")
 
     @classmethod
     def from_fyers(cls, response: dict, order_request=None, strategy_id=None, signal_id=None) -> "OrderResponse":

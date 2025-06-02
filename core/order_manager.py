@@ -22,44 +22,31 @@ from enum import Enum
 
 logger = get_logger("OrderManager")
 
-class OrderStatusEnum(str, Enum):
-    AWAITING_ENTRY = "AWAITING_ENTRY"
-    OPEN = "OPEN"
-    PARTIALLY_FILLED = "PARTIALLY_FILLED"
-    FILLED = "FILLED"
-    COMPLETE = "COMPLETE"
-    CANCELLED = "CANCELLED"
-    REJECTED = "REJECTED"
-    PENDING = "PENDING"
-    TRIGGER_PENDING = "TRIGGER_PENDING"
-    AMO_REQ_RECEIVED = "AMO_REQ_RECEIVED"
-    # Add more as needed
-
 # Fyers status code mapping (example, update as per Fyers API)
 FYERS_STATUS_MAP = {
-    1: OrderStatusEnum.AWAITING_ENTRY,  # Example: 1 = pending
-    2: OrderStatusEnum.OPEN,           # Example: 2 = open
-    3: OrderStatusEnum.PARTIALLY_FILLED,
-    4: OrderStatusEnum.FILLED,
-    5: OrderStatusEnum.CANCELLED,
-    6: OrderStatusEnum.REJECTED,
+    1: OrderStatus.AWAITING_ENTRY,  # Example: 1 = pending
+    2: OrderStatus.OPEN,           # Example: 2 = open
+    3: OrderStatus.PARTIALLY_FILLED,
+    4: OrderStatus.FILLED,
+    5: OrderStatus.CANCELLED,
+    6: OrderStatus.REJECTED,
     # Add more mappings as per Fyers API
 }
 
 # Zerodha status mapping (partial, based on image)
 ZERODHA_STATUS_MAP = {
-    "PUT ORDER REQ RECEIVED": OrderStatusEnum.AWAITING_ENTRY,
-    "AMO REQ RECEIVED": OrderStatusEnum.AWAITING_ENTRY,
-    "VALIDATION PENDING": OrderStatusEnum.PENDING,
-    "OPEN PENDING": OrderStatusEnum.PENDING,
-    "MODIFY VALIDATION PENDING": OrderStatusEnum.PENDING,
-    "MODIFY PENDING": OrderStatusEnum.PENDING,
-    "TRIGGER PENDING": OrderStatusEnum.TRIGGER_PENDING,
-    "CANCEL PENDING": OrderStatusEnum.PENDING,
-    "OPEN": OrderStatusEnum.OPEN,
-    "COMPLETE": OrderStatusEnum.COMPLETE,
-    "CANCELLED": OrderStatusEnum.CANCELLED,
-    "REJECTED": OrderStatusEnum.REJECTED,
+    "PUT ORDER REQ RECEIVED": OrderStatus.AWAITING_ENTRY,
+    "AMO REQ RECEIVED": OrderStatus.AWAITING_ENTRY,
+    "VALIDATION PENDING": OrderStatus.PENDING,
+    "OPEN PENDING": OrderStatus.PENDING,
+    "MODIFY VALIDATION PENDING": OrderStatus.PENDING,
+    "MODIFY PENDING": OrderStatus.PENDING,
+    "TRIGGER PENDING": OrderStatus.TRIGGER_PENDING,
+    "CANCEL PENDING": OrderStatus.PENDING,
+    "OPEN": OrderStatus.OPEN,
+    "COMPLETE": OrderStatus.FILLED,
+    "CANCELLED": OrderStatus.CANCELLED,
+    "REJECTED": OrderStatus.REJECTED,
     # Add more as needed
 }
 
@@ -128,6 +115,12 @@ class OrderManager:
                 "message": "Invalid order_payload type.",
                 "broker_responses": {}
             }
+        # Check for split
+        max_nse_qty = None
+        if hasattr(config, 'trade') and isinstance(config.trade, dict):
+            max_nse_qty = config.trade.get('max_nse_qty') or config.trade.get('max_nse_qtty')
+        if max_nse_qty and order_payload.quantity > max_nse_qty:
+            return await self.split_and_place_order(config, order_payload, max_nse_qty, strategy_name)
         # 1. Insert logical order row (orders)
         async with AsyncSessionLocal() as session:
             order_id = await self._insert_and_get_order_id(
@@ -148,6 +141,66 @@ class OrderManager:
                 await self._insert_broker_execution(session, order_id, broker_name, response)
             await session.commit()
         return {"order_id": order_id}
+
+    async def split_and_place_order(
+        self,
+        config: StrategyConfig,
+        order_payload: OrderRequest,
+        max_nse_qty: int,
+        strategy_name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Split the order into chunks if the quantity exceeds max_nse_qty and place each chunk as a separate order.
+        Each response is inserted into broker_execs with the parent order id.
+        """
+        logger.info(f"Splitting order for symbol={order_payload.symbol}, total_qty={order_payload.quantity}, max_nse_qty={max_nse_qty}")
+        trigger_price_diff = 0.0
+        if hasattr(config, 'trade') and isinstance(config.trade, dict):
+            trigger_price_diff = config.trade.get('trigger_price_diff', 0.0)
+        total_qty = order_payload.quantity
+        # No need to check total_qty <= max_nse_qty here, already checked in place_order
+        responses = []
+        original_price = getattr(order_payload, 'price', 0) or order_payload.extra.get('entry_price', 0)
+        max_price_increase = 2.00
+        price_increment = 0.20
+        current_price = original_price
+        qty_left = total_qty
+        slice_num = 0
+        async with AsyncSessionLocal() as session:
+            parent_order_id = await self._insert_and_get_order_id(
+                config=config,
+                order_payload=order_payload,
+                broker_name=None,
+                result=None,
+                parent_order_id=None
+            )
+            if not parent_order_id:
+                logger.error("Failed to insert logical order row for split order.")
+                return None
+            while qty_left > 0:
+                qty = min(qty_left, max_nse_qty)
+                slice_update = {
+                    'quantity': qty,
+                    'price': current_price,
+                    'trigger_price': (current_price - trigger_price_diff) if order_payload.side == Side.BUY else (current_price + trigger_price_diff)
+                }
+                slice_payload = order_payload.copy(update=slice_update)
+                broker_manager = self.broker_manager
+                broker_responses = await broker_manager.place_order(slice_payload, strategy_name=strategy_name)
+                for broker_name, response in broker_responses.items():
+                    await self._insert_broker_execution(session, parent_order_id, broker_name, response)
+                    responses.append({
+                        'broker_name': broker_name,
+                        'response': response,
+                        'slice_num': slice_num
+                    })
+                if getattr(order_payload, 'order_type', None) != OrderType.MARKET:
+                    if (current_price - original_price) < max_price_increase:
+                        current_price = min(original_price + max_price_increase, current_price + price_increment)
+                qty_left -= qty
+                slice_num += 1
+            await session.commit()
+        return {'order_id': parent_order_id, 'slices': responses}
 
     async def _set_parent_order_id(self, order_id, parent_order_id):
         """
@@ -223,7 +276,7 @@ class OrderManager:
                 "entry_time": ensure_utc_aware(order_payload.extra.get("entry_time")),
                 "exit_time": ensure_utc_aware(order_payload.extra.get("exit_time")),
                 "exit_price": order_payload.extra.get("exit_price"),
-                "status": order_payload.extra.get("status", "AWAITING_ENTRY"),
+                "status": order_payload.extra.get("status", "AWAITING_ENTRY").value if hasattr(order_payload.extra.get("status", "AWAITING_ENTRY"), 'value') else str(order_payload.extra.get("status", "AWAITING_ENTRY")),
                 "reason": order_payload.extra.get("reason"),
                 "atr": order_payload.extra.get("atr"),
                 "supertrend_signal": order_payload.extra.get("supertrend_signal"),
@@ -237,21 +290,33 @@ class OrderManager:
     async def _insert_broker_execution(self, session, order_id, broker_name, response):
         """
         Insert a row into broker_executions for a broker's response to an order.
+        Now uses 'broker_order_id' (single string) instead of 'broker_order_ids'.
         """
         from algosat.core.dbschema import broker_executions
         broker_id = response.get("broker_id")
         if broker_id is None:
             broker_id = await self._get_broker_id(broker_name)
-        broker_exec_data = {
-            "order_id": order_id,
-            "broker_id": broker_id,
-            # Deprecated: broker_name, keep for migration only
-            "broker_name": broker_name,
-            "broker_order_ids": response.get("order_ids"),
-            "order_messages": response.get("order_messages"),
-            "status": str(response.get("status", "FAILED")),
-            "raw_response": response,
-        }
+        # Get the single order id (first if list, else str)
+        broker_order_id = None
+        if isinstance(response.get("order_ids"), list) and response.get("order_ids"):
+            broker_order_id = response["order_ids"][0]
+        elif response.get("order_ids"):
+            broker_order_id = response["order_ids"]
+        elif response.get("order_id"):
+            broker_order_id = response["order_id"]
+        # Always store status as string value
+        status_val = response.get("status", "FAILED")
+        if hasattr(status_val, 'value'):
+            status_val = status_val.value
+        broker_exec_data = dict(
+            order_id=order_id,
+            broker_id=broker_id,
+            broker_name=broker_name,  # Deprecated: broker_name, keep for migration only
+            broker_order_id=broker_order_id,
+            order_messages=response.get("order_messages"),
+            status=status_val,
+            raw_response=response,
+        )
         await session.execute(broker_executions.insert().values(**broker_exec_data))
 
     async def _get_broker_id(self, broker_name):
@@ -284,7 +349,7 @@ class OrderManager:
             await update_rows_in_table(
                 target_table=orders,
                 condition=orders.c.id == order_id,
-                new_values={"status": status}
+                new_values={"status": status.value if hasattr(status, 'value') else str(status)}
             )
             logger.debug(f"Order {order_id} status updated to {status} in DB.")
 

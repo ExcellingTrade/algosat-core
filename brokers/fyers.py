@@ -598,28 +598,46 @@ class FyersWrapper(BrokerInterface):
     async def place_order(self, order_request: OrderRequest) -> dict:
         """
         Place an order with Fyers using a generic OrderRequest object.
+        Fetch order details after placement and return a standard OrderResponse.
         """
         fyers_payload = order_request.to_fyers_dict()
         fyers_payload = {k: v for k, v in fyers_payload.items() if v is not None}
         print(fyers_payload)
-        
+        from algosat.core.order_request import OrderResponse, OrderStatus
         try:
             if self.is_async:
                 loop = asyncio.get_running_loop()
                 response = await loop.run_in_executor(None, self.fyers.place_order, fyers_payload)
-                # If Fyers returns a coroutine (async API), await it
                 if asyncio.iscoroutine(response):
                     response = await response
             else:
                 response = self.fyers.place_order(fyers_payload)
             logger.info(f"Fyers order placed: {response}")
-            return OrderResponse.from_fyers(response, order_request=order_request).dict()
+            # Try to extract order_id from response
+            order_id = None
+            if isinstance(response, dict):
+                order_id = response.get("id") or response.get("order_id") or response.get("data", {}).get("id")
+            order_details = None
+            if order_id:
+                # Fetch order details from orderbook
+                try:
+                    orderbook_resp = await self.get_order_details(order_id)
+                    # Fyers returns {"orderBook": [ ... ]}
+                    if orderbook_resp and isinstance(orderbook_resp, dict) and "orderBook" in orderbook_resp:
+                        # Find the order with this id
+                        for o in orderbook_resp["orderBook"]:
+                            if str(o.get("id")) == str(order_id):
+                                order_details = o
+                                break
+                except Exception as e:
+                    logger.warning(f"Fyers: Could not fetch orderbook for order_id {order_id}: {e}")
+            return OrderResponse.from_fyers(order_details or response, order_request=order_request).dict()
         except Exception as e:
             logger.error(f"Fyers order placement failed: {e}")
             return OrderResponse(
                 status=OrderStatus.FAILED,
                 order_ids=[],
-                order_messages={},
+                order_messages={"error": str(e)},
                 broker="fyers",
                 raw_response=None,
                 symbol=getattr(order_request, 'symbol', None),

@@ -166,7 +166,7 @@ broker_executions = Table(
     Column("broker_id", Integer, ForeignKey("broker_credentials.id"), nullable=False, index=True),
     # Deprecated: broker_name, keep for migration only
     Column("broker_name", String, nullable=True, index=True),
-    Column("broker_order_ids", JSONB, nullable=True),  # List of order ids for this broker
+    Column("broker_order_id", String, nullable=True),  # Broker's order id (single string)
     Column("order_messages", JSONB, nullable=True),
     Column("status", String, nullable=False, index=True),
     Column("raw_response", JSONB, nullable=True),

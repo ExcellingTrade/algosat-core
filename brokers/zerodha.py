@@ -159,7 +159,7 @@ class ZerodhaWrapper(BrokerInterface):
         Returns an OrderResponse dict using from_zerodha for consistency.
         Ensures all datetimes in raw_response are stringified for DB JSON serialization.
         """
-        from algosat.core.order_request import OrderResponse
+        from algosat.core.order_request import OrderResponse, OrderStatus
         import datetime as dt
         import copy
         def stringify_datetimes(obj):
@@ -172,7 +172,17 @@ class ZerodhaWrapper(BrokerInterface):
             return obj
         if not self.kite:
             logger.error("Kite client not initialized. Please login first.")
-            return OrderResponse.from_zerodha(None, order_request=order_request, error="Kite client not initialized").dict()
+            return OrderResponse(
+                status=OrderStatus.FAILED,
+                order_ids=[],
+                order_messages={"error": "Kite client not initialized"},
+                broker="zerodha",
+                raw_response=None,
+                symbol=getattr(order_request, 'symbol', None),
+                side=getattr(order_request, 'side', None),
+                quantity=getattr(order_request, 'quantity', None),
+                order_type=getattr(order_request, 'order_type', None)
+            ).dict()
         kite_payload = order_request.to_zerodha_dict()
         kite_payload = {k: v for k, v in kite_payload.items() if v is not None}
         logger.info(f"Placing Zerodha order with payload: {kite_payload}")
@@ -186,7 +196,7 @@ class ZerodhaWrapper(BrokerInterface):
                     transaction_type=kite_payload["transaction_type"],
                     quantity=kite_payload["quantity"],
                     order_type=kite_payload["order_type"],
-                    price= 275.10, #kite_payload.get("price"),
+                    price=275.10 ,#kite_payload.get("price"),
                     trigger_price=275.05, #kite_payload.get("trigger_price"),
                     product=kite_payload["product"],
                     variety=kite_payload.get("variety", "regular"),
@@ -201,7 +211,17 @@ class ZerodhaWrapper(BrokerInterface):
             return OrderResponse.from_zerodha(order_hist, order_request=order_request).dict()
         except Exception as e:
             logger.error(f"Zerodha order placement failed: {e}")
-            return OrderResponse.from_zerodha(None, order_request=order_request, error=str(e)).dict()
+            return OrderResponse(
+                status=OrderStatus.FAILED,
+                order_ids=[],
+                order_messages={"error": str(e)},
+                broker="zerodha",
+                raw_response=None,
+                symbol=getattr(order_request, 'symbol', None),
+                side=getattr(order_request, 'side', None),
+                quantity=getattr(order_request, 'quantity', None),
+                order_type=getattr(order_request, 'order_type', None)
+            ).dict()
         
     async def get_positions(self) -> List[Dict[str, Any]]:
         """

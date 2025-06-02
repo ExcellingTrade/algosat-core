@@ -8,6 +8,7 @@ from algosat.models.order_aggregate import OrderAggregate
 from algosat.core.data_manager import DataManager
 from algosat.core.order_manager import OrderManager
 from algosat.core.order_cache import OrderCache
+from algosat.core.order_request import OrderStatus
 from algosat.common.strategy_utils import wait_for_next_candle
 
 logger = get_logger("OrderMonitor")
@@ -35,17 +36,19 @@ class OrderMonitor:
         self._running: bool = True
 
     async def _fast_monitor(self) -> None:
-        from algosat.core.order_manager import OrderStatusEnum
+        # Use OrderStatus from order_request.py
         while self._running:
             # Load aggregated order data
             agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
             broker_statuses = []
             # Check for any broker_execs in failed state before checking order_ids
-            failed_statuses = {OrderStatusEnum.REJECTED, OrderStatusEnum.FAILED}
+            failed_statuses = {OrderStatus.REJECTED.value, OrderStatus.FAILED.value}
             for bro in agg.broker_orders:
-                if bro.status in failed_statuses:
+                # Normalize status to plain string (e.g. 'FAILED')
+                bro_status_str = bro.status.value if hasattr(bro.status, 'value') else str(bro.status).split('.')[-1]
+                if bro_status_str in failed_statuses:
                     logger.info(f"OrderMonitor: Updating order_id={self.order_id} to FAILED due to broker_exec status {bro.status} (broker_id={bro.broker_id})")
-                    await self.order_manager.update_order_status_in_db(self.order_id, OrderStatusEnum.FAILED)
+                    await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.FAILED)
                     self.stop()
                     return
             for bro in agg.broker_orders:
@@ -54,14 +57,16 @@ class OrderMonitor:
                 status = order_details.get("status") if order_details else None
                 broker_statuses.append(status)
             # Aggregate status logic
-            if broker_statuses and all(s == OrderStatusEnum.FILLED for s in broker_statuses):
-                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatusEnum.FILLED)
-            elif any(s == OrderStatusEnum.PARTIALLY_FILLED for s in broker_statuses):
-                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatusEnum.PARTIALLY_FILLED)
-            elif any(s == OrderStatusEnum.REJECTED for s in broker_statuses):
-                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatusEnum.REJECTED)
-            elif any(s == OrderStatusEnum.CANCELLED for s in broker_statuses):
-                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatusEnum.CANCELLED)
+            def status_str(s):
+                return s.value if hasattr(s, 'value') else str(s).split('.')[-1]
+            if broker_statuses and all(status_str(s) == OrderStatus.FILLED.value for s in broker_statuses):
+                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.FILLED)
+            elif any(status_str(s) == OrderStatus.PARTIALLY_FILLED.value for s in broker_statuses):
+                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.PARTIALLY_FILLED)
+            elif any(status_str(s) == OrderStatus.REJECTED.value for s in broker_statuses):
+                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.REJECTED)
+            elif any(status_str(s) == OrderStatus.CANCELLED.value for s in broker_statuses):
+                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.CANCELLED)
             # Let strategy decide exit based on latest price
             ltp = await self.data_manager.get_ltp(agg.symbol, self.order_id)
             if ltp is not None:

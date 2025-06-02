@@ -124,7 +124,7 @@ class OptionBuyStrategy(StrategyBase):
         # 1. Wait for first candle completion
         # await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
         # 2. Calculate first candle data using the correct trade day
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=4)
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=5)
         # 3. Fetch option chain and identify strikes
         cache = load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
@@ -164,7 +164,7 @@ class OptionBuyStrategy(StrategyBase):
         """Synchronize self._positions with open orders in the database for all strikes for the current trade day."""
         self._positions = {}
         async with AsyncSessionLocal() as session:
-            trade_day = get_trade_day(get_ist_datetime() - timedelta(days=4))
+            trade_day = get_trade_day(get_ist_datetime() - timedelta(days=5))
             strategy_config_id = self.get_config_id()
             for strike in self._strikes:
                 open_orders = await get_open_orders_for_symbol_and_tradeday(session, strike, trade_day, strategy_config_id)
@@ -182,7 +182,7 @@ class OptionBuyStrategy(StrategyBase):
             return None
         trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=4)
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=5)
         # 1. Fetch history for all strikes
         history_data = await self.fetch_history_data(
             self.dp, self._strikes, trade_day, trade_config

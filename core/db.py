@@ -571,12 +571,12 @@ async def get_all_open_orders(session):
     Return all orders that are not in a final state (FILLED, CANCELLED, REJECTED, COMPLETE).
     """
     from algosat.core.dbschema import orders
-    from algosat.core.order_manager import OrderStatusEnum
+    from algosat.core.order_request import OrderStatus
     final_statuses = [
-        OrderStatusEnum.FILLED,
-        OrderStatusEnum.CANCELLED,
-        OrderStatusEnum.REJECTED,
-        OrderStatusEnum.COMPLETE
+        OrderStatus.FILLED,
+        OrderStatus.CANCELLED,
+        OrderStatus.REJECTED,
+        OrderStatus.COMPLETE
     ]
     stmt = select(orders).where(~orders.c.status.in_([s.value for s in final_statuses]))
     result = await session.execute(stmt)
