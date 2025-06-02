@@ -48,7 +48,8 @@ from pyvirtualdisplay import Display
 
 import pandas as pd
 from algosat.common import constants
-from algosat.core.order_request import OrderResponse, OrderStatus
+from algosat.core.order_request import OrderRequest, OrderResponse, OrderStatus
+from typing import Any, Optional, Dict, List, Union
 
 # === Broker-specific API code mapping ===
 # These mappings translate generic enums to Fyers API codes. Do not move these to order_defaults.py.
@@ -69,7 +70,7 @@ PRODUCT_TYPE_MAP = {
     "INTRADAY": "INTRADAY",
     "MARGIN": "MARGIN",
     "CO": "CO",
-    "BO": "BO",
+    "BO": "4",
     "MTF": "MTF",
 }
 
@@ -581,22 +582,7 @@ class FyersWrapper(BrokerInterface):
         else:
             return self.get_history_sync(symbol, from_date, to_date, interval, ins_type)
 
-    async def place_order_async(self, order_payload: dict):
-        """
-        Place an order in async mode.
-
-        :param order_params: Parameters for the order (symbol, qty, type, etc.).
-        :return: Response from the Fyers API.
-        """
-        try:
-            loop = asyncio.get_running_loop()
-            response = await loop.run_in_executor(None, self.fyers.place_order, order_payload)
-            # logger.debug(response)
-            return response
-        except Exception as e:
-            raise RuntimeError(f"Failed to place order (async): {e}")
-
-    def place_order_sync(self, order_payload: dict):
+    def place_order_sync(self, order_payload: dict) -> Any:
         """
         Place an order in sync mode.
 
@@ -609,12 +595,14 @@ class FyersWrapper(BrokerInterface):
         except Exception as e:
             raise RuntimeError(f"Failed to place order (sync): {e}")
 
-    async def place_order(self, order_request):
+    async def place_order(self, order_request: OrderRequest) -> dict:
         """
         Place an order with Fyers using a generic OrderRequest object.
         """
         fyers_payload = order_request.to_fyers_dict()
         fyers_payload = {k: v for k, v in fyers_payload.items() if v is not None}
+        print(fyers_payload)
+        
         try:
             if self.is_async:
                 loop = asyncio.get_running_loop()
@@ -640,7 +628,22 @@ class FyersWrapper(BrokerInterface):
                 order_type=getattr(order_request, 'order_type', None)
             ).dict()
 
-    async def split_and_place_order(self, total_qty, max_nse_qty, trigger_price_diff, **order_params):
+    async def place_order_async(self, order_payload: dict) -> Any:
+        """
+        Place an order in async mode.
+
+        :param order_params: Parameters for the order (symbol, qty, type, etc.).
+        :return: Response from the Fyers API.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(None, self.fyers.place_order, order_payload)
+            # logger.debug(response)
+            return response
+        except Exception as e:
+            raise RuntimeError(f"Failed to place order (async): {e}")
+
+    async def split_and_place_order(self, total_qty: int, max_nse_qty: int, trigger_price_diff: float, **order_params) -> List[Any]:
         """
         Split the order into chunks if the quantity exceeds max_nse_qty.
 
@@ -651,7 +654,7 @@ class FyersWrapper(BrokerInterface):
         :return: List of responses for each placed order.
 
         """
-        responses = []
+        responses: List[Any] = []
         # Extract original price from order parameters
         original_price = order_params.get("limitPrice", 0)  # Ensure price exists
         max_price_increase = 2.00  # Maximum allowed price increase
@@ -674,7 +677,15 @@ class FyersWrapper(BrokerInterface):
             total_qty -= qty
         return responses
 
-    async def place_split_orders_with_sl_tp(self, total_qty, max_nse_qty, stop_loss_price, target_price, trigger_price_diff, **order_params):
+    async def place_split_orders_with_sl_tp(
+        self,
+        total_qty: int,
+        max_nse_qty: int,
+        stop_loss_price: float,
+        target_price: float,
+        trigger_price_diff: float,
+        **order_params
+    ) -> Dict[str, List[Any]]:
         """
         Place main orders and corresponding Stop-Loss (SL) & Target (TP) orders.
         - If total_qty > max_nse_qty, it splits the order into chunks.
@@ -691,9 +702,9 @@ class FyersWrapper(BrokerInterface):
         :param order_params: Order parameter (including initial price).
         :return: Dictionary containing `entry_responses`, `sl_responses`, and `target_responses`.
         """
-        entry_responses = []
-        sl_responses = []
-        target_responses = []
+        entry_responses: List[Any] = []
+        sl_responses: List[Any] = []
+        target_responses: List[Any] = []
 
         # Extract original price from order parameters
         original_price = order_params.get("limitPrice", 0)  # Ensure price exists
@@ -1066,7 +1077,7 @@ class FyersWrapper(BrokerInterface):
                         pin_input.send_keys(digit)
                         sb.sleep(0.5)
                     sb.click("#verifyPinSubmit")
-                    sb.sleep(2)
+                    sb.sleep(1)
 
                     redirected_url = sb.get_current_url()
                     auth_code = parse_qs(urlparse(redirected_url).query).get("auth_code", [None])[0]
@@ -1075,7 +1086,7 @@ class FyersWrapper(BrokerInterface):
                 except Exception as e:
                     logger.error(f"Fyers authentication failed on attempt {attempt + 1}: {e}", exc_info=True)
                     sb.disconnect()
-                    sb.sleep(2)
+                    sb.sleep(1)
         return None
 
 

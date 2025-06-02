@@ -98,30 +98,32 @@ async def update_strategy_config_params(config_id: int, update: StrategyConfigUp
     if update.params:
         for key, value in update.params.items():
             if isinstance(value, str):
-                # Sanitize string values. Adjust validation rules as needed per specific param.
-                update.params[key] = input_validator.validate_and_sanitize(value, f"params.{{key}}", max_length=1024) # Example max_length
+                update.params[key] = input_validator.validate_and_sanitize(value, f"params.{{key}}", max_length=1024)
             elif isinstance(value, (int, float)):
-                # Example: ensure numeric values are within a reasonable range if applicable
-                # update.params[key] = input_validator.validate_numeric(value, f"params.{{key}}", min_value=0, max_value=1000000)
-                pass # Add specific numeric validation if needed
-            # Add more type checks and validations as required for other data types in params
-
+                pass
+    # Enforce order_type and product_type restrictions
+    if update.order_type and update.order_type not in ("MARKET", "LIMIT"):
+        raise HTTPException(status_code=400, detail="order_type must be 'MARKET' or 'LIMIT'")
+    if update.product_type and update.product_type not in ("INTRADAY", "DELIVERY"):
+        raise HTTPException(status_code=400, detail="product_type must be 'INTRADAY' or 'DELIVERY'")
     # Fetch current config
     row = await get_strategy_config_by_id(db, validated_config_id)
     if not row:
         raise HTTPException(status_code=404, detail="Strategy config not found")
     if hasattr(row, "_mapping"):
         row = dict(row._mapping)
-    # Only allow updating fields present in params
     allowed_keys = set(row["params"].keys())
     update_params = update.params or {}
     filtered_params = {k: v for k, v in update_params.items() if k in allowed_keys}
-    # Merge with existing params
     new_params = {**row["params"], **filtered_params}
     update_data = {"params": new_params}
     if update.enabled is not None:
         update_data["enabled"] = update.enabled
-    updated = await update_strategy_config(db, validated_config_id, update_data) # Use validated_config_id
+    if update.order_type:
+        update_data["order_type"] = update.order_type
+    if update.product_type:
+        update_data["product_type"] = update.product_type
+    updated = await update_strategy_config(db, validated_config_id, update_data)
     if hasattr(updated, "_mapping"):
         updated = dict(updated._mapping)
     return StrategyConfigDetailResponse(**updated)

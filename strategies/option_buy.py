@@ -124,7 +124,7 @@ class OptionBuyStrategy(StrategyBase):
         # 1. Wait for first candle completion
         # await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
         # 2. Calculate first candle data using the correct trade day
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=3)
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=4)
         # 3. Fetch option chain and identify strikes
         cache = load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
@@ -164,7 +164,7 @@ class OptionBuyStrategy(StrategyBase):
         """Synchronize self._positions with open orders in the database for all strikes for the current trade day."""
         self._positions = {}
         async with AsyncSessionLocal() as session:
-            trade_day = get_trade_day(get_ist_datetime() - timedelta(days=3))
+            trade_day = get_trade_day(get_ist_datetime() - timedelta(days=4))
             strategy_config_id = self.get_config_id()
             for strike in self._strikes:
                 open_orders = await get_open_orders_for_symbol_and_tradeday(session, strike, trade_day, strategy_config_id)
@@ -182,7 +182,7 @@ class OptionBuyStrategy(StrategyBase):
             return None
         trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=1)
+        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=4)
         # 1. Fetch history for all strikes
         history_data = await self.fetch_history_data(
             self.dp, self._strikes, trade_day, trade_config
@@ -277,7 +277,7 @@ class OptionBuyStrategy(StrategyBase):
         if signal_payload:
             ts = data.iloc[-1].get('timestamp', 'N/A')
             logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
-            order_request = self.order_manager.broker_manager.build_order_request_from_signal(
+            order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
                 signal_payload, self.cfg
             )
             # Place order(s) with broker(s) via OrderManager, which handles DB updates
@@ -435,7 +435,7 @@ class OptionBuyStrategy(StrategyBase):
                 price=stop_loss,
                 signal_type=SignalType.STOPLOSS
             )
-            return self.order_manager.broker_manager.build_order_request_from_signal(ts, self.cfg)
+            return await self.order_manager.broker_manager.build_order_request_for_strategy(ts, self.cfg)
         if target_price is not None and last_price >= target_price:
             ts = TradeSignal(
                 symbol=symbol,
@@ -443,7 +443,7 @@ class OptionBuyStrategy(StrategyBase):
                 price=target_price,
                 signal_type=SignalType.TRAIL
             )
-            return self.order_manager.broker_manager.build_order_request_from_signal(ts, self.cfg)
+            return await self.order_manager.broker_manager.build_order_request_for_strategy(ts, self.cfg)
         return None
 
     async def evaluate_candle_exit(self, parent_order_id: int, history: dict):
@@ -459,5 +459,5 @@ class OptionBuyStrategy(StrategyBase):
             return None
         tsignal = self.evaluate_exit(df, self.trade, strike)
         if tsignal:
-            return self.order_manager.broker_manager.build_order_request_from_signal(tsignal, self.cfg)
+            return await self.order_manager.broker_manager.build_order_request_for_strategy(tsignal, self.cfg)
         return None

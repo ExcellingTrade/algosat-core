@@ -2,6 +2,7 @@ from pydantic import BaseModel, Field, field_serializer
 from typing import Optional, Any, Dict, List
 from datetime import datetime
 from algosat.core.time_utils import to_ist
+from enum import Enum
 
 # --- Authentication Schemas ---
 class LoginRequest(BaseModel):
@@ -16,6 +17,15 @@ class TokenResponse(BaseModel):
     expires_in: int = Field(..., description="Token expiration time in seconds")
     user_info: Dict[str, Any] = Field(..., description="Authenticated user information")
 
+# --- Order Type and Product Type Enums ---
+class OrderTypeEnum(str, Enum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+
+class ProductTypeEnum(str, Enum):
+    INTRADAY = "INTRADAY"
+    DELIVERY = "DELIVERY"
+
 # --- Strategy Schemas ---
 class StrategyConfigBase(BaseModel):
     symbol: str
@@ -23,6 +33,8 @@ class StrategyConfigBase(BaseModel):
     params: Dict[str, Any]
     enabled: bool
     is_default: Optional[bool] = False
+    order_type: OrderTypeEnum = Field(..., description="Order type: MARKET or LIMIT")
+    product_type: ProductTypeEnum = Field(..., description="Product type: INTRADAY or DELIVERY")
 
 class StrategyConfigCreate(StrategyConfigBase):
     pass
@@ -30,6 +42,8 @@ class StrategyConfigCreate(StrategyConfigBase):
 class StrategyConfigUpdate(BaseModel):
     params: Dict[str, Any]
     enabled: Optional[bool]
+    order_type: Optional[OrderTypeEnum]
+    product_type: Optional[ProductTypeEnum]
 
 class StrategyConfigResponse(StrategyConfigBase):
     id: int
@@ -43,6 +57,8 @@ class StrategyListResponse(BaseModel):
     key: str
     name: str
     enabled: bool
+    order_type: OrderTypeEnum
+    product_type: ProductTypeEnum
     class Config:
         from_attributes = True
 
@@ -62,6 +78,8 @@ class StrategyConfigListResponse(BaseModel):
     exchange: str
     enabled: bool
     is_default: Optional[bool] = False
+    order_type: OrderTypeEnum
+    product_type: ProductTypeEnum
     class Config:
         from_attributes = True
 

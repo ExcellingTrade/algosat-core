@@ -10,6 +10,7 @@ OPTION_BUY_DEFAULT_CONFIG = {
     "exchange": "NSE",
     "instrument": "INDEX",
     "product_type": "INTRADAY",
+    "order_type": "MARKET",
 
     # Trade-specific parameters
     "trade": {
@@ -72,22 +73,30 @@ OPTION_SELL_DEFAULT_CONFIG = {
     **OPTION_BUY_DEFAULT_CONFIG,
     # You can override or add OptionSell-specific params here
     "product_type": "INTRADAY",
+    "order_type": "MARKET",
 }
 
-# Default config for SwingHighLow (now with required keys and empty/placeholder values)
-SWING_HIGH_LOW_DEFAULT_CONFIG = {
-    "symbol": "",  # Placeholder, update as needed
-    "exchange": "",  # Placeholder, update as needed
+# Default config for SwingHighLowBuy
+SWING_HIGH_LOW_BUY_DEFAULT_CONFIG = {
+    "symbol": "",
+    "exchange": "",
     "instrument": None,
     "trade": {},
     "indicators": {},
     "is_default": True,
     "enabled": True,
-    "product_type": "INTRADAY",
+    "product_type": "DELIVERY",
+    "order_type": "MARKET",
+}
+
+# Default config for SwingHighLowSell (copy of Buy, can be customized)
+SWING_HIGH_LOW_SELL_DEFAULT_CONFIG = {
+    **SWING_HIGH_LOW_BUY_DEFAULT_CONFIG,
 }
 
 DEFAULT_STRATEGY_CONFIGS = {
     "OptionBuy": OPTION_BUY_DEFAULT_CONFIG,
     "OptionSell": OPTION_SELL_DEFAULT_CONFIG,
-    "SwingHighLow": SWING_HIGH_LOW_DEFAULT_CONFIG,
+    "SwingHighLowBuy": SWING_HIGH_LOW_BUY_DEFAULT_CONFIG,
+    "SwingHighLowSell": SWING_HIGH_LOW_SELL_DEFAULT_CONFIG,
 }

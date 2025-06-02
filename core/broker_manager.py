@@ -6,8 +6,8 @@ from algosat.brokers.factory import get_broker
 from algosat.common.broker_utils import get_broker_credentials, upsert_broker_credentials
 from algosat.common.default_broker_configs import DEFAULT_BROKER_CONFIGS
 from algosat.common.logger import get_logger
-from algosat.core.db import get_trade_enabled_brokers as db_get_trade_enabled_brokers
-from algosat.core.order_request import OrderRequest, OrderType
+from algosat.core.db import AsyncSessionLocal, get_strategy_by_id, get_trade_enabled_brokers as db_get_trade_enabled_brokers
+from algosat.core.order_request import OrderRequest, OrderType, Side
 from algosat.core.signal import TradeSignal, SignalType
 from algosat.core.order_defaults import ORDER_DEFAULTS
 from algosat.models.strategy_config import StrategyConfig
@@ -97,7 +97,6 @@ class BrokerManager:
             self.brokers[broker_key] = None
             return False
         try:
-            # Pass force_reauth if supported
             import inspect
             if hasattr(broker, 'login') and 'force_reauth' in inspect.signature(broker.login).parameters:
                 success = await async_retry(broker.login, force_reauth=force_reauth, retries=retries, delay=delay)
@@ -110,6 +109,17 @@ class BrokerManager:
         self.brokers[broker_key] = broker if success else None
         if success:
             logger.info(f"🟢 Authentication successful for {broker_key}")
+            # For Zerodha, fetch and cache instruments as DataFrame after login/profile
+            if broker_key == 'zerodha' and hasattr(broker, 'kite') and broker.kite:
+                try:
+                    import pandas as pd
+                    loop = asyncio.get_event_loop()
+                    # Fetch instruments as DataFrame asynchronously
+                    instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(broker.kite.instruments("NFO")))
+                    self._instrument_cache['zerodha'] = instruments
+                    logger.info("Zerodha instruments cached as DataFrame after auth.")
+                except Exception as e:
+                    logger.warning(f"Failed to fetch Zerodha instruments after auth: {e}")
         else:
             logger.warning(f"🟡 Authentication failed for {broker_key}")
         return success
@@ -199,7 +209,11 @@ class BrokerManager:
                     results[broker_name] = {"status": False, "message": "place_order not implemented"}
                     continue
                 try:
-                    result = await async_retry(broker.place_order, order_payload, retries=retries, delay=delay)
+                    # Resolve symbol for this broker
+                    symbol_info = await self.get_symbol_info(broker_name, order_payload.symbol, instrument_type='NFO')
+                    # Create a new OrderRequest with the broker-specific symbol
+                    broker_order_payload = order_payload.copy(update={"symbol": symbol_info["symbol"]})
+                    result = await async_retry(broker.place_order, broker_order_payload, retries=retries, delay=delay)
                     broker_row = await get_broker_by_name(session, broker_name)
                     broker_id = broker_row["id"] if broker_row else None
                     result["broker_id"] = broker_id
@@ -308,103 +322,92 @@ class BrokerManager:
             exchange = 'NSE'
             if instrument_type is not None:
                 instrument_type = instrument_type.upper()
+            # Remove duplicate NSE: prefix if present
+            sanitized_symbol = symbol
+            if sanitized_symbol.startswith(f"{exchange}:"):
+                sanitized_symbol = sanitized_symbol[len(f"{exchange}:"):]  # Remove leading NSE:
             if instrument_type == 'INDEX':
-                fyers_symbol = f"{exchange}:{symbol}-INDEX"
+                fyers_symbol = f"{exchange}:{sanitized_symbol}-INDEX"
             elif instrument_type == 'EQ':
-                fyers_symbol = f"{exchange}:{symbol}-EQ"
+                fyers_symbol = f"{exchange}:{sanitized_symbol}-EQ"
             elif instrument_type == 'NFO':
-                fyers_symbol = f"{exchange}:{symbol}"
+                fyers_symbol = f"{exchange}:{sanitized_symbol}"
             else:
-                fyers_symbol = f"{exchange}:{symbol}"
+                fyers_symbol = f"{exchange}:{sanitized_symbol}"
             return {'symbol': fyers_symbol}
         elif broker_name == 'zerodha':
-            # Zerodha expects instrument_token for everything (quotes, ltp, history, etc.)
-            # Cache instruments for performance
+            import pandas as pd
+            sanitized_symbol = symbol
+            if ':' in symbol:
+                sanitized_symbol = symbol.split(':', 1)[1]
+            sanitized_symbol = sanitized_symbol.split('-')[0] if '-' in sanitized_symbol else sanitized_symbol
+            # Use cached DataFrame if available, else fetch and cache
             if 'zerodha' not in self._instrument_cache:
                 broker = self.brokers.get('zerodha')
                 if not broker or not broker.kite:
                     raise Exception("Zerodha broker not initialized or not logged in.")
                 loop = asyncio.get_event_loop()
-                instruments = await loop.run_in_executor(None, broker.kite.instruments, None)
+                instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(broker.kite.instruments("NFO")))
                 self._instrument_cache['zerodha'] = instruments
             else:
                 instruments = self._instrument_cache['zerodha']
-            # Find instrument token and correct display symbol
-            token = None
-            display_symbol = symbol
-            for i in instruments:
-                # Zerodha uses 'INDICES' for index segment
-                seg = i.get('segment', '')
-                name = i.get('name', '').upper()
-                ins_type = i.get('instrument_type', '').upper()
-                tradingsymbol = i.get('tradingsymbol', '')
-                # For index, user may input NIFTY50, but Zerodha expects NIFTY 50
-                if instrument_type and instrument_type.upper() == 'INDEX' and seg == 'INDICES':
-                    if name.replace(' ', '').upper() == symbol.replace(' ', '').upper():
-                        token = i['instrument_token']
-                        display_symbol = tradingsymbol
-                        break
-                elif instrument_type and instrument_type.upper() == 'EQ' and seg == 'NSE':
-                    if name == symbol.upper():
-                        token = i['instrument_token']
-                        display_symbol = tradingsymbol
-                        break
-                elif instrument_type and instrument_type.upper() == 'NFO' and seg == 'NFO-OPT':
-                    if name == symbol.upper():
-                        token = i['instrument_token']
-                        display_symbol = tradingsymbol
-                        break
-                elif not instrument_type:
-                    if name == symbol.upper():
-                        token = i['instrument_token']
-                        display_symbol = tradingsymbol
-                        break
-            if token is None:
-                raise Exception(f"Instrument token not found for {symbol} {instrument_type}")
-            return {'symbol': display_symbol, 'instrument_token': token}
+            df = instruments
+            match = None
+            # For index (e.g., NIFTY, BANKNIFTY)
+            if instrument_type and instrument_type.upper() == 'INDEX':
+                # Zerodha uses 'INDICES' for index segment, match by name (ignoring spaces)
+                match = df[(df['segment'] == 'INDICES') & (df['name'].str.replace(' ', '').str.upper() == sanitized_symbol.replace(' ', '').upper())]
+            # For equity
+            elif instrument_type and instrument_type.upper() == 'EQ':
+                match = df[(df['segment'] == 'NSE') & (df['name'].str.upper() == sanitized_symbol.upper())]
+            # For options (NFO-OPT)
+            elif instrument_type and instrument_type.upper() == 'NFO':
+                match = df[(df['segment'] == 'NFO-OPT') & (df['tradingsymbol'].str.upper() == sanitized_symbol.upper())]
+            # Fallback: just match tradingsymbol
+            else:
+                match = df[df['tradingsymbol'].str.upper() == sanitized_symbol.upper()]
+            if match is not None and not match.empty:
+                row = match.iloc[0]
+                return {'symbol': row['tradingsymbol'], 'instrument_token': row['instrument_token']}
+            raise Exception(f"Instrument token not found for {sanitized_symbol} {instrument_type}")
         else:
             # Default: just return symbol
             return {'symbol': symbol}
 
-    def build_order_request_from_signal(self, signal: TradeSignal, config: StrategyConfig) -> OrderRequest:
+    import asyncio
+    from algosat.core.db import AsyncSessionLocal, get_strategy_by_id
+    async def build_order_request_for_strategy(self, signal: TradeSignal, config: StrategyConfig) -> OrderRequest:
         """
         Build a broker-agnostic OrderRequest from a TradeSignal and StrategyConfig.
-        Ensures order_type is always set, using broker/signal defaults, config, or fallback to OrderType.MARKET.
-        Populates all relevant fields for DB and broker adapters, using the 'extra' field for non-core OrderRequest fields.
+        Uses logical order_type and product_type for OptionBuy/OptionSell, and config values for others.
         """
-        broker_name = getattr(config, 'broker_id', 'fyers')
-        defaults = ORDER_DEFAULTS.get(broker_name, {}).get(signal.signal_type, {})
-        # Priority: config.trade['order_type'] > defaults > fallback
         order_type = None
-        if hasattr(config, 'trade') and isinstance(config.trade, dict):
-            ot = config.trade.get('order_type')
-            if ot:
-                if isinstance(ot, OrderType):
-                    order_type = ot
-                elif isinstance(ot, str):
-                    try:
-                        order_type = OrderType[ot.upper()]
-                    except Exception:
-                        order_type = None
+        product_type = None
+        strategy_id = getattr(config, 'strategy_id', None)
+        strategy_name = None
+        if strategy_id is not None:
+            async with AsyncSessionLocal() as session:
+                strat = await get_strategy_by_id(session, strategy_id)
+                if strat:
+                    strategy_name = strat.get('name')
+                    if strategy_name in ["OptionBuy", "OptionSell"]:
+                        order_type = "OPTION_STRATEGY"
+                        product_type = "OPTION_STRATEGY"
+                    else:
+                        order_type = strat.get('order_type')
+                        product_type = strat.get('product_type')
         if not order_type:
-            ot = defaults.get('order_type')
-            if isinstance(ot, OrderType):
-                order_type = ot
-            elif isinstance(ot, str):
-                try:
-                    order_type = OrderType[ot.upper()]
-                except Exception:
-                    order_type = None
-        if not order_type:
-            order_type = OrderType.MARKET
-        # --- Only include fields defined in OrderRequest, others go in 'extra' ---
-        order_kwargs = {**defaults}
-        order_kwargs.update({
+            order_type = "MARKET"
+        if not product_type:
+            product_type = "INTRADAY"
+        order_kwargs = {
             'symbol': signal.symbol,
             'side': signal.side,
             'order_type': order_type,
+            'product_type': product_type,
+            'tag': "".join([signal.strategy_name, signal.signal_type, signal.symbol, str(signal.side)]) if hasattr(signal, 'strategy_name') else "AlgoOrder",
             'quantity': getattr(config, 'quantity', 1) or (config.trade.get('quantity', 1) if hasattr(config, 'trade') and isinstance(config.trade, dict) else 1),
-        })
+        }
         # Core OrderRequest fields
         if hasattr(signal, 'price') and signal.price is not None:
             order_kwargs['price'] = signal.price
@@ -413,14 +416,43 @@ class BrokerManager:
         # All other fields go into 'extra'
         extra = {}
         for field in [
-            'candle_range', 'entry_price', 'stop_loss', 'target_price', 'profit', 'signal_time', 'exit_time',
+            'candle_range', 'entry_price', 'stop_loss', 'target_price', 'profit', 'signal_time', 'exit_time','trigger_price_diff'
             'exit_price', 'status', 'reason', 'atr', 'supertrend_signal', 'lot_qty', 'entry_time', 'order_ids', 'order_messages']:
             val = getattr(signal, field, None)
             if val is not None:
                 extra[field] = val
+        # Add lot_size from config/trade config if present
+        lot_size = None
+        lot_qty = None
+        if hasattr(config, 'lot_size'):
+            lot_size = config.lot_size
+        elif hasattr(config, 'trade') and isinstance(config.trade, dict):
+            lot_size = config.trade.get('lot_size')
+            trigger_price_diff = config.trade.get('trigger_price_diff', 0.0)
+        if lot_size is not None:
+            extra['lot_size'] = lot_size
+        if 'trigger_price_diff' not in extra:
+            extra['trigger_price_diff'] = trigger_price_diff if 'trigger_price_diff' in config.trade else 0.0
+        if 'target_price' in extra:
+            extra['takeProfit'] = round(abs(extra['entry_price'] - extra['target_price']),2)
+        if 'stop_loss' in extra:
+            extra['stopLoss'] = signal.price - extra['stop_loss'] if 'stop_loss' in extra else None
+            extra['stopLoss'] = round(round(extra['stopLoss'] / 0.05) * 0.05,2)
+        extra['target_price'] = round(extra['target_price'] / 0.05) * 0.05
+        entry_price = round(round(signal.price / 0.05) * 0.05, 2)
+        trigger_price_diff = extra['trigger_price_diff']
+        stopPrice = (entry_price - trigger_price_diff) if signal.side == Side.BUY.value else (entry_price + trigger_price_diff)
+        stopPrice = round(round(stopPrice / 0.05) * 0.05, 2)
+        order_kwargs['trigger_price'] = stopPrice
+        order_kwargs['quantity'] = lot_size * extra['lot_qty']
+        
+
+        # Normalize side for OptionBuy/OptionSell strategies
         # Also allow config to override/add extra fields
         if hasattr(config, 'extra') and isinstance(config.extra, dict):
             extra.update({k: v for k, v in config.extra.items() if v is not None})
+        # Pass strategy_name for downstream mapping if needed
+        extra['strategy_name'] = strategy_name
         order_kwargs['extra'] = extra
         return OrderRequest(**order_kwargs)
 

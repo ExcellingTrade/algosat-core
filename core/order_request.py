@@ -1,4 +1,5 @@
-from pydantic import BaseModel, validator, Field
+from pydantic import BaseModel, Field
+from pydantic import field_validator
 from enum import Enum
 from typing import Optional, Dict, Any, List
 
@@ -15,6 +16,15 @@ class OrderType(str, Enum):
     LIMIT = "LIMIT"
     SL = "SL"
     SL_LIMIT = "SL_LIMIT"
+    OPTION_STRATEGY = "OPTION_STRATEGY"
+
+class ProductType(str, Enum):
+    INTRADAY = "INTRADAY"
+    NRML = "NRML"
+    MIS = "MIS"
+    CNC = "CNC"
+    OPTION_STRATEGY = "OPTION_STRATEGY"  # Accept logical value for validation
+    BO = "BO"  # Accept broker-specific value for validation
 
 class OrderStatus(str, Enum):
     AWAITING_ENTRY = "AWAITING_ENTRY"
@@ -35,38 +45,57 @@ class OrderRequest(BaseModel):
     order_type: OrderType
     price: Optional[float] = None
     trigger_price: Optional[float] = None
-    product_type: Optional[str] = None
+    product_type: Optional[ProductType] = None
     tag: Optional[str] = None
     validity: Optional[str] = None
     exchange: Optional[str] = None
     variety: Optional[str] = None
     extra: Dict[str, Any] = {}
 
-    @validator('quantity')
+    @field_validator('quantity')
     def positive_quantity(cls, v):
         if v <= 0:
             raise ValueError('quantity must be a positive integer')
         return v
 
-    @validator('price', always=True)
+    @field_validator('price', mode='before')
     def limit_requires_price(cls, v, values):
-        if values.get('order_type') == OrderType.LIMIT and v is None:
-            raise ValueError("limit orders require a 'price' value")
-        return v
+        try:
+            order_type = values.data.get('order_type') if hasattr(values, 'data') else values.get('order_type')
+            if order_type == OrderType.LIMIT and v is None:
+                raise ValueError("limit orders require a 'price' value")
+            return v
+        except Exception as e:
+            print(f"Error in price validation: {e}")
+            return v
 
-    @validator('trigger_price', always=True)
+    @field_validator('trigger_price', mode='before')
     def sl_requires_trigger_price(cls, v, values):
-        if values.get('order_type') == OrderType.SL and v is None:
+        order_type = values.data.get('order_type') if hasattr(values, 'data') else values.get('order_type')
+        if order_type == OrderType.SL and v is None:
             raise ValueError("stop-loss orders require a 'trigger_price' value")
         return v
 
     def to_fyers_dict(self) -> dict:
-        return {
+        # Map logical types to Fyers-specific
+        order_type = self.order_type
+        product_type = self.product_type
+        strategy_name = self.extra.get('strategy_name')
+        if order_type == OrderType.OPTION_STRATEGY:
+            order_type = "SL_LIMIT"
+        if product_type == ProductType.OPTION_STRATEGY:
+            product_type = "BO"
+        # Extract lot_qty, lot_size, stoploss, takeprofit from extra if present
+        # lot_qty = self.extra.get("lot_qty")
+        # lot_size = self.extra.get("lot_size")
+        # stoploss = self.extra.get("stoploss") or self.extra.get("stopLoss")
+        # takeprofit = self.extra.get("takeprofit") or self.extra.get("takeProfit")
+        fyers_dict = {
             "symbol": self.symbol,
             "qty": self.quantity,
-            "type": ORDER_TYPE_MAP[self.order_type],
+            "type": ORDER_TYPE_MAP.get(order_type, 2) if isinstance(order_type, OrderType) else ORDER_TYPE_MAP.get(OrderType(order_type), 2),
             "side": self.side.to_fyers(),
-            "productType": PRODUCT_TYPE_MAP.get(self.product_type, "INTRADAY"),
+            "productType": PRODUCT_TYPE_MAP.get(product_type, "INTRADAY") if isinstance(product_type, str) else PRODUCT_TYPE_MAP.get(product_type.value, "INTRADAY"),
             "limitPrice": float(self.price) if self.price is not None else 0,
             "stopPrice": float(self.trigger_price) if self.trigger_price is not None else 0,
             "disclosedQty": self.extra.get("disclosedQty", 0),
@@ -76,15 +105,33 @@ class OrderRequest(BaseModel):
             "takeProfit": self.extra.get("takeProfit", 0),
             "orderTag": self.tag or ""
         }
+        # Optionally include lot_qty and lot_size for downstream broker logic
+        # if lot_qty is not None:
+        #     fyers_dict["lot_qty"] = lot_qty
+        # if lot_size is not None:
+        #     fyers_dict["lot_size"] = lot_size
+        # Only include orderTag if productType is not BO
+        product_type_val = fyers_dict.get("productType")
+        if product_type_val == "BO":
+            fyers_dict.pop("orderTag", None)
+        return fyers_dict
 
     def to_zerodha_dict(self) -> dict:
+        # Map logical types to Zerodha-specific
+        order_type = self.order_type
+        product_type = self.product_type
+        strategy_name = self.extra.get('strategy_name')
+        if order_type == OrderType.OPTION_STRATEGY:
+            order_type = "SL"
+        if product_type == ProductType.OPTION_STRATEGY:
+            product_type = "MIS"
         return {
             "tradingsymbol": self.symbol,
             "exchange": self.exchange or "NFO",
             "transaction_type": self.side.to_zerodha(),
             "quantity": self.quantity,
-            "order_type": self.order_type.value,
-            "product": self.product_type or "MIS",
+            "order_type": order_type.value if isinstance(order_type, OrderType) else order_type,
+            "product": product_type.value if isinstance(product_type, ProductType) else product_type or "MIS",
             "variety": self.variety or "regular",
             "price": self.price,
             "trigger_price": self.trigger_price,
@@ -103,6 +150,8 @@ PRODUCT_TYPE_MAP = {
     "NRML": "NRML",
     "MIS": "INTRADAY",
     "CNC": "CNC",
+    "BO": "BO",  # Accept broker-specific value for validation
+    
 }
 
 class OrderResponse(BaseModel):

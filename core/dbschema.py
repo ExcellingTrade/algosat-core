@@ -13,9 +13,17 @@ strategies = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("key", String, nullable=False, unique=True),  # e.g. OptionBuy, OptionSell, SwingHighLow
     Column("name", String, nullable=False),
+    Column("order_type", String, nullable=False, server_default=text("'MARKET'"),
+           info={"choices": ["MARKET", "LIMIT"]}),
+    Column("product_type", String, nullable=False, server_default=text("'INTRADAY'"),
+           info={"choices": ["INTRADAY", "DELIVERY"]}),
     Column("enabled", Boolean, nullable=False, server_default=text("true")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+
+    # Add CHECK constraints for allowed values
+    # (Postgres syntax, adjust if using another DB)
+    # Note: SQLAlchemy's CheckConstraint can be used for cross-db support
 )
 
 strategy_configs = Table(

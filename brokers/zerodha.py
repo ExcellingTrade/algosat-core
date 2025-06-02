@@ -126,41 +126,82 @@ class ZerodhaWrapper(BrokerInterface):
             logger.error(f"Zerodha authentication failed: {e}", exc_info=True)
             return False
         
-    async def place_order(self, order_request: OrderRequest) -> Dict[str, Any]:
+    async def get_order_history(self, order_id) -> Dict[str, Any]:
+        """
+        Fetch order history for a given order_id and return status info.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            orderdetails = await loop.run_in_executor(None, self.kite.order_history, order_id)
+            if not orderdetails:
+                return {"order_id": order_id, "status": "UNKNOWN", "message": "No order history found"}
+            statuses = [d.get('status') for d in orderdetails]
+            status_messages = [d.get('status_message') for d in orderdetails]
+            status_messages_raw = [d.get('status_message_raw') for d in orderdetails]
+            last = orderdetails[-1]
+            return {
+                "order_id": order_id,
+                "status": last.get('status'),
+                "message": last.get('status_message'),
+                "message_raw": last.get('status_message_raw'),
+                "statuses": statuses,
+                "status_messages": status_messages,
+                "status_messages_raw": status_messages_raw,
+                "raw": orderdetails
+            }
+        except Exception as e:
+            logger.error(f"Failed to fetch order history for {order_id}: {e}")
+            return {"order_id": order_id, "status": "ERROR", "message": str(e)}
+
+    async def place_order(self, order_request: OrderRequest) -> dict:
         """
         Place an order with Zerodha using a generic OrderRequest object.
-        
-        Args:
-            order_request: The order details
-            
-        Returns:
-            Dict containing order response
+        Returns an OrderResponse dict using from_zerodha for consistency.
+        Ensures all datetimes in raw_response are stringified for DB JSON serialization.
         """
-        # Not implemented yet for new unified order flow
-        raise NotImplementedError("Zerodha place_order is not yet implemented for the new OrderRequest flow.")
-        # Old code below (commented out):
-        # kite_payload = {
-        #     "tradingsymbol": order_request.symbol,
-        #     "exchange": order_request.exchange or "NFO",
-        #     "transaction_type": order_request.side.value,  # "BUY" or "SELL"
-        #     "quantity": order_request.quantity,
-        #     "order_type": order_request.order_type.value,  # "MARKET", "LIMIT", etc.
-        #     "product": order_request.product_type or "MIS",
-        #     "variety": order_request.variety or "regular",
-        #     "price": order_request.price,
-        #     "trigger_price": order_request.trigger_price,
-        #     "validity": order_request.validity or "DAY",
-        #     "tag": order_request.tag,
-        # }
-        # kite_payload = {k: v for k, v in kite_payload.items() if v is not None}
-        # try:
-        #     loop = asyncio.get_event_loop()
-        #     response = await loop.run_in_executor(None, self.kite.place_order, kite_payload)
-        #     logger.info(f"Zerodha order placed: {response}")
-        #     return response
-        # except Exception as e:
-        #     logger.error(f"Zerodha order placement failed: {e}")
-        #     return {"error": str(e)}
+        from algosat.core.order_request import OrderResponse
+        import datetime as dt
+        import copy
+        def stringify_datetimes(obj):
+            if isinstance(obj, dict):
+                return {k: stringify_datetimes(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [stringify_datetimes(v) for v in obj]
+            elif isinstance(obj, dt.datetime):
+                return obj.isoformat()
+            return obj
+        if not self.kite:
+            logger.error("Kite client not initialized. Please login first.")
+            return OrderResponse.from_zerodha(None, order_request=order_request, error="Kite client not initialized").dict()
+        kite_payload = order_request.to_zerodha_dict()
+        kite_payload = {k: v for k, v in kite_payload.items() if v is not None}
+        logger.info(f"Placing Zerodha order with payload: {kite_payload}")
+        try:
+            loop = asyncio.get_event_loop()
+            order_id = await loop.run_in_executor(
+                None,
+                lambda: self.kite.place_order(
+                    tradingsymbol=kite_payload["tradingsymbol"],
+                    exchange=kite_payload["exchange"],
+                    transaction_type=kite_payload["transaction_type"],
+                    quantity=kite_payload["quantity"],
+                    order_type=kite_payload["order_type"],
+                    price= 275.10, #kite_payload.get("price"),
+                    trigger_price=275.05, #kite_payload.get("trigger_price"),
+                    product=kite_payload["product"],
+                    variety=kite_payload.get("variety", "regular"),
+                    validity=kite_payload.get("validity", "DAY"),
+                    tag=kite_payload.get("tag")
+                )
+            )
+            logger.info(f"Zerodha order placed, order_id: {order_id}")
+            order_hist = await self.get_order_history(order_id)
+            # Stringify all datetimes in order_hist (raw_response)
+            order_hist = stringify_datetimes(order_hist)
+            return OrderResponse.from_zerodha(order_hist, order_request=order_request).dict()
+        except Exception as e:
+            logger.error(f"Zerodha order placement failed: {e}")
+            return OrderResponse.from_zerodha(None, order_request=order_request, error=str(e)).dict()
         
     async def get_positions(self) -> List[Dict[str, Any]]:
         """

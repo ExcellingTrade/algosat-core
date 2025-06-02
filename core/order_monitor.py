@@ -40,6 +40,14 @@ class OrderMonitor:
             # Load aggregated order data
             agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
             broker_statuses = []
+            # Check for any broker_execs in failed state before checking order_ids
+            failed_statuses = {OrderStatusEnum.REJECTED, OrderStatusEnum.FAILED}
+            for bro in agg.broker_orders:
+                if bro.status in failed_statuses:
+                    logger.info(f"OrderMonitor: Updating order_id={self.order_id} to FAILED due to broker_exec status {bro.status} (broker_id={bro.broker_id})")
+                    await self.order_manager.update_order_status_in_db(self.order_id, OrderStatusEnum.FAILED)
+                    self.stop()
+                    return
             for bro in agg.broker_orders:
                 broker_name = await self.data_manager.get_broker_name_by_id(bro.broker_id)
                 order_details = await self.order_cache.get_order_by_id(broker_name, bro.order_id)
