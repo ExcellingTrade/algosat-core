@@ -575,6 +575,82 @@ class ErrorTracker:
         except Exception as e:
             logger.error(f"Failed to record recovery action: {e}")
     
+    async def get_recent_errors(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent errors from the database and in-memory cache."""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT error_id, category, severity, message, function_name, timestamp
+                FROM error_events 
+                ORDER BY timestamp DESC 
+                LIMIT ?
+            """, (limit,))
+            
+            db_errors = cursor.fetchall()
+            conn.close()
+            
+            # Convert to dict format
+            recent_errors = []
+            for row in db_errors:
+                recent_errors.append({
+                    'error_id': row[0],
+                    'category': row[1],
+                    'severity': row[2],
+                    'message': row[3],
+                    'function_name': row[4] or '',
+                    'timestamp': row[5],
+                    'error_type': row[2]  # For backward compatibility
+                })
+            
+            return recent_errors
+            
+        except Exception as e:
+            logger.error(f"Failed to get recent errors: {e}")
+            # Fallback to in-memory errors if database fails
+            return self.recent_errors[-limit:] if self.recent_errors else []
+
+    async def get_error_trends(self, hours: int = 24) -> Dict[str, Any]:
+        """Get error trends and statistics."""
+        try:
+            analytics = self.get_error_analytics(hours=hours)
+            
+            # Extract trend data from analytics
+            trends = {
+                'total_errors': analytics.get('total_errors', 0),
+                'time_period_hours': hours,
+                'error_by_category': {},
+                'error_by_severity': {},
+                'hourly_trends': analytics.get('error_trends', [])
+            }
+            
+            # Process error summary for categories and severities
+            for error_summary in analytics.get('error_summary', []):
+                category = error_summary['category']
+                severity = error_summary['severity']
+                count = error_summary['count']
+                
+                if category not in trends['error_by_category']:
+                    trends['error_by_category'][category] = 0
+                trends['error_by_category'][category] += count
+                
+                if severity not in trends['error_by_severity']:
+                    trends['error_by_severity'][severity] = 0
+                trends['error_by_severity'][severity] += count
+            
+            return trends
+            
+        except Exception as e:
+            logger.error(f"Failed to get error trends: {e}")
+            return {
+                'total_errors': 0,
+                'time_period_hours': hours,
+                'error_by_category': {},
+                'error_by_severity': {},
+                'hourly_trends': []
+            }
+
     def get_error_analytics(self, hours: int = 24) -> Dict[str, Any]:
         """Get comprehensive error analytics."""
         try:

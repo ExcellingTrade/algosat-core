@@ -8,7 +8,11 @@ import traceback
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone # Added timezone
 from typing import Dict, Any, Optional, List
+import os
 
+from dotenv import load_dotenv
+
+import psutil  # Add at the top with other imports
 import uvicorn
 from fastapi import FastAPI, HTTPException, Depends, Request, Response, status, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,6 +23,10 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from algosat.common.logger import get_logger
 from pydantic import BaseModel # Added
 from sqlalchemy import select
+import aiohttp
+
+# Load .env at startup
+load_dotenv()
 
 # Import our enhanced modules
 from algosat.core.security import SecurityManager, EnhancedInputValidator, User, InvalidInputError
@@ -124,9 +132,9 @@ security = HTTPBearer(auto_error=False)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001"],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -311,35 +319,53 @@ async def get_metrics():
             detail="Failed to generate metrics"
         )
 
+# Hostinger VPS metrics integration
+HOSTINGER_VM_ID = os.environ.get("HOSTINGER_VM_ID")
+HOSTINGER_API_TOKEN = os.environ.get("HOSTINGER_API_TOKEN")
+HOSTINGER_METRICS_URL = f"https://developers.hostinger.com/api/vps/v1/virtual-machines/{HOSTINGER_VM_ID}/metrics"
+
+def get_hostinger_headers():
+    if not HOSTINGER_API_TOKEN:
+        raise RuntimeError("Hostinger API token not set in environment variable HOSTINGER_API_TOKEN")
+    return {"Authorization": f"Bearer {HOSTINGER_API_TOKEN}", "Accept": "application/json"}
+
+async def fetch_hostinger_metrics(date_from: str, date_to: str) -> dict:
+    url = HOSTINGER_METRICS_URL
+    headers = get_hostinger_headers()
+    params = {"date_from": date_from, "date_to": date_to}
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, params=params, timeout=10) as resp:
+            logger.error(f"Fetching Hostinger metrics | url={url} | params={params} | headers={headers}")
+            logger.error(f"Hostinger metrics response status: {resp}")
+            if resp.status != 200:
+                raise HTTPException(status_code=502, detail=f"Hostinger API error: {resp.status}")
+            return await resp.json()
+
 @app.get("/system/status")
 async def get_system_status(current_user: Dict = Depends(get_current_user)):
-    """Get comprehensive system status (authenticated endpoint)."""
+    """Get comprehensive system status (authenticated endpoint, uses Hostinger VPS API)."""
     try:
-        status_data = {
-            "system": {
-                "uptime": "running",  # Simplified uptime
-                # "vps_performance": await vps_optimizer.get_performance_metrics(),  # Temporarily disabled
-                "memory_usage": "available",  # Simplified memory check
-                "disk_usage": "available",    # Simplified disk check
-            },
-            "security": {
-                "active_sessions": 0,  # To be implemented
-                "recent_alerts": [],   # To be implemented
-                "blocked_ips": [],     # To be implemented
-            },
-            "errors": {
-                "recent_errors": await error_tracker.get_recent_errors(limit=10),
-                "error_trends": await error_tracker.get_error_trends(),
-            },
-            "trading": {
-                "active_strategies": 0,  # To be implemented
-                "open_positions": 0,     # To be implemented
-                "daily_pnl": 0.0,        # To be implemented
-            }
-        }
-        
-        return status_data
-        
+        # Use current month as default range
+        now = datetime.now(timezone.utc)
+        date_from = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
+        date_to = now.isoformat()
+        hostinger_metrics = await fetch_hostinger_metrics(date_from, date_to)
+        # status_data = {
+        #     "hostinger_vps_metrics": hostinger_metrics,
+        #     "system": {
+        #         "note": "For full VPS metrics, see hostinger_vps_metrics. Local psutil metrics removed for efficiency."
+        #     },
+        #     "security": {
+        #         "active_sessions": 0,  # To be implemented
+        #         "recent_alerts": [],   # To be implemented
+        #         "blocked_ips": [],     # To be implemented
+        #     },
+        #     "errors": {
+        #         "recent_errors": await error_tracker.get_recent_errors(limit=10),
+        #         "error_trends": await error_tracker.get_error_trends(),
+        #     }
+        # }
+        return hostinger_metrics  # Return Hostinger metrics directly for now   
     except Exception as e:
         error_tracker.track_error(
             error=e,
