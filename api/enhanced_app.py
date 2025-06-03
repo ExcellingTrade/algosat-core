@@ -335,8 +335,6 @@ async def fetch_hostinger_metrics(date_from: str, date_to: str) -> dict:
     params = {"date_from": date_from, "date_to": date_to}
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=params, timeout=10) as resp:
-            logger.error(f"Fetching Hostinger metrics | url={url} | params={params} | headers={headers}")
-            logger.error(f"Hostinger metrics response status: {resp}")
             if resp.status != 200:
                 raise HTTPException(status_code=502, detail=f"Hostinger API error: {resp.status}")
             return await resp.json()
