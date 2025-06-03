@@ -128,11 +128,66 @@ class LoginRequest(BaseModel):
     password: str
 
 # Security and middleware setup
+from fastapi.middleware.cors import CORSMiddleware
+import re
+
+def get_allowed_origins():
+    """
+    Get allowed CORS origins dynamically.
+    This includes common development setups and can be extended for production.
+    """
+    base_origins = [
+        # Development - localhost and 127.0.0.1 with various ports
+        "http://localhost:3000",
+        "http://127.0.0.1:3000", 
+        "http://localhost:3001",
+        "http://127.0.0.1:3001",
+        "http://localhost:5173",  # Vite dev server
+        "http://127.0.0.1:5173",
+        # Production/VPS IP address - both HTTP and HTTPS
+        "http://82.25.109.188:3000",
+        "https://82.25.109.188:3000",
+        # Allow all origins for testing (remove in production)
+        "*"
+    ]
+    
+    return base_origins
+
+def is_origin_allowed(origin: str) -> bool:
+    """
+    Check if an origin is allowed.
+    This function can be used for more complex origin validation.
+    """
+    if not origin:
+        return False
+    
+    allowed_origins = get_allowed_origins()
+    
+    # Check exact matches
+    if origin in allowed_origins:
+        return True
+    
+    # Check IP-based patterns for local network access
+    ip_patterns = [
+        r"http://192\.168\.\d{1,3}\.\d{1,3}:3000",
+        r"http://10\.\d{1,3}\.\d{1,3}\.\d{1,3}:3000", 
+        r"http://172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}:3000",
+        # Pattern for any public IP (be careful with this in production)
+        r"http://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:3000",
+    ]
+    
+    for pattern in ip_patterns:
+        if re.match(pattern, origin):
+            return True
+    
+    return False
+
 security = HTTPBearer(auto_error=False)
 
+# Use a more flexible CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000", "http://localhost:3001", "http://127.0.0.1:3001"],
+    allow_origins=get_allowed_origins(),
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
@@ -140,7 +195,7 @@ app.add_middleware(
 
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=["localhost", "127.0.0.1", "*.local"]
+    allowed_hosts=["localhost", "127.0.0.1", "82.25.109.188", "*.local", "*"]
 )
 
 @app.post("/auth/token/refresh", response_model=TokenResponse, tags=["Authentication"])

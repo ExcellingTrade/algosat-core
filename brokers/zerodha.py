@@ -500,6 +500,43 @@ class ZerodhaWrapper(BrokerInterface):
                 logger.error("Zerodha: Reauth failed in get_order_details.")
                 raise
 
+    async def get_balance(self, segment: str = "equity") -> dict:
+        """
+        Fetch account balance for the given segment (default: equity).
+        Returns raw API response.
+        """
+        try:
+            if not self.kite:
+                logger.error("Kite client not initialized. Please login first.")
+                return {}
+            loop = asyncio.get_event_loop()
+            margins = await loop.run_in_executor(None, lambda: self.kite.margins(segment))
+            return margins
+        except Exception as e:
+            logger.error(f"Failed to fetch Zerodha balance: {e}")
+            return {}
+
+    async def get_balance_summary(self, segment: str = "equity") -> dict:
+        """
+        Return summary: total_balance, available, utilized for the given segment.
+        Handles Zerodha's margins response structure.
+        """
+        try:
+            margins = await self.get_balance(segment)
+            # Zerodha returns a dict with keys: enabled, net, available, utilised, etc.
+            available = margins.get("available", {})
+            total = available.get("opening_balance", 0)
+            avail = available.get("live_balance", 0)
+            utilized = total - avail
+            return {
+                "total_balance": total,
+                "utilized": utilized,
+                "available": avail
+            }
+        except Exception as e:
+            logger.error(f"Failed to summarize Zerodha balance: {e}")
+            return {}
+
 # === Broker-specific API code mapping ===
 # These mappings translate generic enums to Zerodha API codes. Do not move these to order_defaults.py.
 SIDE_MAP = {

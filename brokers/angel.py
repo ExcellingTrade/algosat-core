@@ -371,3 +371,13 @@ class AngelWrapper(BrokerInterface):
         except Exception as e:
             logger.error(f"Error fetching Angel order details: {e}")
             return []
+
+    async def get_balance_summary(self, *args, **kwargs) -> dict:
+        """
+        Return summary: total_balance, available, utilized for Angel. Not implemented, returns 0s.
+        """
+        return {
+            "total_balance": 0,
+            "available": 0,
+            "utilized": 0
+        }

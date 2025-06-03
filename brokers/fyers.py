@@ -310,12 +310,40 @@ class FyersWrapper(BrokerInterface):
             return None
 
     async def get_balance(self):
-        """Dynamic balance method based on is_async flag."""
+        """
+        Fetch account balance (raw API response).
+        """
         if self.is_async:
-            return await self.get_balance_async()  # Return coroutine for await
+            return await self.get_balance_async()
         else:
             return self.get_balance_sync()
 
+    async def get_balance_summary(self) -> dict:
+        """
+        Return summary: total_balance, available, utilized for equity from Fyers funds API.
+        """
+        try:
+            raw = await self.get_balance()
+            if not raw or not isinstance(raw, dict) or raw.get("code") != 200:
+                logger.error(f"Fyers get_balance_summary: Invalid or failed response: {raw}")
+                return {}
+            fund_limit = raw.get("fund_limit", [])
+            total = available = utilized = 0
+            for item in fund_limit:
+                if item.get("title", "").lower() == "total balance":
+                    total = item.get("equityAmount", 0)
+                if item.get("title", "").lower() == "available balance":
+                    available = item.get("equityAmount", 0)
+                if item.get("title", "").lower() == "utilized amount":
+                    utilized = item.get("equityAmount", 0)
+            return {
+                "total_balance": total,
+                "available": available,
+                "utilized": utilized
+            }
+        except Exception as e:
+            logger.error(f"Failed to summarize Fyers balance: {e}")
+            return {}
     async def get_profile_async(self):
         """Fetch account profile asynchronously using Fyers async SDK."""
         try:

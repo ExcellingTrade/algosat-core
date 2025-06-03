@@ -86,3 +86,17 @@ class BrokerInterface(ABC):
         Returns a list of order dicts (structure broker-specific).
         """
         ...
+
+    @abstractmethod
+    async def get_balance(self, *args, **kwargs) -> dict:
+        """
+        Fetch account balance (raw API response).
+        """
+        ...
+
+    @abstractmethod
+    async def get_balance_summary(self, *args, **kwargs) -> dict:
+        """
+        Return summary: total_balance, available, utilized (standardized output).
+        """
+        ...
