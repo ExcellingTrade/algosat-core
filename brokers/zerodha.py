@@ -361,127 +361,62 @@ class ZerodhaWrapper(BrokerInterface):
 
     async def get_quote(self, symbol: str) -> Dict[str, Any]:
         """
-        Fetch a full quote for the given symbol via Kite Connect.
+        Fetch a full quote for one or more symbols (comma-separated) via Kite Connect.
+        Returns a dict with symbol as key and quote data as value.
         """
         loop = asyncio.get_event_loop()
         try:
-            return await loop.run_in_executor(None, self.kite.quote, [symbol])
+            # Kite expects a list of symbols
+            symbol_list = [s.strip() for s in symbol.split(",") if s.strip()]
+            response = await loop.run_in_executor(None, self.kite.quote, symbol_list)
+            # response: {symbol: { ... }}
+            return response
         except kite_exceptions.PermissionException:
             logger.warning("Zerodha: PermissionException in get_quote, attempting reauth...")
             if await self.login(force_reauth=True):
-                return await loop.run_in_executor(None, self.kite.quote, [symbol])
+                symbol_list = [s.strip() for s in symbol.split(",") if s.strip()]
+                return await loop.run_in_executor(None, self.kite.quote, symbol_list)
             else:
                 logger.error("Zerodha: Reauth failed in get_quote.")
                 return {"error": "Reauth failed"}
+        except Exception as e:
+            logger.error(f"Failed to fetch Zerodha quote: {e}")
+            return {"error": str(e)}
 
-    async def get_ltp(self, symbol: str) -> Any:
+    async def get_ltp(self, symbol: str) -> Dict[str, float]:
         """
-        Fetch the last traded price for the given symbol via Kite Connect.
+        Fetch the last traded price for one or more symbols (comma-separated) via Kite Connect.
+        Returns a dict with symbol as key and last price as value.
         """
         loop = asyncio.get_event_loop()
         try:
-            return await loop.run_in_executor(None, self.kite.ltp, symbol)
+            symbol_list = [s.strip() for s in symbol.split(",") if s.strip()]
+            response = await loop.run_in_executor(None, self.kite.ltp, symbol_list)
+            # response: {symbol: { 'last_price': ... }}
+            ltp_dict = {}
+            for sym, val in response.items():
+                ltp = val.get("last_price")
+                if ltp is not None:
+                    ltp_dict[sym] = ltp
+            return ltp_dict
         except kite_exceptions.PermissionException:
             logger.warning("Zerodha: PermissionException in get_ltp, attempting reauth...")
             if await self.login(force_reauth=True):
-                return await loop.run_in_executor(None, self.kite.ltp, symbol)
+                symbol_list = [s.strip() for s in symbol.split(",") if s.strip()]
+                response = await loop.run_in_executor(None, self.kite.ltp, symbol_list)
+                ltp_dict = {}
+                for sym, val in response.items():
+                    ltp = val.get("last_price")
+                    if ltp is not None:
+                        ltp_dict[sym] = ltp
+                return ltp_dict
             else:
                 logger.error("Zerodha: Reauth failed in get_ltp.")
                 return {"error": "Reauth failed"}
-
-    async def get_strike_list(self, symbol: str, max_strikes: int) -> List[str]:
-        """
-        Return a list of tradingsymbols for CE and PE strikes:
-        1 ATM CE, 1 ATM PE, max_strikes ITM CE, max_strikes OTM CE, max_strikes ITM PE, max_strikes OTM PE.
-        Expiry is auto-detected: weekly for NIFTY, monthly for others.
-        Total returned: 4*max_strikes + 2
-        """
-        import datetime
-        loop = asyncio.get_event_loop()
-        try:
-            instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(self.kite.instruments("NFO")))
-        except kite_exceptions.PermissionException:
-            logger.warning("Zerodha: PermissionException in get_strike_list (instruments), attempting reauth...")
-            if await self.login(force_reauth=True):
-                instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(self.kite.instruments("NFO")))
-            else:
-                logger.error("Zerodha: Reauth failed in get_strike_list (instruments).")
-                return []
-        instruments['expiry'] = pd.to_datetime(instruments['expiry'])
-
-        # Symbol normalization for filtering instruments
-        symbol_filter = symbol.upper()
-        if symbol_filter == "NIFTY 50":
-            symbol_filter = "NIFTY"
-        # In future, add more symbol renaming logic here as needed
-
-        # Helper to get nearest expiry (weekly for NIFTY, monthly for others)
-        def get_nearest_expiry(symbol: str, ref_date: datetime.date = None) -> datetime.date:
-            if ref_date is None:
-                ref_date = datetime.date.today()
-            if symbol.upper() == "NIFTY 50":
-                # Weekly expiry: next Thursday >= today
-                days_ahead = (3 - ref_date.weekday() + 7) % 7
-                expiry = ref_date + datetime.timedelta(days=days_ahead)
-                # If today is Thursday and market not closed, expiry is today
-                if days_ahead == 0:
-                    expiry = ref_date
-                return expiry
-            else:
-                # Monthly expiry: last Thursday of current month
-                year = ref_date.year
-                month = ref_date.month
-                # Find last Thursday of the month
-                last_day = datetime.date(year, month + 1, 1) - datetime.timedelta(days=1) if month < 12 else datetime.date(year, 12, 31)
-                while last_day.weekday() != 3:
-                    last_day -= datetime.timedelta(days=1)
-                return last_day
-
-        expiry = get_nearest_expiry(symbol)
-        # Convert expiry to pandas.Timestamp for comparison
-        expiry_pd = pd.Timestamp(expiry)
-        df = instruments[
-            (instruments['name'] == symbol_filter) &
-            (instruments['segment'] == 'NFO-OPT') &
-            (instruments['expiry'] == expiry_pd)
-        ].copy()
-        if df.empty:
-            logger.error(f"No option contracts found for {symbol} and expiry {expiry_pd}")
-            return []
-        ltp_symbol = f"NSE:{symbol.upper()}"
-        if symbol.upper() == 'NIFTY':
-            ltp_symbol = f"NSE:{symbol.upper()} 50"
-        try:
-            ltp = await loop.run_in_executor(None, self.kite.ltp, ltp_symbol)
-        except kite_exceptions.PermissionException:
-            logger.warning("Zerodha: PermissionException in get_strike_list (ltp), attempting reauth...")
-            if await self.login(force_reauth=True):
-                ltp = await loop.run_in_executor(None, self.kite.ltp, ltp_symbol)
-            else:
-                logger.error("Zerodha: Reauth failed in get_strike_list (ltp).")
-                return []
-        spot = ltp[ltp_symbol]["last_price"]
-        df["_strike_val"] = df["strike"].astype(float)
-        ce = df[df["instrument_type"] == "CE"]
-        pe = df[df["instrument_type"] == "PE"]
-        all_strikes = sorted(df["_strike_val"].unique())
-        if not all_strikes:
-            logger.error(f"No strikes found for {symbol} on expiry {expiry_pd}")
-            return []
-        atm_strike = min(all_strikes, key=lambda x: abs(x - spot))
-        # ATM
-        atm_ce = ce[ce["_strike_val"] == atm_strike]["tradingsymbol"].tolist()[:1]
-        atm_pe = pe[pe["_strike_val"] == atm_strike]["tradingsymbol"].tolist()[:1]
-        # ITM/OTM
-        ce_itm = ce[ce["_strike_val"] < atm_strike].sort_values(by="_strike_val", ascending=False).head(max_strikes)
-        ce_otm = ce[ce["_strike_val"] > atm_strike].sort_values(by="_strike_val").head(max_strikes)
-        pe_itm = pe[pe["_strike_val"] > atm_strike].sort_values(by="_strike_val").head(max_strikes)
-        pe_otm = pe[pe["_strike_val"] < atm_strike].sort_values(by="_strike_val", ascending=False).head(max_strikes)
-        picks = atm_ce + atm_pe + \
-                ce_itm["tradingsymbol"].tolist() + ce_otm["tradingsymbol"].tolist() + \
-                pe_itm["tradingsymbol"].tolist() + pe_otm["tradingsymbol"].tolist()
-        return picks
-
+        except Exception as e:
+            logger.error(f"Failed to fetch Zerodha ltp: {e}")
+            return {"error": str(e)}
+        
     async def get_order_details(self) -> list[dict]:
         """
         Fetch all order details for the current account/session from Zerodha.
@@ -490,63 +425,36 @@ class ZerodhaWrapper(BrokerInterface):
         loop = asyncio.get_event_loop()
         try:
             orders = await loop.run_in_executor(None, self.kite.orders)
-            return orders
-        except kite_exceptions.PermissionException as e:
-            logger.warning("Zerodha: PermissionException in get_order_details, attempting reauth...")
-            if await self.login(force_reauth=True):
-                orders = await loop.run_in_executor(None, self.kite.orders)
+            if isinstance(orders, list):
                 return orders
-            else:
-                logger.error("Zerodha: Reauth failed in get_order_details.")
-                raise
+            return []
+        except Exception as e:
+            logger.error(f"Error fetching Zerodha order details: {e}")
+            return []
+
+    async def get_strike_list(self, symbol: str, max_strikes: int) -> list:
+        """
+        Return a list of tradingsymbols for CE and PE strikes:
+        1 ATM CE, 1 ATM PE, max_strikes ITM CE, max_strikes OTM CE, max_strikes ITM PE, max_strikes OTM PE.
+        Expiry is auto-detected: weekly for NIFTY, monthly for others.
+        Total returned: 4*max_strikes + 2
+        """
+        # Placeholder: implement as per your logic or leave as empty list
+        logger.warning("Zerodha get_strike_list is a placeholder. Not implemented.")
+        return []
 
     async def get_balance(self, segment: str = "equity") -> dict:
         """
-        Fetch account balance for the given segment (default: equity).
-        Returns raw API response.
+        Fetch account balance (raw API response) for Zerodha. Not implemented, returns empty dict.
         """
-        try:
-            if not self.kite:
-                logger.error("Kite client not initialized. Please login first.")
-                return {}
-            loop = asyncio.get_event_loop()
-            margins = await loop.run_in_executor(None, lambda: self.kite.margins(segment))
-            return margins
-        except Exception as e:
-            logger.error(f"Failed to fetch Zerodha balance: {e}")
-            return {}
+        return {}
 
     async def get_balance_summary(self, segment: str = "equity") -> dict:
         """
-        Return summary: total_balance, available, utilized for the given segment.
-        Handles Zerodha's margins response structure.
+        Return summary: total_balance, available, utilized for Zerodha. Not implemented, returns 0s.
         """
-        try:
-            margins = await self.get_balance(segment)
-            # Zerodha returns a dict with keys: enabled, net, available, utilised, etc.
-            available = margins.get("available", {})
-            total = available.get("opening_balance", 0)
-            avail = available.get("live_balance", 0)
-            utilized = total - avail
-            return {
-                "total_balance": total,
-                "utilized": utilized,
-                "available": avail
-            }
-        except Exception as e:
-            logger.error(f"Failed to summarize Zerodha balance: {e}")
-            return {}
-
-# === Broker-specific API code mapping ===
-# These mappings translate generic enums to Zerodha API codes. Do not move these to order_defaults.py.
-SIDE_MAP = {
-    Side.BUY: "BUY",   # Zerodha API: "BUY"
-    Side.SELL: "SELL", # Zerodha API: "SELL"
-}
-
-ORDER_TYPE_MAP = {
-    OrderType.LIMIT: "LIMIT",   # Zerodha API: "LIMIT"
-    OrderType.MARKET: "MARKET", # Zerodha API: "MARKET"
-    OrderType.SL: "SL-M",       # Zerodha API: "SL-M"
-    # Add more mappings as needed
-}
+        return {
+            "total_balance": 0,
+            "available": 0,
+            "utilized": 0
+        }

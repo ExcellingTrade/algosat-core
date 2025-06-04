@@ -381,3 +381,9 @@ class AngelWrapper(BrokerInterface):
             "available": 0,
             "utilized": 0
         }
+
+    async def get_balance(self, *args, **kwargs) -> dict:
+        """
+        Fetch account balance (raw API response). Not implemented for Angel, returns empty dict.
+        """
+        return {}

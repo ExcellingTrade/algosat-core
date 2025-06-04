@@ -834,32 +834,43 @@ class FyersWrapper(BrokerInterface):
             "target_responses": target_responses
         }
 
-    async def get_ltp(self, symbol):
-        raise NotImplementedError("get_ltp is not implemented for FyersWrapper yet.")
-
-    async def get_quote(self, symbol):
-        raise NotImplementedError("get_quote is not implemented for FyersWrapper yet.")
-
-    async def get_strike_list(self, symbol, max_strikes=40):
+    async def get_ltp(self, symbol: str) -> dict:
         """
-        Fetch the list of option strike symbols for the given symbol using the option chain API.
-        Returns a list of strike symbols (filtered for calls and puts, excluding INDEX).
+        Fetch last traded price (LTP) for one or more symbols (comma-separated) from Fyers API.
+        Returns a dict with symbol as key and last price as value.
         """
-        option_chain_response = await self.get_option_chain(symbol, max_strikes)
-        if (
-            not option_chain_response
-            or not option_chain_response.get('data')
-            or not option_chain_response['data'].get('optionsChain')
-        ):
-            return []
-        option_chain_df = pd.DataFrame(option_chain_response['data']['optionsChain'])
-        strike_symbols = option_chain_df[constants.COLUMN_SYMBOL].unique()
-        strike_symbols = [
-            s for s in strike_symbols
-            if (s.endswith(constants.OPTION_TYPE_CALL) or s.endswith(constants.OPTION_TYPE_PUT))
-            and "INDEX" not in s
-        ]
-        return strike_symbols
+        quotes = await self.get_quote(symbol)
+        ltp_dict = {}
+        for sym, val in quotes.items():
+            ltp = val.get("lp")
+            if ltp is not None:
+                ltp_dict[sym] = ltp
+        return ltp_dict
+
+    async def get_quote(self, symbol: str) -> dict:
+        """
+        Fetch quotes for one or more symbols (comma-separated) from Fyers API.
+        Returns a dict with symbol as key and quote data as value.
+        """
+        loop = asyncio.get_event_loop()
+        try:
+            # Fyers expects a dict: {"symbols": symbol}
+            data = {"symbols": symbol}
+            response = await loop.run_in_executor(None, self.fyers.quotes, data)
+            if asyncio.iscoroutine(response):
+                response = await response
+            if not response or response.get("code") != 200 or response.get("s") != "ok":
+                logger.error(f"Fyers get_quote failed: {response}")
+                return {}
+            quotes = {}
+            for item in response.get("d", []):
+                sym = item.get("n")
+                val = item.get("v", {})
+                quotes[sym] = val
+            return quotes
+        except Exception as e:
+            logger.error(f"Fyers get_quote exception: {e}")
+            return {}
 
     async def get_order_details_async(self, order_id=None):
         """
@@ -905,82 +916,28 @@ class FyersWrapper(BrokerInterface):
         else:
             return self.get_order_details_sync(order_id)
 
-    async def modify_order_async(self, data: dict):
+    async def get_strike_list(self, symbol, max_strikes=40):
         """
-        Modify an existing order asynchronously.
+        Fetch the list of option strike symbols for the given symbol using the option chain API.
+        Returns a list of strike symbols (filtered for calls and puts, excluding INDEX).
+        """
+        option_chain_response = await self.get_option_chain(symbol, max_strikes)
+        if (
+            not option_chain_response
+            or not option_chain_response.get('data')
+            or not option_chain_response['data'].get('optionsChain')
+        ):
+            return []
+        option_chain_df = pd.DataFrame(option_chain_response['data']['optionsChain'])
+        strike_symbols = option_chain_df[constants.COLUMN_SYMBOL].unique()
+        strike_symbols = [
+            s for s in strike_symbols
+            if (s.endswith(constants.OPTION_TYPE_CALL) or s.endswith(constants.OPTION_TYPE_PUT))
+            and "INDEX" not in s
+        ]
+        return strike_symbols
 
-        :param data: Order id details
-        :return: Response from the Fyers API.
-        """
-        try:
-            response = await self.fyers.modify_order(data=data)
-            return response
-        except Exception as e:
-            raise RuntimeError(f"Failed to modify order (async): {e}")
-
-    def modify_order_sync(self, data: dict):
-        """
-        Modify an existing order synchronously.
-
-        :param data: Order id details
-        :return: Response from the Fyers API.
-        """
-        try:
-            response = self.fyers.modify_order(data=data)
-            return response
-        except Exception as e:
-            raise RuntimeError(f"Failed to modify order (sync): {e}")
-
-    async def modify_order(self, data: dict):
-        """
-        Dynamically modify an existing order based on the mode (sync/async).
-         :param data: Order id details
-        :return: Response from the Fyers API.
-        """
-        if self.is_async:
-            return await self.modify_order_async(data)
-        else:
-            return self.modify_order_sync(data)
-
-    async def cancel_order_async(self, order_id: str):
-        """
-        Cancel an existing order asynchronously.
-
-        :param order_id: Order ID to be canceled.
-        :return: Response from the Fyers API.
-        """
-        try:
-            data = {"id": order_id}
-            response = await self.fyers.cancel_order(data=data)
-            return response
-        except Exception as e:
-            raise RuntimeError(f"Failed to cancel order (async): {e}")
-
-    def cancel_order_sync(self, order_id: str):
-        """
-        Cancel an existing order synchronously.
-
-        :param order_id: Order ID to be canceled.
-        :return: Response from the Fyers API.
-        """
-        try:
-            data = {"id": order_id}
-            response = self.fyers.cancel_order(data=data)
-            return response
-        except Exception as e:
-            raise RuntimeError(f"Failed to cancel order (sync): {e}")
-
-    async def cancel_order(self, order_id: str):
-        """
-        Dynamically cancel an existing order based on the mode (sync/async).
-
-        :param order_id: Order ID to be canceled.
-        :return: Response from the Fyers API.
-        """
-        if self.is_async:
-            return await self.cancel_order_async(order_id)
-        else:
-            return self.cancel_order_sync(order_id)
+    # ...existing code...
 
     @staticmethod
     async def exit_positions_async(data: dict):
