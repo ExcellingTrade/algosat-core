@@ -324,6 +324,9 @@ class FyersWrapper(BrokerInterface):
         """
         try:
             raw = await self.get_balance()
+            # If get_balance() returns a coroutine, await it again (defensive, but should not happen)
+            if asyncio.iscoroutine(raw):
+                raw = await raw
             if not raw or not isinstance(raw, dict) or raw.get("code") != 200:
                 logger.error(f"Fyers get_balance_summary: Invalid or failed response: {raw}")
                 return {}

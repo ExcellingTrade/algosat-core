@@ -6,7 +6,7 @@ import asyncio
 import logging
 import traceback
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone # Added timezone
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional, List
 import os
 
@@ -39,7 +39,7 @@ from algosat.core.db import AsyncSessionLocal, get_user_by_username, get_user_by
 from .auth_dependencies import get_current_user
 
 # Import existing API routes
-from .routes import strategies, brokers, positions, trades, orders, nse_data # Uncommented
+from .routes import strategies, brokers, positions, trades, orders, nse_data, balance # Uncommented
 
 # Use default port for now
 API_PORT = 8000
@@ -378,47 +378,60 @@ async def get_metrics():
 HOSTINGER_VM_ID = os.environ.get("HOSTINGER_VM_ID")
 HOSTINGER_API_TOKEN = os.environ.get("HOSTINGER_API_TOKEN")
 HOSTINGER_METRICS_URL = f"https://developers.hostinger.com/api/vps/v1/virtual-machines/{HOSTINGER_VM_ID}/metrics"
+HOSTINGER_VM_URL = f"https://developers.hostinger.com/api/vps/v1/virtual-machines/{HOSTINGER_VM_ID}"
 
 def get_hostinger_headers():
     if not HOSTINGER_API_TOKEN:
         raise RuntimeError("Hostinger API token not set in environment variable HOSTINGER_API_TOKEN")
     return {"Authorization": f"Bearer {HOSTINGER_API_TOKEN}", "Accept": "application/json"}
 
-async def fetch_hostinger_metrics(date_from: str, date_to: str) -> dict:
+async def fetch_hostinger_metrics_last_hour() -> dict:
+    """
+    Fetch Hostinger metrics for the last 1 hour only.
+    """
     url = HOSTINGER_METRICS_URL
     headers = get_hostinger_headers()
-    params = {"date_from": date_from, "date_to": date_to}
+    now = datetime.now(timezone.utc)
+    one_hour_ago = now - timedelta(hours=1)
+    params = {"date_from": one_hour_ago.isoformat(), "date_to": now.isoformat()}
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=params, timeout=10) as resp:
             if resp.status != 200:
                 raise HTTPException(status_code=502, detail=f"Hostinger API error: {resp.status}")
             return await resp.json()
 
+async def fetch_hostinger_vm_details() -> dict:
+    """
+    Fetch Hostinger VM details.
+    """
+    url = HOSTINGER_VM_URL
+    headers = get_hostinger_headers()
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, timeout=10) as resp:
+            if resp.status != 200:
+                raise HTTPException(status_code=502, detail=f"Hostinger VM API error: {resp.status}")
+            return await resp.json()
+
 @app.get("/system/status")
 async def get_system_status(current_user: Dict = Depends(get_current_user)):
     """Get comprehensive system status (authenticated endpoint, uses Hostinger VPS API)."""
     try:
-        # Use current month as default range
-        now = datetime.now(timezone.utc)
-        date_from = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0).isoformat()
-        date_to = now.isoformat()
-        hostinger_metrics = await fetch_hostinger_metrics(date_from, date_to)
-        # status_data = {
-        #     "hostinger_vps_metrics": hostinger_metrics,
-        #     "system": {
-        #         "note": "For full VPS metrics, see hostinger_vps_metrics. Local psutil metrics removed for efficiency."
-        #     },
-        #     "security": {
-        #         "active_sessions": 0,  # To be implemented
-        #         "recent_alerts": [],   # To be implemented
-        #         "blocked_ips": [],     # To be implemented
-        #     },
-        #     "errors": {
-        #         "recent_errors": await error_tracker.get_recent_errors(limit=10),
-        #         "error_trends": await error_tracker.get_error_trends(),
-        #     }
-        # }
-        return hostinger_metrics  # Return Hostinger metrics directly for now   
+        # Fetch metrics for the last 1 hour
+        metrics_data = await fetch_hostinger_metrics_last_hour()
+        # Extract the latest value for each metric field
+        latest_metrics = {}
+        # if metrics_data and "metrics" in metrics_data:
+        #     for metric_name, metric_list in metrics_data["metrics"].items():
+        #         if isinstance(metric_list, list) and metric_list:
+        #             # Take the last (latest) value
+        #             latest_metrics[metric_name] = metric_list[-1]
+        # # Fetch VM details
+        vm_details = await fetch_hostinger_vm_details()
+        # Combine and return
+        return {
+            "vm": vm_details,
+            "metrics": metrics_data
+        }
     except Exception as e:
         error_tracker.track_error(
             error=e,
@@ -600,6 +613,7 @@ create_secured_router(positions.router, "/positions", ["Positions"]) # Uncomment
 create_secured_router(trades.router, "/trades", ["Trades"]) # Uncommented
 create_secured_router(orders.router, "/orders", ["Orders"]) # Added orders router
 create_secured_router(nse_data.router, "/nse", ["NSE Data"]) # Added NSE Data router
+create_secured_router(balance.router, "/api/v1", ["Balance Summary"]) # Added balance router
 
 @app.get("/")
 async def root():
@@ -679,7 +693,7 @@ if __name__ == "__main__":
     uvicorn.run(
         app,  # Direct reference to app instead of string import
         host="0.0.0.0",
-        port=8001,  # Use port 8001 to avoid conflicts
+        port=int(os.environ.get("API_PORT", 8001)),  # Use API_PORT env variable or default to 8001
         reload=False,  # Disable in production
         workers=1,     # Single worker for VPS deployment
         log_level="info",

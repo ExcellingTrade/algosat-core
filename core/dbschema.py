@@ -187,5 +187,16 @@ users = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 )
 
+broker_balance_summaries = Table(
+    "broker_balance_summaries", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("broker_id", Integer, ForeignKey("broker_credentials.id"), nullable=False, index=True),
+    Column("summary", JSON, nullable=False),  # Stores the full balance summary as returned by get_balance_summary
+    Column("date", DateTime(timezone=True), nullable=False),  # Date (midnight) for the entry
+    Column("fetched_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    UniqueConstraint("broker_id", "date", name="uq_broker_balance_brokerid_date"),
+    Index("ix_broker_balance_brokerid_date", "broker_id", "date"),
+)
+
 # NOTE: The migrations folder is deprecated and will be removed as per current development workflow.
 # All schema changes should be handled by dropping and recreating tables during development.

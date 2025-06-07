@@ -16,6 +16,7 @@ from datetime import datetime
 from algosat.core.data_manager import DataManager
 from algosat.core.broker_manager import BrokerManager
 from algosat.core.order_manager import get_order_manager
+from algosat.core.balance_summary_monitor import BalanceSummaryMonitor
 
 logger = get_logger(__name__)
 
@@ -38,6 +39,11 @@ async def main():
 
     # 3) Initialize broker configurations, prompt for missing credentials, and authenticate all enabled brokers
     await broker_manager.setup()
+
+    # Start BalanceSummaryMonitor
+    logger.info("🔄 Starting BalanceSummaryMonitor...")
+    balance_summary_monitor = BalanceSummaryMonitor(broker_manager)
+    asyncio.create_task(balance_summary_monitor.start())
 
     # Print broker profiles and positions before starting the strategy engine
     for broker_name, broker in broker_manager.brokers.items():

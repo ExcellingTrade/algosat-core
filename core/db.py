@@ -11,14 +11,14 @@ except ModuleNotFoundError as e:
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import inspect, Table, MetaData, update, select, delete, func, text # Modified import
+from sqlalchemy import inspect, Table, MetaData, update, select, delete, func, text, and_ # Modified import
 
 import os
-from datetime import datetime  # moved to top
+from datetime import datetime, timezone  # moved to top
 from algosat.common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
 from algosat.core.time_utils import get_ist_now
 
-from algosat.core.dbschema import metadata, orders, broker_credentials, strategies, strategy_configs, users # Added users
+from algosat.core.dbschema import metadata, orders, broker_credentials, strategies, strategy_configs, users, broker_balance_summaries # Added users, broker_balance_summaries
 
 # 1) Create the Async Engine
 engine = create_async_engine(
@@ -579,5 +579,71 @@ async def get_all_open_orders(session):
         OrderStatus.COMPLETE
     ]
     stmt = select(orders).where(~orders.c.status.in_([s.value for s in final_statuses]))
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
+
+async def insert_broker_balance_summary(session, broker_id: int, summary: dict):
+    """
+    Insert a new broker balance summary record.
+    """
+    stmt = broker_balance_summaries.insert().values(
+        broker_id=broker_id,
+        summary=summary,
+        fetched_at=datetime.utcnow()
+    )
+    await session.execute(stmt)
+    await session.commit()
+
+async def upsert_broker_balance_summary(session, broker_id: int, summary: dict):
+    """
+    Upsert broker balance summary for today (overwrite if exists for today).
+    """
+    # Get today's date at midnight UTC
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    stmt = select(broker_balance_summaries).where(
+        and_ (broker_balance_summaries.c.broker_id == broker_id, broker_balance_summaries.c.date == today)
+    )
+    result = await session.execute(stmt)
+    row = result.first()
+    if row:
+        # Update existing
+        await session.execute(
+            broker_balance_summaries.update()
+            .where(broker_balance_summaries.c.id == row._mapping['id'])
+            .values(summary=summary, fetched_at=datetime.now(timezone.utc))
+        )
+    else:
+        # Insert new
+        await session.execute(
+            broker_balance_summaries.insert().values(
+                broker_id=broker_id,
+                summary=summary,
+                date=today,
+                fetched_at=datetime.now(timezone.utc)
+            )
+        )
+    await session.commit()
+
+async def get_latest_broker_balance_summary(session, broker_id: int):
+    """
+    Get today's broker balance summary for a broker.
+    """
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    stmt = (
+        select(broker_balance_summaries)
+        .where(and_(broker_balance_summaries.c.broker_id == broker_id, broker_balance_summaries.c.date == today))
+        .order_by(broker_balance_summaries.c.fetched_at.desc())
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    row = result.first()
+    return dict(row._mapping) if row else None
+
+async def get_latest_balance_summaries_for_all_brokers(session):
+    """
+    Get today's balance summary for each broker (by broker_id).
+    """
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    stmt = select(broker_balance_summaries).where(broker_balance_summaries.c.date == today)
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
