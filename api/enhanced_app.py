@@ -39,7 +39,7 @@ from algosat.core.db import AsyncSessionLocal, get_user_by_username, get_user_by
 from .auth_dependencies import get_current_user
 
 # Import existing API routes
-from .routes import strategies, brokers, positions, trades, orders, nse_data, balance # Uncommented
+from .routes import strategies, brokers, positions, trades, orders, nse_data, balance, logs # Added logs import
 
 # Use default port for now
 API_PORT = 8000
@@ -614,6 +614,7 @@ create_secured_router(trades.router, "/trades", ["Trades"]) # Uncommented
 create_secured_router(orders.router, "/orders", ["Orders"]) # Added orders router
 create_secured_router(nse_data.router, "/nse", ["NSE Data"]) # Added NSE Data router
 create_secured_router(balance.router, "/api/v1", ["Balance Summary"]) # Added balance router
+create_secured_router(logs.router, "/logs", ["Log Management"]) # Added logs router
 
 @app.get("/")
 async def root():

@@ -46,8 +46,8 @@ logger = get_logger("broker_utils")
 progress_handler = ProgressHandler.get_instance()
 
 HOLIDAY_FILE = os.path.join(constants.CONFIG_DIR, "nse_holidays.json")
-bot_token = "7625027938:AAFh5gQFcRdNzbIBvVfqEMj54FlzE67aYE4"
-chat_id = "7715212804"
+bot_token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 # Global variable to track last sent Telegram message timestamp
 last_sent_time = None
