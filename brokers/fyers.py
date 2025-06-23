@@ -247,12 +247,12 @@ class FyersWrapper(BrokerInterface):
             full_config["credentials"] = fyers_creds
             await upsert_broker_credentials("fyers", full_config)
             # Initialize fyersModel with new token
-            self.token = access_token
+            self.token = response["access_token"]
             self.appId = api_key
             self.fyers = fyersModel.FyersModel(
                 client_id=api_key,
                 is_async=self.is_async,
-                token=access_token,
+                token=response["access_token"],
                 log_path=constants.FYER_LOG_DIR
             )
             logger.debug("Successfully authenticated and stored new Fyers access token.")

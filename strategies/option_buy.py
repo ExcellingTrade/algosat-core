@@ -124,7 +124,7 @@ class OptionBuyStrategy(StrategyBase):
         # 1. Wait for first candle completion
         # await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
         # 2. Calculate first candle data using the correct trade day
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=5)
+        trade_day = get_trade_day(get_ist_datetime())  #- timedelta(days=5)
         # 3. Fetch option chain and identify strikes
         cache = load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
@@ -164,7 +164,7 @@ class OptionBuyStrategy(StrategyBase):
         """Synchronize self._positions with open orders in the database for all strikes for the current trade day."""
         self._positions = {}
         async with AsyncSessionLocal() as session:
-            trade_day = get_trade_day(get_ist_datetime() - timedelta(days=5))
+            trade_day = get_trade_day(get_ist_datetime()) # - timedelta(days=5))
             strategy_config_id = self.get_config_id()
             for strike in self._strikes:
                 open_orders = await get_open_orders_for_symbol_and_tradeday(session, strike, trade_day, strategy_config_id)
@@ -182,7 +182,7 @@ class OptionBuyStrategy(StrategyBase):
             return None
         trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
-        trade_day = get_trade_day(get_ist_datetime()) - timedelta(days=5)
+        trade_day = get_trade_day(get_ist_datetime()) # - timedelta(days=5)
         # 1. Fetch history for all strikes
         history_data = await self.fetch_history_data(
             self.dp, self._strikes, trade_day, trade_config
@@ -196,7 +196,7 @@ class OptionBuyStrategy(StrategyBase):
             for strike, data in history_data.items()
             if data is not None and not getattr(data, 'empty', False)
         }
-        await self.sync_open_positions()  # Sync in-memory with DB
+        # await self.sync_open_positions()  # Sync in-memory with DB
         # 3. Evaluate trade signal for each strike
         for strike, data in indicator_data.items():
             try:
@@ -461,3 +461,47 @@ class OptionBuyStrategy(StrategyBase):
         if tsignal:
             return await self.order_manager.broker_manager.build_order_request_for_strategy(tsignal, self.cfg)
         return None
+
+    def update_trailing_stop_loss(self, order_id: int, ltp: float, history: dict, order_manager=None):
+        """
+        ATR-based trailing stop loss logic. Updates stop_loss in DB if new stop is higher (for long positions).
+        Args:
+            order_id: The order ID to update.
+            ltp: Latest traded price.
+            history: Candle/history data for the symbol.
+            order_manager: OrderManager instance (required for DB update).
+        """
+        try:
+            if not history:
+                return
+            # Use the latest candle for trailing logic
+            symbol = None
+            for k in history:
+                if history[k] is not None and len(history[k]) > 0:
+                    symbol = k
+                    break
+            if not symbol:
+                return
+            df = history[symbol]
+            if len(df) < 2:
+                return
+            last_candle = df.iloc[-1]
+            atr = last_candle.get('atr')
+            if atr is None:
+                return
+            trail_atr_mult = self.trade.get('trail_atr_mult', 2)
+            new_trail_sl = last_candle['close'] - atr * trail_atr_mult
+            # Fetch current stop_loss from DB
+            import asyncio
+            async def update_db():
+                async with AsyncSessionLocal() as session:
+                    order = await get_order_by_id(session, order_id)
+                    current_sl = order.get('stop_loss') if order else None
+                    # Only update if new stop is higher (for long)
+                    if current_sl is not None and new_trail_sl > current_sl and ltp > new_trail_sl:
+                        # Update in DB
+                        if order_manager:
+                            await order_manager.update_order_stop_loss_in_db(order_id, new_trail_sl)
+            asyncio.create_task(update_db())
+        except Exception as e:
+            logger.error(f"Error in update_trailing_stop_loss for order_id={order_id}: {e}")

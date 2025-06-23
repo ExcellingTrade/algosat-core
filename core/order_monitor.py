@@ -69,6 +69,13 @@ class OrderMonitor:
                 await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.CANCELLED)
             # Let strategy decide exit based on latest price
             ltp = await self.data_manager.get_ltp(agg.symbol, self.order_id)
+            history = await self.data_manager.fetch_history(
+                agg.symbol,
+                interval_minutes=getattr(self.strategy, "entry_interval", 1),
+                lookback=getattr(self.strategy, "exit_lookback", 1) + 1
+            )
+            # Update trailing stop loss before exit check
+            self.strategy.update_trailing_stop_loss(self.order_id, ltp, history, self.order_manager)
             if ltp is not None:
                 exit_req = await self.strategy.evaluate_price_exit(self.order_id, ltp)
                 if exit_req:
@@ -85,6 +92,9 @@ class OrderMonitor:
                 interval_minutes=getattr(self.strategy, "entry_interval", 1),
                 lookback=getattr(self.strategy, "exit_lookback", 1) + 1
             )
+            ltp = await self.data_manager.get_ltp(agg.symbol, self.order_id)
+            # Update trailing stop loss before exit check
+            self.strategy.update_trailing_stop_loss(self.order_id, ltp, history, self.order_manager)
             exit_req = await self.strategy.evaluate_candle_exit(self.order_id, history)
             if exit_req:
                 await self.order_manager.place_order(exit_req, strategy_name=self.strategy.name)

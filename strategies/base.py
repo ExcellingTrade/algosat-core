@@ -63,3 +63,14 @@ class StrategyBase(ABC):
         Return an order payload dict if exit condition is met, otherwise None.
         """
         ...
+
+    def update_trailing_stop_loss(self, order_id: int, ltp: float, history: dict, order_manager=None):
+        """
+        Update trailing stop loss for the given order. Default: no-op. Override in concrete strategies.
+        Args:
+            order_id: The order ID to update.
+            ltp: Latest traded price.
+            history: Candle/history data for the symbol.
+            order_manager: Optional, for DB update if needed.
+        """
+        pass

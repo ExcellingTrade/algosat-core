@@ -353,6 +353,20 @@ class OrderManager:
             )
             logger.debug(f"Order {order_id} status updated to {status} in DB.")
 
+    async def update_order_stop_loss_in_db(self, order_id: int, stop_loss: float):
+        """
+        Update the stop_loss value for an order in the DB.
+        """
+        from algosat.core.db import AsyncSessionLocal, update_rows_in_table
+        from algosat.core.dbschema import orders
+        async with AsyncSessionLocal() as session:
+            await update_rows_in_table(
+                target_table=orders,
+                condition=orders.c.id == order_id,
+                new_values={"stop_loss": stop_loss}
+            )
+            logger.debug(f"Order {order_id} stop_loss updated to {stop_loss} in DB.")
+
     async def get_all_broker_order_details(self) -> list:
         """
         Fetch and normalize order details from all trade-enabled brokers via BrokerManager.
