@@ -150,129 +150,148 @@ class DataManager:
         return self.rate_limiter
 
     async def ensure_broker(self):
-        logger.debug(f"Entering ensure_broker. Current broker: {self.broker}, broker_name: {self.broker_name}")
-        if self.broker:
-            logger.debug(f"Broker already set: {self.broker} (type: {type(self.broker)})")
-            return
-        if self.broker_manager:
-            logger.debug(f"Attempting to get broker from broker_manager with broker_name: {self.broker_name}")
-            try:
-                self.broker = await self.broker_manager.get_data_broker(broker_name=self.broker_name)
-                logger.debug(f"Broker set from manager: {self.broker} (type: {type(self.broker)})")
-            except Exception as e:
-                logger.error(f"Exception in get_data_broker: {e}", exc_info=True)
-                raise
-            # If broker_name is not set, but a broker is found, set broker_name to the actual broker used
-            if not self.broker_name and self.broker:
-                for name, broker in self.broker_manager.brokers.items():
-                    if broker is self.broker:
-                        self.broker_name = name
-                        logger.debug(f"broker_name set from broker_manager mapping: {self.broker_name}")
-                        break
-        if not self.broker:
-            logger.error("No broker available for DataManager! Raising RuntimeError.")
-            raise RuntimeError("No broker available for DataManager!")
-        logger.debug(f"Exiting ensure_broker. Final broker: {self.broker}, broker_name: {self.broker_name}")
+        try:
+            logger.debug(f"Entering ensure_broker. Current broker: {self.broker}, broker_name: {self.broker_name}")
+            if self.broker:
+                logger.debug(f"Broker already set: {self.broker} (type: {type(self.broker)})")
+                return
+            if self.broker_manager:
+                logger.debug(f"Attempting to get broker from broker_manager with broker_name: {self.broker_name}")
+                try:
+                    self.broker = await self.broker_manager.get_data_broker(broker_name=self.broker_name)
+                    logger.debug(f"Broker set from manager: {self.broker} (type: {type(self.broker)})")
+                except Exception as e:
+                    logger.error(f"Exception in get_data_broker: {e}", exc_info=True)
+                    raise
+                if not self.broker_name and self.broker:
+                    for name, broker in self.broker_manager.brokers.items():
+                        if broker is self.broker:
+                            self.broker_name = name
+                            logger.debug(f"broker_name set from broker_manager mapping: {self.broker_name}")
+                            break
+            if not self.broker:
+                logger.error("No broker available for DataManager! Raising RuntimeError.")
+                raise RuntimeError("No broker available for DataManager!")
+            logger.debug(f"Exiting ensure_broker. Final broker: {self.broker}, broker_name: {self.broker_name}")
+        except Exception as e:
+            logger.error(f"Error in ensure_broker: {e}", exc_info=True)
+            raise
 
     async def get_option_chain(self, symbol, expiry=None, ttl=120):
-        if not self.broker:
-            raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
-        cache_key = f"option_chain:{symbol}:{expiry}"
-        cached = self.cache.get(cache_key, ttl=ttl)
-        if cached is not None:
-            return cached
-        async def _fetch():
-            async with self.get_active_rate_limiter():
-                result = self.broker.get_option_chain(symbol, expiry)
-                option_chain = await result if inspect.isawaitable(result) else result
-                validate_broker_response(option_chain, expected_type="option_chain", symbol=symbol)
-                self.cache.set(cache_key, option_chain, ttl=ttl)
-                return option_chain
-        return await _async_retry(_fetch)
-
-    async def get_history(self, symbol, from_date, to_date, ohlc_interval, ins_type="", ttl=600, cache=True):
-        if not self.broker:
-            raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
-        from algosat.core.time_utils import get_ist_datetime
-        ist_now = get_ist_datetime()
-        from_dt = pd.to_datetime(from_date)
-        to_dt = pd.to_datetime(to_date)
-        # Only adjust the date(s) that are in the future
-        if from_dt > ist_now:
-            from algosat.common.broker_utils import get_trade_day
-            prev_trade_day = get_trade_day(ist_now - timedelta(days=1))
-            from_time = from_dt.time()
-            from_dt = datetime.combine(prev_trade_day, from_time)
-            logger.debug(f"Adjusted from_date to previous trade day (IST): {from_dt} for symbol {symbol}")
-        if to_dt > ist_now:
-            from algosat.common.broker_utils import get_trade_day
-            prev_trade_day = get_trade_day(ist_now - timedelta(days=1))
-            to_time = to_dt.time()
-            to_dt = datetime.combine(prev_trade_day, to_time)
-            logger.debug(f"Adjusted to_date to previous trade day (IST): {to_dt} for symbol {symbol}")
-        cache_key = f"history:{symbol}:{from_dt}:{to_dt}:{ohlc_interval}:{ins_type}"
-        if cache:
+        try:
+            if not self.broker:
+                raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
+            cache_key = f"option_chain:{symbol}:{expiry}"
             cached = self.cache.get(cache_key, ttl=ttl)
             if cached is not None:
-                logger.debug(f"Cache hit for history: {cache_key}") 
                 return cached
-        async def _fetch():
-            async with self.get_active_rate_limiter():
-                result = self.broker.get_history(symbol, from_dt, to_dt, ohlc_interval, ins_type)
-                history = await result if inspect.isawaitable(result) else result
-                validate_broker_response(history, expected_type="history", symbol=symbol)
-                if cache:
-                    self.cache.set(cache_key, history, ttl=ttl)
-                return history
-        return await _async_retry(_fetch)
+            async def _fetch():
+                async with self.get_active_rate_limiter():
+                    result = self.broker.get_option_chain(symbol, expiry)
+                    option_chain = await result if inspect.isawaitable(result) else result
+                    validate_broker_response(option_chain, expected_type="option_chain", symbol=symbol)
+                    self.cache.set(cache_key, option_chain, ttl=ttl)
+                    return option_chain
+            return await _async_retry(_fetch)
+        except Exception as e:
+            logger.error(f"Error in get_option_chain for symbol={symbol}, expiry={expiry}: {e}", exc_info=True)
+            raise
+
+    async def get_history(self, symbol, from_date, to_date, ohlc_interval, ins_type="", ttl=600, cache=True):
+        try:
+            if not self.broker:
+                raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
+            from algosat.core.time_utils import get_ist_datetime
+            ist_now = get_ist_datetime()
+            from_dt = pd.to_datetime(from_date)
+            to_dt = pd.to_datetime(to_date)
+            if from_dt > ist_now:
+                from algosat.common.broker_utils import get_trade_day
+                prev_trade_day = get_trade_day(ist_now - timedelta(days=1))
+                from_time = from_dt.time()
+                from_dt = datetime.combine(prev_trade_day, from_time)
+                logger.debug(f"Adjusted from_date to previous trade day (IST): {from_dt} for symbol {symbol}")
+            if to_dt > ist_now:
+                from algosat.common.broker_utils import get_trade_day
+                prev_trade_day = get_trade_day(ist_now - timedelta(days=1))
+                to_time = to_dt.time()
+                to_dt = datetime.combine(prev_trade_day, to_time)
+                logger.debug(f"Adjusted to_date to previous trade day (IST): {to_dt} for symbol {symbol}")
+            cache_key = f"history:{symbol}:{from_dt}:{to_dt}:{ohlc_interval}:{ins_type}"
+            if cache:
+                cached = self.cache.get(cache_key, ttl=ttl)
+                if cached is not None:
+                    logger.debug(f"Cache hit for history: {cache_key}") 
+                    return cached
+            async def _fetch():
+                async with self.get_active_rate_limiter():
+                    result = self.broker.get_history(symbol, from_dt, to_dt, ohlc_interval, ins_type)
+                    history = await result if inspect.isawaitable(result) else result
+                    validate_broker_response(history, expected_type="history", symbol=symbol)
+                    if cache:
+                        self.cache.set(cache_key, history, ttl=ttl)
+                    return history
+            return await _async_retry(_fetch)
+        except Exception as e:
+            logger.error(f"Error in get_history for symbol={symbol}: {e}", exc_info=True)
+            raise
 
     async def get_strike_list(self, symbol, max_strikes=40):
-        if not self.broker:
-            raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
-        if hasattr(self.broker, "get_strike_list"):
-            return await self.broker.get_strike_list(symbol, max_strikes)
-        raise NotImplementedError(f"Broker {self.get_current_broker_name()} does not implement get_strike_list.")
+        try:
+            if not self.broker:
+                raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
+            if hasattr(self.broker, "get_strike_list"):
+                return await self.broker.get_strike_list(symbol, max_strikes)
+            raise NotImplementedError(f"Broker {self.get_current_broker_name()} does not implement get_strike_list.")
+        except Exception as e:
+            logger.error(f"Error in get_strike_list for symbol={symbol}: {e}", exc_info=True)
+            raise
 
     async def get_broker_symbol(self, symbol, instrument_type=None):
-        broker_name = self.get_current_broker_name()
-        if not self.broker_manager or not broker_name:
-            raise RuntimeError("BrokerManager or broker_name not set in DataManager.")
-        return await self.broker_manager.get_symbol_info(broker_name, symbol, instrument_type)
+        try:
+            broker_name = self.get_current_broker_name()
+            if not self.broker_manager or not broker_name:
+                raise RuntimeError("BrokerManager or broker_name not set in DataManager.")
+            return await self.broker_manager.get_symbol_info(broker_name, symbol, instrument_type)
+        except Exception as e:
+            logger.error(f"Error in get_broker_symbol for symbol={symbol}, instrument_type={instrument_type}: {e}", exc_info=True)
+            raise
 
     async def get_order_aggregate(self, parent_order_id: int) -> OrderAggregate:
-        """
-        Return an OrderAggregate for the given parent_order_id, including broker execution info.
-        """
-        from algosat.core.db import AsyncSessionLocal
-        async with AsyncSessionLocal() as session:
-            order_row = await get_order_by_id(session, parent_order_id)
-            broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
-            broker_orders: List[BrokerOrder] = []
-            for be in broker_execs:
-                # Use broker_order_ids (actual broker order id(s)), not local DB id
-                broker_orders.append(BrokerOrder(
-                    broker_id=be.get("broker_id"),
-                    order_id=be.get("broker_order_ids"),  # This may be a list or str
-                    status=be.get("status"),
-                    raw_response=be.get("raw_response")
-                ))
-            return OrderAggregate(
-                strategy_config_id=order_row.get("strategy_config_id"),
-                parent_order_id=parent_order_id,
-                symbol=order_row.get("symbol"),
-                entry_price=order_row.get("entry_price"),
-                side=order_row.get("side"),
-                broker_orders=broker_orders
-            )
+        try:
+            from algosat.core.db import AsyncSessionLocal
+            async with AsyncSessionLocal() as session:
+                order_row = await get_order_by_id(session, parent_order_id)
+                broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
+                broker_orders: List[BrokerOrder] = []
+                for be in broker_execs:
+                    broker_orders.append(BrokerOrder(
+                        broker_id=be.get("broker_id"),
+                        order_id=be.get("broker_order_ids"),
+                        status=be.get("status"),
+                        raw_response=be.get("raw_response")
+                    ))
+                return OrderAggregate(
+                    strategy_config_id=order_row.get("strategy_config_id"),
+                    parent_order_id=parent_order_id,
+                    symbol=order_row.get("symbol"),
+                    entry_price=order_row.get("entry_price"),
+                    side=order_row.get("side"),
+                    broker_orders=broker_orders
+                )
+        except Exception as e:
+            logger.error(f"Error in get_order_aggregate for parent_order_id={parent_order_id}: {e}", exc_info=True)
+            raise
 
     async def get_broker_name_by_id(self, broker_id: int) -> str:
-        """
-        Utility to map broker_id to broker_name using the broker_credentials table.
-        """
-        from algosat.core.db import AsyncSessionLocal, get_broker_by_id
-        async with AsyncSessionLocal() as session:
-            broker = await get_broker_by_id(session, broker_id)
-            return broker["broker_name"] if broker else None
+        try:
+            from algosat.core.db import AsyncSessionLocal, get_broker_by_id
+            async with AsyncSessionLocal() as session:
+                broker = await get_broker_by_id(session, broker_id)
+                return broker["broker_name"] if broker else None
+        except Exception as e:
+            logger.error(f"Error in get_broker_name_by_id for broker_id={broker_id}: {e}", exc_info=True)
+            raise
 
 
 # Example: instantiate a global DataManager with per-broker rate limiting

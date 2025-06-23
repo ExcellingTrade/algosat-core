@@ -887,6 +887,8 @@ class FyersWrapper(BrokerInterface):
                 response = await loop.run_in_executor(None, self.fyers.orderbook)
             else:
                 response = await loop.run_in_executor(None, self.fyers.orderbook, {"id": order_id})
+            if asyncio.iscoroutine(response):
+                response = await response
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to fetch order details (async): {e}")
@@ -915,7 +917,10 @@ class FyersWrapper(BrokerInterface):
         :return: Response from the Fyers API.
         """
         if self.is_async:
-            return await self.get_order_details_async(order_id)
+            response = await self.get_order_details_async(order_id)
+            if asyncio.iscoroutine(response):
+                response = await response
+            return response
         else:
             return self.get_order_details_sync(order_id)
 

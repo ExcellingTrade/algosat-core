@@ -252,8 +252,8 @@ class OrderResponse(BaseModel):
 
     @classmethod
     def from_zerodha(cls, response: dict, order_request=None, strategy_id=None, signal_id=None) -> "OrderResponse":
-        order_id = response.get("data", {}).get("order_id")
-        status = OrderStatus.AWAITING_ENTRY if response.get("status") == "success" else OrderStatus.FAILED
+        order_id = response.get("order_id")
+        status = OrderStatus.AWAITING_ENTRY if response.get("status") == "TRIGGER PENDING" else response.get("status")  
         return cls(
             status=status,
             order_ids=[order_id] if order_id else [],

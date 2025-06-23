@@ -562,7 +562,7 @@ async def get_broker_executions_by_order_id(session, order_id: int):
     Return all broker_executions rows for a given logical order_id, including broker_id for downstream use.
     """
     from algosat.core.dbschema import broker_executions
-    stmt = select(broker_executions).where(broker_executions.c.order_id == order_id)
+    stmt = select(broker_executions).where(broker_executions.c.parent_order_id == order_id)
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
 

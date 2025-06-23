@@ -24,7 +24,7 @@ class BalanceSummaryMonitor:
                     if broker_obj and hasattr(broker_obj, "get_balance_summary"):
                         summary = await broker_obj.get_balance_summary()
                         await upsert_broker_balance_summary(session, broker_id, summary)
-                        logger.info(f"Updated balance summary for {broker_name}")
+                        logger.debug(f"Updated balance summary for {broker_name}")
                 except Exception as e:
                     logger.error(f"Failed to fetch/store balance for {broker_name}: {e}")
 

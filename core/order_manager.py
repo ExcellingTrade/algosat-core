@@ -151,14 +151,13 @@ class OrderManager:
     ) -> Dict[str, Any]:
         """
         Split the order into chunks if the quantity exceeds max_nse_qty and place each chunk as a separate order.
-        Each response is inserted into broker_execs with the parent order id.
+        Each broker gets a single broker_executions entry with all order_ids from the splits.
         """
         logger.info(f"Splitting order for symbol={order_payload.symbol}, total_qty={order_payload.quantity}, max_nse_qty={max_nse_qty}")
         trigger_price_diff = 0.0
         if hasattr(config, 'trade') and isinstance(config.trade, dict):
             trigger_price_diff = config.trade.get('trigger_price_diff', 0.0)
         total_qty = order_payload.quantity
-        # No need to check total_qty <= max_nse_qty here, already checked in place_order
         responses = []
         original_price = getattr(order_payload, 'price', 0) or order_payload.extra.get('entry_price', 0)
         max_price_increase = 2.00
@@ -166,6 +165,11 @@ class OrderManager:
         current_price = original_price
         qty_left = total_qty
         slice_num = 0
+        # Aggregate order_ids and messages per broker
+        broker_order_ids_map = {}  # broker_name -> list of order_ids
+        broker_order_messages_map = {}  # broker_name -> list of messages
+        broker_status_map = {}  # broker_name -> last status
+        broker_raw_responses = {}  # broker_name -> list of raw responses
         async with AsyncSessionLocal() as session:
             parent_order_id = await self._insert_and_get_order_id(
                 config=config,
@@ -188,7 +192,17 @@ class OrderManager:
                 broker_manager = self.broker_manager
                 broker_responses = await broker_manager.place_order(slice_payload, strategy_name=strategy_name)
                 for broker_name, response in broker_responses.items():
-                    await self._insert_broker_execution(session, parent_order_id, broker_name, response)
+                    # Assume response['order_id'] is a single string (not a list)
+                    order_id = response.get('order_id') or (response.get('order_ids')[0] if isinstance(response.get('order_ids'), list) else response.get('order_ids'))
+                    if order_id:
+                        broker_order_ids_map.setdefault(broker_name, []).append(order_id)
+                    # Aggregate messages
+                    order_message = response.get('order_messages')
+                    if order_message:
+                        broker_order_messages_map.setdefault(broker_name, []).append(order_message)
+                    # Track last status and raw response for this broker
+                    broker_status_map[broker_name] = response.get('status')
+                    broker_raw_responses.setdefault(broker_name, []).append(response)
                     responses.append({
                         'broker_name': broker_name,
                         'response': response,
@@ -199,6 +213,28 @@ class OrderManager:
                         current_price = min(original_price + max_price_increase, current_price + price_increment)
                 qty_left -= qty
                 slice_num += 1
+            # After all slices, insert a single broker_executions row per broker
+            for broker_name in broker_order_ids_map:
+                # Consolidate raw_responses as a dict: order_id -> response
+                raw_responses_dict = {}
+                for idx, order_id in enumerate(broker_order_ids_map[broker_name]):
+                    # Try to match order_id to response in order (fallback to idx)
+                    responses_for_broker = broker_raw_responses.get(broker_name, [])
+                    if idx < len(responses_for_broker):
+                        raw_responses_dict[order_id] = responses_for_broker[idx]
+                    else:
+                        raw_responses_dict[order_id] = None
+                await self._insert_broker_execution(
+                    session,
+                    parent_order_id,
+                    broker_name,
+                    {
+                        'order_ids': broker_order_ids_map[broker_name],
+                        'order_messages': broker_order_messages_map.get(broker_name, []),
+                        'status': broker_status_map.get(broker_name, 'FAILED'),
+                        'raw_response': raw_responses_dict,
+                    }
+                )
             await session.commit()
         return {'order_id': parent_order_id, 'slices': responses}
 
@@ -287,33 +323,37 @@ class OrderManager:
             inserted = await insert_order(sess, order_data)
             return inserted["id"] if inserted else None
 
-    async def _insert_broker_execution(self, session, order_id, broker_name, response):
+    async def _insert_broker_execution(self, session, parent_order_id, broker_name, response):
         """
         Insert a row into broker_executions for a broker's response to an order.
-        Now uses 'broker_order_id' (single string) instead of 'broker_order_ids'.
+        Always stores all broker order ids as a list in broker_order_ids (even if only one), and one entry per broker per logical order.
         """
         from algosat.core.dbschema import broker_executions
         broker_id = response.get("broker_id")
         if broker_id is None:
             broker_id = await self._get_broker_id(broker_name)
-        # Get the single order id (first if list, else str)
-        broker_order_id = None
-        if isinstance(response.get("order_ids"), list) and response.get("order_ids"):
-            broker_order_id = response["order_ids"][0]
-        elif response.get("order_ids"):
-            broker_order_id = response["order_ids"]
-        elif response.get("order_id"):
-            broker_order_id = response["order_id"]
+        # Always store broker_order_ids as a list
+        broker_order_ids = []
+        # Accept both OrderResponse and dict
+        order_ids = response.get("order_ids")
+        if isinstance(order_ids, list):
+            broker_order_ids = order_ids
+        elif order_ids:
+            broker_order_ids = [order_ids]
         # Always store status as string value
         status_val = response.get("status", "FAILED")
         if hasattr(status_val, 'value'):
             status_val = status_val.value
+        # Ensure order_messages is a list or dict
+        order_messages = response.get("order_messages")
+        if order_messages is not None and not isinstance(order_messages, (list, dict)):
+            order_messages = [order_messages]
         broker_exec_data = dict(
-            order_id=order_id,
+            parent_order_id=parent_order_id,
             broker_id=broker_id,
             broker_name=broker_name,  # Deprecated: broker_name, keep for migration only
-            broker_order_id=broker_order_id,
-            order_messages=response.get("order_messages"),
+            broker_order_ids=broker_order_ids,
+            order_messages=order_messages,
             status=status_val,
             raw_response=response,
         )

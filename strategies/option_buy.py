@@ -196,7 +196,7 @@ class OptionBuyStrategy(StrategyBase):
             for strike, data in history_data.items()
             if data is not None and not getattr(data, 'empty', False)
         }
-        # await self.sync_open_positions()  # Sync in-memory with DB
+        await self.sync_open_positions()  # Sync in-memory with DB
         # 3. Evaluate trade signal for each strike
         for strike, data in indicator_data.items():
             try:
@@ -229,7 +229,7 @@ class OptionBuyStrategy(StrategyBase):
             start_date = localize_to_ist(datetime.combine(trade_day, time(9, 15)))
             current_end_date = localize_to_ist(datetime.combine(current_date, get_ist_datetime().time()))
             end_date = calculate_end_date(current_end_date, trade_config['interval_minutes'])
-            end_date = end_date.replace(hour=11, minute=15, second=0, microsecond=0)
+            # end_date = end_date.replace(hour=15, minute=30, second=0, microsecond=0)
             logger.debug(f"Fetching history for strike symbols {', '.join(str(strike) for strike in strike_symbols)}...")
             logger.debug(f"Start date: {start_date}, End date: {end_date}, Interval: {trade_config['interval_minutes']} minutes")
             history_data = await fetch_strikes_history(

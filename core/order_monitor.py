@@ -38,13 +38,15 @@ class OrderMonitor:
     async def _fast_monitor(self) -> None:
         # Use OrderStatus from order_request.py
         while self._running:
-            # Load aggregated order data
-            agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
-            broker_statuses = []
-            # Check for any broker_execs in failed state before checking order_ids
+            try:
+                agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
+            except Exception as e:
+                logger.error(f"OrderMonitor: Error in get_order_aggregate for order_id={self.order_id}: {e}")
+                await asyncio.sleep(self.fast_interval)
+                continue
+            all_order_statuses = []  # Flattened list of all broker order statuses
             failed_statuses = {OrderStatus.REJECTED.value, OrderStatus.FAILED.value}
             for bro in agg.broker_orders:
-                # Normalize status to plain string (e.g. 'FAILED')
                 bro_status_str = bro.status.value if hasattr(bro.status, 'value') else str(bro.status).split('.')[-1]
                 if bro_status_str in failed_statuses:
                     logger.info(f"OrderMonitor: Updating order_id={self.order_id} to FAILED due to broker_exec status {bro.status} (broker_id={bro.broker_id})")
@@ -52,32 +54,54 @@ class OrderMonitor:
                     self.stop()
                     return
             for bro in agg.broker_orders:
-                broker_name = await self.data_manager.get_broker_name_by_id(bro.broker_id)
-                order_details = await self.order_cache.get_order_by_id(broker_name, bro.order_id)
-                status = order_details.get("status") if order_details else None
-                broker_statuses.append(status)
-            # Aggregate status logic
+                try:
+                    broker_name = await self.data_manager.get_broker_name_by_id(bro.broker_id)
+                    order_ids = bro.order_id if isinstance(bro.order_id, list) else [bro.order_id]
+                    for oid in order_ids:
+                        if not oid:
+                            continue
+                        order_details = await self.order_cache.get_order_by_id(broker_name, oid)
+                        status = order_details.get("status") if order_details else None
+                        if status is not None:
+                            all_order_statuses.append(status)
+                except Exception as e:
+                    logger.error(f"OrderMonitor: Error fetching order details for broker_id={bro.broker_id}: {e}")
             def status_str(s):
                 return s.value if hasattr(s, 'value') else str(s).split('.')[-1]
-            if broker_statuses and all(status_str(s) == OrderStatus.FILLED.value for s in broker_statuses):
+            # Set logical order to OPEN if any order is FILLED or PARTIALLY_FILLED
+            if all_order_statuses and any(status_str(s) in [OrderStatus.FILLED.value, OrderStatus.PARTIALLY_FILLED.value] for s in all_order_statuses):
+                await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.OPEN)
+            # Set to FILLED only if all are FILLED
+            if all_order_statuses and all(status_str(s) == OrderStatus.FILLED.value for s in all_order_statuses):
                 await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.FILLED)
-            elif any(status_str(s) == OrderStatus.PARTIALLY_FILLED.value for s in broker_statuses):
+            # Set to PARTIALLY_FILLED if any are PARTIALLY_FILLED (but not all FILLED)
+            elif any(status_str(s) == OrderStatus.PARTIALLY_FILLED.value for s in all_order_statuses):
                 await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.PARTIALLY_FILLED)
-            elif any(status_str(s) == OrderStatus.REJECTED.value for s in broker_statuses):
+            elif any(status_str(s) == OrderStatus.REJECTED.value for s in all_order_statuses):
                 await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.REJECTED)
-            elif any(status_str(s) == OrderStatus.CANCELLED.value for s in broker_statuses):
+            elif any(status_str(s) == OrderStatus.CANCELLED.value for s in all_order_statuses):
                 await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.CANCELLED)
-            # Let strategy decide exit based on latest price
-            ltp = await self.data_manager.get_ltp(agg.symbol, self.order_id)
-            history = await self.data_manager.fetch_history(
-                agg.symbol,
-                interval_minutes=getattr(self.strategy, "entry_interval", 1),
-                lookback=getattr(self.strategy, "exit_lookback", 1) + 1
-            )
-            # Update trailing stop loss before exit check
+            try:
+                ltp = await self.data_manager.get_ltp(agg.symbol, self.order_id)
+            except Exception as e:
+                logger.error(f"OrderMonitor: Error in get_ltp for symbol={agg.symbol}, order_id={self.order_id}: {e}")
+                ltp = None
+            try:
+                history = await self.data_manager.fetch_history(
+                    agg.symbol,
+                    interval_minutes=getattr(self.strategy, "entry_interval", 1),
+                    lookback=getattr(self.strategy, "exit_lookback", 1) + 1
+                )
+            except Exception as e:
+                logger.error(f"OrderMonitor: Error in fetch_history for symbol={agg.symbol}, order_id={self.order_id}: {e}")
+                history = None
             self.strategy.update_trailing_stop_loss(self.order_id, ltp, history, self.order_manager)
             if ltp is not None:
-                exit_req = await self.strategy.evaluate_price_exit(self.order_id, ltp)
+                try:
+                    exit_req = await self.strategy.evaluate_price_exit(self.order_id, ltp)
+                except Exception as e:
+                    logger.error(f"OrderMonitor: Error in evaluate_price_exit for order_id={self.order_id}: {e}")
+                    exit_req = None
                 if exit_req:
                     await self.order_manager.place_order(exit_req, strategy_name=self.strategy.name)
                     self.stop()
@@ -86,16 +110,32 @@ class OrderMonitor:
 
     async def _slow_monitor(self) -> None:
         while self._running:
-            agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
-            history = await self.data_manager.fetch_history(
-                agg.symbol,
-                interval_minutes=getattr(self.strategy, "entry_interval", 1),
-                lookback=getattr(self.strategy, "exit_lookback", 1) + 1
-            )
-            ltp = await self.data_manager.get_ltp(agg.symbol, self.order_id)
-            # Update trailing stop loss before exit check
+            try:
+                agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
+            except Exception as e:
+                logger.error(f"OrderMonitor: Error in get_order_aggregate (slow) for order_id={self.order_id}: {e}")
+                await asyncio.sleep(self.entry_interval)
+                continue
+            try:
+                history = await self.data_manager.fetch_history(
+                    agg.symbol,
+                    interval_minutes=getattr(self.strategy, "entry_interval", 1),
+                    lookback=getattr(self.strategy, "exit_lookback", 1) + 1
+                )
+            except Exception as e:
+                logger.error(f"OrderMonitor: Error in fetch_history (slow) for symbol={agg.symbol}, order_id={self.order_id}: {e}")
+                history = None
+            try:
+                ltp = await self.data_manager.get_ltp(agg.symbol, self.order_id)
+            except Exception as e:
+                logger.error(f"OrderMonitor: Error in get_ltp (slow) for symbol={agg.symbol}, order_id={self.order_id}: {e}")
+                ltp = None
             self.strategy.update_trailing_stop_loss(self.order_id, ltp, history, self.order_manager)
-            exit_req = await self.strategy.evaluate_candle_exit(self.order_id, history)
+            try:
+                exit_req = await self.strategy.evaluate_candle_exit(self.order_id, history)
+            except Exception as e:
+                logger.error(f"OrderMonitor: Error in evaluate_candle_exit for order_id={self.order_id}: {e}")
+                exit_req = None
             if exit_req:
                 await self.order_manager.place_order(exit_req, strategy_name=self.strategy.name)
                 self.stop()

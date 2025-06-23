@@ -162,11 +162,12 @@ orders = Table(
 broker_executions = Table(
     "broker_executions", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("order_id", Integer, ForeignKey("orders.id"), nullable=False, index=True),
+    Column("parent_order_id", Integer, ForeignKey("orders.id"), nullable=False, index=True),  # renamed from order_id
     Column("broker_id", Integer, ForeignKey("broker_credentials.id"), nullable=False, index=True),
     # Deprecated: broker_name, keep for migration only
     Column("broker_name", String, nullable=True, index=True),
-    Column("broker_order_id", String, nullable=True),  # Broker's order id (single string)
+    Column("broker_order_ids", JSONB, nullable=True),  # Broker's order ids (list)
+    Column("order_status_map", JSONB, nullable=True),  # {order_id: status}
     Column("order_messages", JSONB, nullable=True),
     Column("status", String, nullable=False, index=True),
     Column("raw_response", JSONB, nullable=True),
