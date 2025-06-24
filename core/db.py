@@ -18,7 +18,7 @@ from datetime import datetime, timezone  # moved to top
 from algosat.common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
 from algosat.core.time_utils import get_ist_now
 
-from algosat.core.dbschema import metadata, orders, broker_credentials, strategies, strategy_configs, users, broker_balance_summaries # Added users, broker_balance_summaries
+from algosat.core.dbschema import metadata, orders, broker_credentials, strategies, strategy_configs, strategy_symbols, users, broker_balance_summaries # Added users, broker_balance_summaries
 
 # 1) Create the Async Engine
 engine = create_async_engine(
@@ -176,6 +176,44 @@ async def update_strategy_config(session, config_id, update_data):
     row = result.first()
     return dict(row._mapping) if row else None
 
+async def create_strategy_config(session, strategy_id, config_data):
+    """
+    Create a new strategy config.
+    """
+    from algosat.core.dbschema import strategy_configs
+    
+    now = get_ist_now()
+    config_data.update({
+        'strategy_id': strategy_id,
+        'created_at': now,
+        'updated_at': now
+    })
+    
+    stmt = strategy_configs.insert().values(**config_data)
+    res = await session.execute(stmt)
+    await session.commit()
+    
+    config_id = res.inserted_primary_key[0]
+    result = await session.execute(select(strategy_configs).where(strategy_configs.c.id == config_id))
+    row = result.first()
+    return dict(row._mapping) if row else None
+
+async def delete_strategy_config(session, config_id):
+    """
+    Delete a strategy config from the database.
+    """
+    # First check if config exists
+    config = await get_strategy_config_by_id(session, config_id)
+    if not config:
+        return None
+    
+    # Delete the config
+    await session.execute(
+        delete(strategy_configs).where(strategy_configs.c.id == config_id)
+    )
+    await session.commit()
+    return config
+
 async def enable_strategy_config(session, config_id):
     # Get config
     config = await get_strategy_config_by_id(session, config_id)
@@ -208,6 +246,139 @@ async def disable_strategy_config(session, config_id):
     await session.commit()
     return await get_strategy_config_by_id(session, config_id)
 
+# --- Strategy Symbol CRUD ---
+async def add_strategy_symbol(session, strategy_id, symbol, config_id, status='active'):
+    """
+    Add a symbol to a strategy with a specific config.
+    """
+    now = get_ist_now()
+    
+    # Check if the strategy-symbol combination already exists
+    existing = await session.execute(
+        select(strategy_symbols).where(
+            and_(
+                strategy_symbols.c.strategy_id == strategy_id,
+                strategy_symbols.c.symbol == symbol
+            )
+        )
+    )
+    existing_row = existing.first()
+    
+    if existing_row:
+        # Update existing record
+        await session.execute(
+            update(strategy_symbols)
+            .where(strategy_symbols.c.id == existing_row.id)
+            .values(
+                config_id=config_id,
+                status=status,
+                updated_at=now
+            )
+        )
+        await session.commit()
+        
+        # Return updated record
+        result = await session.execute(
+            select(strategy_symbols).where(strategy_symbols.c.id == existing_row.id)
+        )
+        row = result.first()
+        return dict(row._mapping) if row else None
+    else:
+        # Create new record
+        stmt = strategy_symbols.insert().values(
+            strategy_id=strategy_id,
+            symbol=symbol,
+            config_id=config_id,
+            status=status,
+            created_at=now,
+            updated_at=now
+        )
+        res = await session.execute(stmt)
+        await session.commit()
+        
+        symbol_id = res.inserted_primary_key[0]
+        result = await session.execute(
+            select(strategy_symbols).where(strategy_symbols.c.id == symbol_id)
+        )
+        row = result.first()
+        return dict(row._mapping) if row else None
+
+async def list_strategy_symbols(session, strategy_id):
+    """
+    List all symbols for a given strategy.
+    """
+    result = await session.execute(
+        select(strategy_symbols)
+        .where(strategy_symbols.c.strategy_id == strategy_id)
+        .order_by(strategy_symbols.c.created_at.desc())
+    )
+    return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_strategy_symbol_by_id(session, symbol_id):
+    """
+    Get a strategy symbol by its ID.
+    """
+    result = await session.execute(
+        select(strategy_symbols).where(strategy_symbols.c.id == symbol_id)
+    )
+    row = result.first()
+    return dict(row._mapping) if row else None
+
+async def set_strategy_symbol_status(session, symbol_id, status):
+    """
+    Set the status of a strategy symbol (e.g., 'active', 'inactive', 'paused').
+    """
+    now = get_ist_now()
+    
+    await session.execute(
+        update(strategy_symbols)
+        .where(strategy_symbols.c.id == symbol_id)
+        .values(status=status, updated_at=now)
+    )
+    await session.commit()
+    
+    return await get_strategy_symbol_by_id(session, symbol_id)
+
+async def delete_strategy_symbol(session, symbol_id):
+    """
+    Delete a strategy symbol.
+    """
+    # First check if symbol exists
+    symbol = await get_strategy_symbol_by_id(session, symbol_id)
+    if not symbol:
+        return None
+    
+    # Delete the symbol
+    await session.execute(
+        delete(strategy_symbols).where(strategy_symbols.c.id == symbol_id)
+    )
+    await session.commit()
+    return symbol
+
+async def update_strategy_symbol(session, symbol_id, update_data):
+    """
+    Update a strategy symbol.
+    """
+    now = get_ist_now()
+    update_data['updated_at'] = now
+    
+    stmt = update(strategy_symbols).where(strategy_symbols.c.id == symbol_id).values(**update_data)
+    await session.execute(stmt)
+    await session.commit()
+    
+    return await get_strategy_symbol_by_id(session, symbol_id)
+
+async def get_strategy_symbols_by_config_id(session, config_id):
+    """
+    Get all symbols using a specific config.
+    """
+    result = await session.execute(
+        select(strategy_symbols)
+        .where(strategy_symbols.c.config_id == config_id)
+        .order_by(strategy_symbols.c.created_at.desc())
+    )
+    return [dict(row._mapping) for row in result.fetchall()]
+
 # --- Strategy CRUD ---
 async def get_all_strategies(session):
     result = await session.execute(select(strategies))
@@ -219,8 +390,40 @@ async def get_strategy_by_id(session, strategy_id):
     return dict(row._mapping) if row else None
 
 async def get_strategy_configs_by_strategy_id(session, strategy_id):
-    result = await session.execute(select(strategy_configs).where(strategy_configs.c.strategy_id == strategy_id))
+    result = await session.execute(
+        select(strategy_configs).where(strategy_configs.c.strategy_id == strategy_id).order_by(strategy_configs.c.created_at.desc())
+    )
     return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_strategy_configs_paginated(session, strategy_id, page=1, page_size=10):
+    """
+    Get strategy configs with pagination support.
+    """
+    offset = (page - 1) * page_size
+    
+    # Get total count
+    count_query = select(func.count(strategy_configs.c.id)).where(strategy_configs.c.strategy_id == strategy_id)
+    count_result = await session.execute(count_query)
+    total_count = count_result.scalar()
+    
+    # Get configs with pagination
+    configs_query = (
+        select(strategy_configs)
+        .where(strategy_configs.c.strategy_id == strategy_id)
+        .order_by(strategy_configs.c.created_at.desc())
+        .offset(offset)
+        .limit(page_size)
+    )
+    result = await session.execute(configs_query)
+    configs = [dict(row._mapping) for row in result.fetchall()]
+    
+    return {
+        'configs': configs,
+        'total_count': total_count,
+        'page': page,
+        'page_size': page_size,
+        'total_pages': (total_count + page_size - 1) // page_size
+    }
 
 async def get_enabled_default_strategy_configs(session):
     """
@@ -542,6 +745,10 @@ async def get_open_orders_for_symbol_and_tradeday(session, symbol: str, trade_da
     stmt = select(orders).where(and_(*filters))
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_open_orders_for_strategy_symbol_and_tradeday(session, strategy_config_id: int, symbol: str, trade_day):
+    """Return all open orders for a given strategy config, symbol, and trade day."""
+    return await get_open_orders_for_symbol_and_tradeday(session, symbol, trade_day, strategy_config_id)
 
 # --- Data Provider Broker ---
 async def get_data_enabled_broker(session):

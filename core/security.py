@@ -163,6 +163,16 @@ class EnhancedInputValidator:
         validator = EnhancedInputValidator()
         return validator.validate_and_sanitize(value, field_name, expected_type, min_length, max_length, pattern, allow_none)
 
+    def validate_integer(self, value, field_name: str = "id", min_value: int = 1, max_value: int = 1_000_000_000):
+        """Validate integer input for IDs and similar fields."""
+        if not isinstance(value, int):
+            raise InvalidInputError(f"{field_name} must be an integer")
+        if value < min_value:
+            raise InvalidInputError(f"{field_name} must be >= {min_value}")
+        if value > max_value:
+            raise InvalidInputError(f"{field_name} must be <= {max_value}")
+        return value
+
 class SecurityManager:
     """Centralized security management for the trading system."""
     

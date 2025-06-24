@@ -19,6 +19,7 @@ from datetime import datetime
 from algosat.core.time_utils import to_ist
 import pytz
 from enum import Enum
+from algosat.core.strategy_symbol_utils import get_strategy_symbol_id
 
 logger = get_logger("OrderManager")
 
@@ -299,11 +300,19 @@ class OrderManager:
             if not strategy_config_id:
                 logger.error(f"[OrderManager] Could not extract strategy_config_id from config: {repr(config)}. Order will not be inserted.")
                 return None
-
+            # --- NEW: Resolve strategy_symbol_id ---
+            strategy_id = getattr(config, 'strategy_id', None) or (config.get('strategy_id') if isinstance(config, dict) else None)
+            symbol = getattr(order_payload, 'symbol', None)
+            config_id = strategy_config_id
+            strategy_symbol_id = None
+            if strategy_id and symbol and config_id:
+                strategy_symbol_id = await get_strategy_symbol_id(sess, strategy_id, symbol, config_id)
+            if not strategy_symbol_id:
+                logger.error(f"[OrderManager] Could not resolve strategy_symbol_id for (strategy_id={strategy_id}, symbol={symbol}, config_id={config_id}). Order will not be inserted.")
+                return None
             # --- Build order_data for logical order (orders table) ---
             order_data = {
-                "strategy_config_id": strategy_config_id,
-                "symbol": order_payload.symbol,
+                "strategy_symbol_id": strategy_symbol_id,
                 "candle_range": order_payload.extra.get("candle_range"),
                 "entry_price": order_payload.extra.get("entry_price", order_payload.price),
                 "stop_loss": order_payload.extra.get("stop_loss"),

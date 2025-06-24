@@ -28,11 +28,12 @@ class ProductTypeEnum(str, Enum):
 
 # --- Strategy Schemas ---
 class StrategyConfigBase(BaseModel):
-    symbol: str
+    name: str = Field(..., description="Human-readable name for the config")
+    description: Optional[str] = Field(None, description="Description of what this config does")
     exchange: str
-    params: Dict[str, Any]
-    enabled: bool
-    is_default: Optional[bool] = False
+    instrument: Optional[str] = Field(None, description="Instrument type")
+    trade: Dict[str, Any] = Field(default_factory=dict)
+    indicators: Dict[str, Any] = Field(default_factory=dict)
     order_type: OrderTypeEnum = Field(..., description="Order type: MARKET or LIMIT")
     product_type: ProductTypeEnum = Field(..., description="Product type: INTRADAY or DELIVERY")
 
@@ -40,14 +41,26 @@ class StrategyConfigCreate(StrategyConfigBase):
     pass
 
 class StrategyConfigUpdate(BaseModel):
-    params: Dict[str, Any]
-    enabled: Optional[bool]
-    order_type: Optional[OrderTypeEnum]
-    product_type: Optional[ProductTypeEnum]
+    name: Optional[str] = Field(None, description="Human-readable name for the config")
+    description: Optional[str] = Field(None, description="Description of what this config does")
+    exchange: Optional[str] = None
+    instrument: Optional[str] = None
+    trade: Optional[Dict[str, Any]] = None
+    indicators: Optional[Dict[str, Any]] = None
+    order_type: Optional[OrderTypeEnum] = None
+    product_type: Optional[ProductTypeEnum] = None
 
 class StrategyConfigResponse(StrategyConfigBase):
     id: int
     strategy_id: int
+    created_at: datetime
+    updated_at: datetime
+
+    @field_serializer("created_at", "updated_at")
+    def serialize_dt(self, v):
+        if isinstance(v, str):
+            return v
+        return v.isoformat() if v else None
 
     class Config:
         from_attributes = True
@@ -74,17 +87,19 @@ class StrategyDetailResponse(StrategyListResponse):
 
 class StrategyConfigListResponse(BaseModel):
     id: int
-    symbol: str
+    name: str
+    description: Optional[str] = None
     exchange: str
-    enabled: bool
-    is_default: Optional[bool] = False
+    instrument: Optional[str] = None
     order_type: OrderTypeEnum
     product_type: ProductTypeEnum
+    
     class Config:
         from_attributes = True
 
 class StrategyConfigDetailResponse(StrategyConfigListResponse):
-    params: Dict[str, Any]
+    trade: Dict[str, Any] = Field(default_factory=dict)
+    indicators: Dict[str, Any] = Field(default_factory=dict)
     strategy_id: int
     created_at: datetime
     updated_at: datetime
@@ -302,3 +317,30 @@ class UserResponse(BaseModel):
     updated_at: datetime
     class Config:
         from_attributes = True
+
+class StrategySymbolBase(BaseModel):
+    strategy_id: int
+    symbol: str
+    config_id: int
+    status: str = 'active'
+
+class StrategySymbolCreate(StrategySymbolBase):
+    pass
+
+class StrategySymbolResponse(StrategySymbolBase):
+    id: int
+    created_at: datetime
+    updated_at: datetime
+
+    @field_serializer("created_at", "updated_at")
+    def serialize_dt(self, v):
+        if isinstance(v, str):
+            return v
+        return v.isoformat() if v else None
+
+    class Config:
+        from_attributes = True
+
+class StrategySymbolWithConfigResponse(StrategySymbolResponse):
+    config_name: Optional[str] = None
+    config_description: Optional[str] = None

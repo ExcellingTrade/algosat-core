@@ -30,21 +30,32 @@ strategy_configs = Table(
     "strategy_configs", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("strategy_id", Integer, ForeignKey("strategies.id"), nullable=False),
-    Column("symbol", String, nullable=False),
+    Column("name", String, nullable=False),  # Added name
+    Column("description", String, nullable=True),  # Added description
     Column("exchange", String, nullable=False),
     Column("instrument", String, nullable=True),
+    Column("order_type", String, nullable=False, server_default=text("'MARKET'")),
     Column("product_type", String, nullable=False, server_default=text("'INTRADAY'")),  # "INTRADAY" or "DELIVERY"
     Column("trade", JSON, nullable=False, server_default=text("'{}'::jsonb")),
     Column("indicators", JSON, nullable=False, server_default=text("'{}'::jsonb")),
-    Column("is_default", Boolean, nullable=False, server_default=text("false")),
-    Column("enabled", Boolean, nullable=False, server_default=text("true")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 
-    UniqueConstraint("strategy_id", "symbol", "is_default",
-                     name="uq_strategy_symbol_default"),
-    Index("ix_stratcfg_strategy_symbol_enabled_updated", 
-          "strategy_id", "symbol", "enabled", "updated_at"),
+    UniqueConstraint("strategy_id", "name", name="uq_strategy_config_name_per_strategy"),
+)
+
+strategy_symbols = Table(
+    "strategy_symbols", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("strategy_id", Integer, ForeignKey("strategies.id"), nullable=False),
+    Column("symbol", String, nullable=False),
+    Column("config_id", Integer, ForeignKey("strategy_configs.id"), nullable=False),
+    Column("status", String, nullable=True, server_default=text("'active'")),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+
+    UniqueConstraint("strategy_id", "symbol", name="uq_strategy_symbol"),
+    Index("ix_strategy_symbol_strategy_symbol_config_status", "strategy_id", "symbol", "config_id", "status"),
 )
 
 trade_logs = Table(
@@ -137,8 +148,7 @@ Index(
 orders = Table(
     "orders", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("strategy_config_id", Integer, ForeignKey("strategy_configs.id"), nullable=False, index=True),
-    Column("symbol", String, nullable=False, index=True),
+    Column("strategy_symbol_id", Integer, ForeignKey("strategy_symbols.id"), nullable=False, index=True),
     Column("candle_range",  Float, nullable=True),
     Column("entry_price",  Float, nullable=True),
     Column("stop_loss",  Float, nullable=True),

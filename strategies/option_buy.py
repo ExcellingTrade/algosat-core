@@ -35,6 +35,8 @@ import os
 from algosat.core.signal import TradeSignal, SignalType
 from algosat.models.strategy_config import StrategyConfig
 from algosat.core.db import AsyncSessionLocal, get_open_orders_for_symbol_and_tradeday
+from algosat.core.strategy_symbol_utils import get_strategy_symbol_id
+from algosat.core.db import get_open_orders_for_strategy_symbol_and_tradeday
 
 logger = get_logger(__name__)
 
@@ -161,13 +163,19 @@ class OptionBuyStrategy(StrategyBase):
             logger.info(f"Selected strikes for entry: {self._strikes}")
 
     async def sync_open_positions(self):
-        """Synchronize self._positions with open orders in the database for all strikes for the current trade day."""
+        """Synchronize self._positions with open orders in the database for all strikes for the current trade day using strategy_symbol_id."""
         self._positions = {}
         async with AsyncSessionLocal() as session:
-            trade_day = get_trade_day(get_ist_datetime()) # - timedelta(days=5))
-            strategy_config_id = self.get_config_id()
+            trade_day = get_trade_day(get_ist_datetime())
+            strategy_id = getattr(self.cfg, 'strategy_id', None)
+            config_id = self.get_config_id()
             for strike in self._strikes:
-                open_orders = await get_open_orders_for_symbol_and_tradeday(session, strike, trade_day, strategy_config_id)
+                strategy_symbol_id = None
+                if strategy_id and strike and config_id:
+                    strategy_symbol_id = await get_strategy_symbol_id(session, strategy_id, strike, config_id)
+                if not strategy_symbol_id:
+                    continue
+                open_orders = await get_open_orders_for_strategy_symbol_and_tradeday(session, strategy_symbol_id, trade_day)
                 if open_orders:
                     self._positions[strike] = open_orders
 

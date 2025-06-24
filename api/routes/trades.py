@@ -1,11 +1,13 @@
 from fastapi import APIRouter, Depends, Query, HTTPException
 from typing import Dict, Any, List  # Added List and Any
+from datetime import date
 
 from algosat.api.schemas import TradeLogResponse, PnLResponse
 from algosat.api.dependencies import get_db
 from algosat.api.auth_dependencies import get_current_user
 from algosat.core.security import EnhancedInputValidator, InvalidInputError # Fixed import path
 from algosat.common.logger import get_logger
+from algosat.core.db import get_open_orders_for_strategy_symbol_and_tradeday
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 input_validator = EnhancedInputValidator()  # Added
@@ -57,3 +59,16 @@ async def get_aggregate_pnl(
     except Exception as e:
         logger.error(f"Error in get_aggregate_pnl: {e}")
         raise
+
+
+@router.get("/strategy_symbol/{strategy_symbol_id}/trades", response_model=List[TradeLogResponse])
+async def list_trades_for_strategy_symbol(strategy_symbol_id: int, trade_day: date = None, db=Depends(get_db)):
+    """
+    List trades for a given symbol of a particular strategy (by strategy_symbol_id).
+    Optionally filter by trade_day.
+    """
+    if trade_day is None:
+        from algosat.core.time_utils import get_ist_now
+        trade_day = get_ist_now().date()
+    trades = await get_open_orders_for_strategy_symbol_and_tradeday(db, strategy_symbol_id, trade_day)
+    return [TradeLogResponse(**trade) for trade in trades]

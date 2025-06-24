@@ -7,13 +7,26 @@ from algosat.core.db import (
     get_strategy_configs_by_strategy_id,
     get_strategy_config_by_id,
     update_strategy_config,
+    create_strategy_config,
+    delete_strategy_config,
+    add_strategy_symbol,
+    list_strategy_symbols,
+    set_strategy_symbol_status,
+    get_strategy_symbol_by_id,
+    update_strategy_symbol,
+    delete_strategy_symbol,
 )
 from algosat.api.schemas import (
     StrategyListResponse,
     StrategyDetailResponse,
     StrategyConfigListResponse,
     StrategyConfigDetailResponse,
+    StrategyConfigCreate,
     StrategyConfigUpdate,
+    StrategyConfigResponse,
+    StrategySymbolCreate,
+    StrategySymbolResponse,
+    StrategySymbolWithConfigResponse,
 )
 from algosat.api.dependencies import get_db
 from algosat.api.auth_dependencies import get_current_user
@@ -57,73 +70,214 @@ async def list_strategy_configs_for_strategy(strategy_id: int, db=Depends(get_db
         logger.error(f"Error in list_strategy_configs_for_strategy: {e}")
         raise
 
-@router.get("/configs/{config_id}", response_model=StrategyConfigDetailResponse)
-async def get_strategy_config_detail(config_id: int, db=Depends(get_db)):
-    try:
-        validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
-        row = await get_strategy_config_by_id(db, validated_config_id)
-        if not row:
-            raise HTTPException(status_code=404, detail="Strategy config not found")
-        # Convert SQLAlchemy Row to dict if needed
-        if hasattr(row, "_mapping"):
-            row = dict(row._mapping)
-        return StrategyConfigDetailResponse(**row)
-    except Exception as e:
-        logger.error(f"Error in get_strategy_config_detail: {e}")
-        raise
-
-@router.get("/{strategy_id}/confesigs/{config_id}", response_model=StrategyConfigDetailResponse)
-async def get_strategy_config_detail_for_strategy(strategy_id: int, config_id: int, db=Depends(get_db)):
+@router.post("/{strategy_id}/configs", response_model=StrategyConfigResponse)
+async def create_strategy_config_for_strategy(strategy_id: int, config: StrategyConfigCreate, db=Depends(get_db)):
+    """
+    Create a new strategy config for the given strategy.
+    """
     try:
         validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
-        validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
-        row = await get_strategy_config_by_id(db, validated_config_id)
-        if not row:
-            raise HTTPException(status_code=404, detail="Strategy config not found")
-        if hasattr(row, "_mapping"):
-            row = dict(row._mapping)
-        if "params" not in row or row["params"] is None:
-            row["params"] = {}
-        if row.get("strategy_id") != validated_strategy_id: # Use validated id
-            raise HTTPException(status_code=404, detail="Strategy config does not belong to this strategy")
-        return StrategyConfigDetailResponse(**row)
+        
+        # Verify strategy exists
+        strategy = await get_strategy_by_id(db, validated_strategy_id)
+        if not strategy:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        
+        # Create the config
+        config_data = {
+            'name': config.name,
+            'description': config.description,
+            'exchange': config.exchange,
+            'instrument': config.instrument,
+            'order_type': config.order_type.value,
+            'product_type': config.product_type.value,
+            'trade': config.trade,
+            'indicators': config.indicators
+        }
+        result = await create_strategy_config(
+            session=db,
+            strategy_id=validated_strategy_id,
+            config_data=config_data
+        )
+        
+        return StrategyConfigResponse(**result)
+    except InvalidInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Error in get_strategy_config_detail_for_strategy: {e}")
-        raise
+        logger.error(f"Error creating strategy config: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error")
 
-@router.put("/configs/{config_id}", response_model=StrategyConfigDetailResponse)
-async def update_strategy_config_params(config_id: int, update: StrategyConfigUpdate, db=Depends(get_db)):
+@router.get("/{strategy_id}/configs/{config_id}", response_model=StrategyConfigDetailResponse)
+async def get_strategy_config_detail_for_strategy(strategy_id: int, config_id: int, db=Depends(get_db)):
+    """
+    Get config details for a specific config belonging to a strategy.
+    """
+    validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
     validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
-    # Validate fields within update.params if necessary.
-    if update.params:
-        for key, value in update.params.items():
-            if isinstance(value, str):
-                update.params[key] = input_validator.validate_and_sanitize(value, f"params.{{key}}", max_length=1024)
-            elif isinstance(value, (int, float)):
-                pass
-    # Enforce order_type and product_type restrictions
-    if update.order_type and update.order_type not in ("MARKET", "LIMIT"):
-        raise HTTPException(status_code=400, detail="order_type must be 'MARKET' or 'LIMIT'")
-    if update.product_type and update.product_type not in ("INTRADAY", "DELIVERY"):
-        raise HTTPException(status_code=400, detail="product_type must be 'INTRADAY' or 'DELIVERY'")
+    row = await get_strategy_config_by_id(db, validated_config_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Strategy config not found")
+    if hasattr(row, "_mapping"):
+        row = dict(row._mapping)
+    if row.get("strategy_id") != validated_strategy_id:
+        raise HTTPException(status_code=404, detail="Config does not belong to this strategy")
+    return StrategyConfigDetailResponse(**row)
+
+@router.put("/{strategy_id}/configs/{config_id}", response_model=StrategyConfigDetailResponse)
+async def update_strategy_config_for_strategy(strategy_id: int, config_id: int, update: StrategyConfigUpdate, db=Depends(get_db)):
+    """
+    Update a strategy config, enforcing that the config belongs to the given strategy.
+    """
+    validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
+    validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
     # Fetch current config
     row = await get_strategy_config_by_id(db, validated_config_id)
     if not row:
         raise HTTPException(status_code=404, detail="Strategy config not found")
     if hasattr(row, "_mapping"):
         row = dict(row._mapping)
-    allowed_keys = set(row["params"].keys())
-    update_params = update.params or {}
-    filtered_params = {k: v for k, v in update_params.items() if k in allowed_keys}
-    new_params = {**row["params"], **filtered_params}
-    update_data = {"params": new_params}
+    if row.get("strategy_id") != validated_strategy_id:
+        raise HTTPException(status_code=404, detail="Config does not belong to this strategy")
+    
+    # Prepare update data
+    update_data = {}
+    
+    # Handle trade configuration updates
+    if update.trade is not None:
+        current_trade = row.get("trade", {})
+        new_trade = {**current_trade, **update.trade}
+        update_data["trade"] = new_trade
+    
+    # Handle indicators configuration updates
+    if update.indicators is not None:
+        current_indicators = row.get("indicators", {})
+        new_indicators = {**current_indicators, **update.indicators}
+        update_data["indicators"] = new_indicators
+    
+    # Handle other field updates
     if update.enabled is not None:
         update_data["enabled"] = update.enabled
     if update.order_type:
         update_data["order_type"] = update.order_type
     if update.product_type:
         update_data["product_type"] = update.product_type
+    
     updated = await update_strategy_config(db, validated_config_id, update_data)
     if hasattr(updated, "_mapping"):
         updated = dict(updated._mapping)
     return StrategyConfigDetailResponse(**updated)
+
+@router.delete("/{strategy_id}/configs/{config_id}")
+async def delete_strategy_config_for_strategy(strategy_id: int, config_id: int, db=Depends(get_db)):
+    """
+    Delete a strategy config, enforcing that the config belongs to the given strategy.
+    """
+    validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
+    validated_config_id = input_validator.validate_integer(config_id, "config_id", min_value=1)
+    
+    # Fetch current config to verify it belongs to the strategy
+    row = await get_strategy_config_by_id(db, validated_config_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Strategy config not found")
+    if hasattr(row, "_mapping"):
+        row = dict(row._mapping)
+    if row.get("strategy_id") != validated_strategy_id:
+        raise HTTPException(status_code=404, detail="Config does not belong to this strategy")
+    
+    # Delete the config
+    deleted = await delete_strategy_config(db, validated_config_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Strategy config not found")
+    
+    return {"message": "Strategy config deleted successfully", "config_id": validated_config_id}
+
+@router.post("/{strategy_id}/symbols", response_model=StrategySymbolResponse)
+async def add_symbol_to_strategy(strategy_id: int, symbol: StrategySymbolCreate, db=Depends(get_db)):
+    """
+    Add a symbol to a strategy with config assignment.
+    """
+    if symbol.strategy_id != strategy_id:
+        raise HTTPException(status_code=400, detail="strategy_id mismatch")
+    result = await add_strategy_symbol(db, symbol.strategy_id, symbol.symbol, symbol.config_id, symbol.status)
+    return StrategySymbolResponse(**result)
+
+@router.get("/{strategy_id}/symbols", response_model=List[StrategySymbolWithConfigResponse])
+async def get_symbols_for_strategy(strategy_id: int, db=Depends(get_db)):
+    """
+    List all symbols for a given strategy with config information.
+    """
+    rows = await list_strategy_symbols(db, strategy_id)
+    return [StrategySymbolWithConfigResponse(**row) for row in rows]
+
+@router.put("/symbols/{symbol_id}/status", response_model=StrategySymbolResponse)
+async def toggle_symbol_status(symbol_id: int, db=Depends(get_db)):
+    """
+    Toggle the status of a strategy symbol (active <-> inactive).
+    """
+    # First get the current status
+    from algosat.core.dbschema import strategy_symbols
+    from sqlalchemy import select
+    
+    stmt = select(strategy_symbols).where(strategy_symbols.c.id == symbol_id)
+    result = await db.execute(stmt)
+    row = result.first()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Strategy symbol not found")
+    
+    # Toggle the status
+    current_status = row.status
+    new_status = 'inactive' if current_status == 'active' else 'active'
+    
+    result = await set_strategy_symbol_status(db, symbol_id, new_status)
+    return StrategySymbolResponse(**result)
+
+@router.put("/symbols/{symbol_id}/enable", response_model=StrategySymbolResponse)
+async def enable_symbol(symbol_id: int, db=Depends(get_db)):
+    """
+    Enable a strategy symbol.
+    """
+    result = await set_strategy_symbol_status(db, symbol_id, 'active')
+    if not result:
+        raise HTTPException(status_code=404, detail="Strategy symbol not found")
+    return StrategySymbolResponse(**result)
+
+@router.put("/symbols/{symbol_id}/disable", response_model=StrategySymbolResponse)
+async def disable_symbol(symbol_id: int, db=Depends(get_db)):
+    """
+    Disable a strategy symbol.
+    """
+    result = await set_strategy_symbol_status(db, symbol_id, 'inactive')
+    if not result:
+        raise HTTPException(status_code=404, detail="Strategy symbol not found")
+    return StrategySymbolResponse(**result)
+
+@router.get("/symbols/{symbol_id}", response_model=StrategySymbolResponse)
+async def get_strategy_symbol(symbol_id: int, db=Depends(get_db)):
+    """
+    Get a strategy symbol by ID.
+    """
+    result = await get_strategy_symbol_by_id(db, symbol_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Strategy symbol not found")
+    return StrategySymbolResponse(**result)
+
+@router.put("/symbols/{symbol_id}", response_model=StrategySymbolResponse)
+async def update_strategy_symbol_route(symbol_id: int, update_data: dict, db=Depends(get_db)):
+    """
+    Update a strategy symbol.
+    """
+    result = await update_strategy_symbol(db, symbol_id, update_data)
+    if not result:
+        raise HTTPException(status_code=404, detail="Strategy symbol not found")
+    return StrategySymbolResponse(**result)
+
+@router.delete("/symbols/{symbol_id}")
+async def delete_strategy_symbol_route(symbol_id: int, db=Depends(get_db)):
+    """
+    Delete a strategy symbol.
+    """
+    result = await delete_strategy_symbol(db, symbol_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Strategy symbol not found")
+    return {"message": "Strategy symbol deleted successfully", "symbol_id": symbol_id}

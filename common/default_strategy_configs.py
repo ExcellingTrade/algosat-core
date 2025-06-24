@@ -5,8 +5,8 @@ from datetime import datetime
 
 # Default config for OptionBuy strategy
 OPTION_BUY_DEFAULT_CONFIG = {
-    # Top‐level identity
-    "symbol": "NIFTY50",
+    "name": "Option Buy Intraday Config",
+    "description": "Default intraday configuration for option buying strategy.",
     "exchange": "NSE",
     "instrument": "INDEX",
     "product_type": "INTRADAY",
@@ -63,28 +63,25 @@ OPTION_BUY_DEFAULT_CONFIG = {
         "sma_period": 14,
         "atr_multiplier": 14,
     },
-
-    "is_default": True,
-    "enabled": True,
 }
 
 # Default config for OptionSell strategy (same as OptionBuy for now, can be customized)
 OPTION_SELL_DEFAULT_CONFIG = {
     **OPTION_BUY_DEFAULT_CONFIG,
-    # You can override or add OptionSell-specific params here
+    "name": "Option Sell Intraday Config",
+    "description": "Default intraday configuration for option selling strategy.",
     "product_type": "INTRADAY",
     "order_type": "MARKET",
 }
 
 # Default config for SwingHighLowBuy
 SWING_HIGH_LOW_BUY_DEFAULT_CONFIG = {
-    "symbol": "",
-    "exchange": "",
-    "instrument": None,
+    "name": "Swing High Low Buy Config",
+    "description": "Default delivery configuration for swing high/low buy strategy.",
+    "exchange": "NSE",
+    "instrument": "INDEX",
     "trade": {},
     "indicators": {},
-    "is_default": True,
-    "enabled": True,
     "product_type": "DELIVERY",
     "order_type": "MARKET",
 }
@@ -92,6 +89,8 @@ SWING_HIGH_LOW_BUY_DEFAULT_CONFIG = {
 # Default config for SwingHighLowSell (copy of Buy, can be customized)
 SWING_HIGH_LOW_SELL_DEFAULT_CONFIG = {
     **SWING_HIGH_LOW_BUY_DEFAULT_CONFIG,
+    "name": "Swing High Low Sell Config",
+    "description": "Default delivery configuration for swing high/low sell strategy.",
 }
 
 DEFAULT_STRATEGY_CONFIGS = {
