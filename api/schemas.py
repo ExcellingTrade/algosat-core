@@ -88,6 +88,14 @@ class StrategyDetailResponse(StrategyListResponse):
     # Inherits all fields from StrategyListResponse including created_at and updated_at
     pass
 
+class StrategyUpdate(BaseModel):
+    """Schema for updating strategy - only order_type and product_type allowed, not name"""
+    order_type: Optional[OrderTypeEnum] = Field(None, description="Order type: MARKET or LIMIT")
+    product_type: Optional[ProductTypeEnum] = Field(None, description="Product type: INTRADAY or DELIVERY")
+    
+    class Config:
+        from_attributes = True
+
 class StrategyConfigListResponse(BaseModel):
     id: int
     name: str

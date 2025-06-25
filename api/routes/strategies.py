@@ -4,6 +4,7 @@ from typing import Dict, Any, List
 from algosat.core.db import (
     get_all_strategies,
     get_strategy_by_id,
+    update_strategy,
     enable_strategy,
     disable_strategy,
     get_strategy_configs_by_strategy_id,
@@ -23,6 +24,7 @@ from algosat.core.db import (
 from algosat.api.schemas import (
     StrategyListResponse,
     StrategyDetailResponse,
+    StrategyUpdate,
     StrategyConfigListResponse,
     StrategyConfigDetailResponse,
     StrategyConfigCreate,
@@ -63,6 +65,46 @@ async def get_strategy(strategy_id: int, db=Depends(get_db)):
     except Exception as e:
         logger.error(f"Error in get_strategy: {e}")
         raise
+
+@router.put("/{strategy_id}", response_model=StrategyDetailResponse)
+async def update_strategy_endpoint(strategy_id: int, strategy_update: StrategyUpdate, db=Depends(get_db)):
+    """
+    Update a strategy's editable fields (name, order_type, product_type).
+    """
+    try:
+        validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
+        
+        # Check if strategy exists
+        existing_strategy = await get_strategy_by_id(db, validated_strategy_id)
+        if not existing_strategy:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        
+        # Prepare update data - only include fields that are provided
+        update_data = {}
+        # Note: name field is not editable for strategies
+        
+        if strategy_update.order_type is not None:
+            update_data['order_type'] = strategy_update.order_type.value
+        
+        if strategy_update.product_type is not None:
+            update_data['product_type'] = strategy_update.product_type.value
+        
+        # If no fields to update, return existing strategy
+        if not update_data:
+            return StrategyDetailResponse(**existing_strategy)
+        
+        # Update the strategy
+        updated_strategy = await update_strategy(db, validated_strategy_id, update_data)
+        logger.info(f"Strategy {validated_strategy_id} updated successfully with data: {update_data}")
+        return StrategyDetailResponse(**updated_strategy)
+    
+    except HTTPException:
+        raise
+    except InvalidInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error updating strategy {strategy_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update strategy")
 
 @router.put("/{strategy_id}/enable", response_model=StrategyDetailResponse)
 async def enable_strategy_endpoint(strategy_id: int, db=Depends(get_db)):
