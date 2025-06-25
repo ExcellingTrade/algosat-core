@@ -344,3 +344,6 @@ class StrategySymbolResponse(StrategySymbolBase):
 class StrategySymbolWithConfigResponse(StrategySymbolResponse):
     config_name: Optional[str] = None
     config_description: Optional[str] = None
+    trade_count: Optional[int] = 0
+    current_pnl: Optional[float] = 0.0
+    enabled: Optional[bool] = None  # Computed from status

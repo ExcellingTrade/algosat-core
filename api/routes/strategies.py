@@ -15,6 +15,8 @@ from algosat.core.db import (
     get_strategy_symbol_by_id,
     update_strategy_symbol,
     delete_strategy_symbol,
+    get_strategy_symbol_trade_stats,
+    get_trades_for_symbol,
 )
 from algosat.api.schemas import (
     StrategyListResponse,
@@ -210,10 +212,52 @@ async def add_symbol_to_strategy(strategy_id: int, symbol: StrategySymbolCreate,
 @router.get("/{strategy_id}/symbols", response_model=List[StrategySymbolWithConfigResponse])
 async def get_symbols_for_strategy(strategy_id: int, db=Depends(get_db)):
     """
-    List all symbols for a given strategy with config information.
+    List all symbols for a given strategy with config information and trade statistics.
     """
+    # Get basic symbol data
     rows = await list_strategy_symbols(db, strategy_id)
-    return [StrategySymbolWithConfigResponse(**row) for row in rows]
+    
+    # Get configs for this strategy to add config names
+    configs = await get_strategy_configs_by_strategy_id(db, strategy_id)
+    config_map = {config['id']: config for config in configs}
+    
+    # Enhance each symbol with config info and trade statistics
+    enhanced_symbols = []
+    for row in rows:
+        symbol_data = dict(row)
+        
+        # Add config information
+        config = config_map.get(symbol_data['config_id'], {})
+        symbol_data['config_name'] = config.get('name', f"Config {symbol_data['config_id']}")
+        symbol_data['config_description'] = config.get('description')
+        
+        # Add enabled field based on status
+        symbol_data['enabled'] = symbol_data.get('status') == 'active'
+        
+        # Get trade statistics for this symbol
+        try:
+            trade_stats = await get_strategy_symbol_trade_stats(db, symbol_data['id'])
+            symbol_data['live_trades'] = trade_stats['live_trade_count']
+            symbol_data['live_pnl'] = trade_stats['live_pnl']
+            symbol_data['total_trades'] = trade_stats['total_trade_count']
+            symbol_data['total_pnl'] = trade_stats['total_pnl']
+            symbol_data['all_trades'] = trade_stats['all_trade_count']
+            # For backward compatibility with UI
+            symbol_data['trade_count'] = trade_stats['all_trade_count']
+            symbol_data['current_pnl'] = trade_stats['total_pnl']
+        except Exception as e:
+            logger.error(f"Error fetching trade stats for symbol {symbol_data['id']}: {e}")
+            symbol_data['live_trades'] = 0
+            symbol_data['live_pnl'] = 0.0
+            symbol_data['total_trades'] = 0
+            symbol_data['total_pnl'] = 0.0
+            symbol_data['all_trades'] = 0
+            symbol_data['trade_count'] = 0
+            symbol_data['current_pnl'] = 0.0
+        
+        enhanced_symbols.append(StrategySymbolWithConfigResponse(**symbol_data))
+    
+    return enhanced_symbols
 
 @router.put("/symbols/{symbol_id}/status", response_model=StrategySymbolResponse)
 async def toggle_symbol_status(symbol_id: int, db=Depends(get_db)):
@@ -287,3 +331,59 @@ async def delete_strategy_symbol_route(symbol_id: int, db=Depends(get_db)):
     if not result:
         raise HTTPException(status_code=404, detail="Strategy symbol not found")
     return {"message": "Strategy symbol deleted successfully", "symbol_id": symbol_id}
+
+@router.get("/symbols/{symbol_id}/stats")
+async def get_symbol_trade_stats(symbol_id: int, db=Depends(get_db)):
+    """
+    Get trade statistics for a specific strategy symbol.
+    Returns live trades (open) and total trades (completed) with P&L data.
+    """
+    try:
+        validated_symbol_id = input_validator.validate_integer(symbol_id, "symbol_id", min_value=1)
+        
+        # Check if symbol exists
+        symbol = await get_strategy_symbol_by_id(db, validated_symbol_id)
+        if not symbol:
+            raise HTTPException(status_code=404, detail="Strategy symbol not found")
+        
+        # Get trade statistics
+        stats = await get_strategy_symbol_trade_stats(db, validated_symbol_id)
+        
+        return {
+            "symbol_id": validated_symbol_id,
+            "live_trades": stats["live_trade_count"],
+            "live_pnl": stats["live_pnl"],
+            "total_trades": stats["total_trade_count"],
+            "total_pnl": stats["total_pnl"],
+            "all_trades": stats["all_trade_count"],
+            "enabled": symbol["status"] == "active"
+        }
+    except Exception as e:
+        logger.error(f"Error in get_symbol_trade_stats: {e}")
+        raise
+
+@router.get("/symbols/{symbol_id}/trades")
+async def get_symbol_trades(symbol_id: int, limit: int = 100, db=Depends(get_db)):
+    """
+    Get detailed trade history for a specific strategy symbol.
+    """
+    try:
+        validated_symbol_id = input_validator.validate_integer(symbol_id, "symbol_id", min_value=1)
+        validated_limit = input_validator.validate_integer(limit, "limit", min_value=1, max_value=1000)
+        
+        # Check if symbol exists
+        symbol = await get_strategy_symbol_by_id(db, validated_symbol_id)
+        if not symbol:
+            raise HTTPException(status_code=404, detail="Strategy symbol not found")
+        
+        # Get trades
+        trades = await get_trades_for_symbol(db, validated_symbol_id, validated_limit)
+        
+        return {
+            "symbol_id": validated_symbol_id,
+            "trades": trades,
+            "total_trades": len(trades)
+        }
+    except Exception as e:
+        logger.error(f"Error in get_symbol_trades: {e}")
+        raise

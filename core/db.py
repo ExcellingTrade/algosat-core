@@ -854,3 +854,154 @@ async def get_latest_balance_summaries_for_all_brokers(session):
     stmt = select(broker_balance_summaries).where(broker_balance_summaries.c.date == today)
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
+
+# --- Trade Statistics and P&L Functions ---
+
+async def get_strategy_symbol_trade_stats(session: AsyncSession, strategy_symbol_id: int):
+    """
+    Get trade statistics for a specific strategy symbol.
+    Returns live trades (open orders) and total trades (completed orders) with P&L.
+    """
+    from algosat.core.dbschema import orders
+    
+    # Get live (open) orders
+    live_stmt = select(orders).where(
+        and_(
+            orders.c.strategy_symbol_id == strategy_symbol_id,
+            orders.c.status.in_(['open', 'pending', 'active', 'partial'])  # Open order statuses
+        )
+    )
+    live_result = await session.execute(live_stmt)
+    live_orders = live_result.fetchall()
+    
+    # Get completed orders for total stats
+    completed_stmt = select(orders).where(
+        and_(
+            orders.c.strategy_symbol_id == strategy_symbol_id,
+            orders.c.status.in_(['completed', 'filled', 'closed'])  # Completed order statuses
+        )
+    )
+    completed_result = await session.execute(completed_stmt)
+    completed_orders = completed_result.fetchall()
+    
+    # Calculate live P&L (unrealized)
+    live_pnl = 0.0
+    for order in live_orders:
+        order_dict = dict(order._mapping)
+        entry_price = order_dict.get('entry_price')
+        # For live trades, we might use current market price instead of exit_price
+        # For now, we'll calculate based on available data
+        qty = order_dict.get('qty', 0)
+        # Live P&L calculation would need current market price - for now set to 0
+        # This can be enhanced later with real-time price data
+    
+    # Calculate total P&L (realized)
+    total_pnl = 0.0
+    for order in completed_orders:
+        order_dict = dict(order._mapping)
+        entry_price = order_dict.get('entry_price')
+        exit_price = order_dict.get('exit_price')
+        qty = order_dict.get('qty', 0)
+        side = order_dict.get('side', 'BUY')
+        
+        if entry_price and exit_price and qty:
+            if side.upper() == 'BUY':
+                pnl = (exit_price - entry_price) * qty
+            else:  # SELL
+                pnl = (entry_price - exit_price) * qty
+            total_pnl += pnl
+    
+    return {
+        'live_trade_count': len(live_orders),
+        'live_pnl': live_pnl,
+        'total_trade_count': len(completed_orders),
+        'total_pnl': total_pnl,
+        'all_trade_count': len(live_orders) + len(completed_orders)
+    }
+
+async def get_strategy_trade_stats(session: AsyncSession, strategy_id: int):
+    """
+    Get aggregated trade statistics for all symbols in a strategy.
+    """
+    from algosat.core.dbschema import orders
+    
+    # Join orders with strategy_symbols to get strategy-level data
+    stmt = select(
+        orders.c.id,
+        orders.c.strategy_symbol_id,
+        orders.c.entry_price,
+        orders.c.exit_price,
+        orders.c.qty,
+        orders.c.side,
+        orders.c.status,
+        strategy_symbols.c.symbol,
+        strategy_symbols.c.config_id
+    ).select_from(
+        orders.join(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
+    ).where(
+        and_(
+            strategy_symbols.c.strategy_id == strategy_id,
+            orders.c.status.in_(['completed', 'filled', 'closed'])
+        )
+    )
+    
+    result = await session.execute(stmt)
+    orders_data = result.fetchall()
+    
+    # Aggregate by symbol
+    symbol_stats = {}
+    total_pnl = 0.0
+    total_trades = 0
+    
+    for order in orders_data:
+        order_dict = dict(order._mapping)
+        symbol_id = order_dict['strategy_symbol_id']
+        symbol_name = order_dict['symbol']
+        config_id = order_dict['config_id']
+        
+        if symbol_id not in symbol_stats:
+            symbol_stats[symbol_id] = {
+                'symbol': symbol_name,
+                'config_id': config_id,
+                'trade_count': 0,
+                'pnl': 0.0
+            }
+        
+        # Calculate P&L for this order
+        entry_price = order_dict.get('entry_price')
+        exit_price = order_dict.get('exit_price')
+        qty = order_dict.get('qty', 0)
+        side = order_dict.get('side', 'BUY')
+        
+        if entry_price and exit_price and qty:
+            if side.upper() == 'BUY':
+                pnl = (exit_price - entry_price) * qty
+            else:  # SELL
+                pnl = (entry_price - exit_price) * qty
+            
+            symbol_stats[symbol_id]['pnl'] += pnl
+            total_pnl += pnl
+        
+        symbol_stats[symbol_id]['trade_count'] += 1
+        total_trades += 1
+    
+    return {
+        'total_trades': total_trades,
+        'total_pnl': total_pnl,
+        'symbol_stats': symbol_stats
+    }
+
+async def get_trades_for_symbol(session: AsyncSession, strategy_symbol_id: int, limit: int = 100):
+    """
+    Get detailed trade history for a specific strategy symbol.
+    """
+    from algosat.core.dbschema import orders
+    
+    stmt = select(orders).where(
+        orders.c.strategy_symbol_id == strategy_symbol_id
+    ).order_by(
+        orders.c.created_at.desc()
+    ).limit(limit)
+    
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
