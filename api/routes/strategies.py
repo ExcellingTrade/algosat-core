@@ -4,6 +4,8 @@ from typing import Dict, Any, List
 from algosat.core.db import (
     get_all_strategies,
     get_strategy_by_id,
+    enable_strategy,
+    disable_strategy,
     get_strategy_configs_by_strategy_id,
     get_strategy_config_by_id,
     update_strategy_config,
@@ -61,6 +63,54 @@ async def get_strategy(strategy_id: int, db=Depends(get_db)):
     except Exception as e:
         logger.error(f"Error in get_strategy: {e}")
         raise
+
+@router.put("/{strategy_id}/enable", response_model=StrategyDetailResponse)
+async def enable_strategy_endpoint(strategy_id: int, db=Depends(get_db)):
+    """
+    Enable a strategy by setting enabled=True.
+    """
+    try:
+        validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
+        
+        # Check if strategy exists
+        existing_strategy = await get_strategy_by_id(db, validated_strategy_id)
+        if not existing_strategy:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        
+        # Enable the strategy
+        updated_strategy = await enable_strategy(db, validated_strategy_id)
+        logger.info(f"Strategy {validated_strategy_id} enabled successfully")
+        return StrategyDetailResponse(**updated_strategy)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error enabling strategy {strategy_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to enable strategy")
+
+@router.put("/{strategy_id}/disable", response_model=StrategyDetailResponse)
+async def disable_strategy_endpoint(strategy_id: int, db=Depends(get_db)):
+    """
+    Disable a strategy by setting enabled=False.
+    """
+    try:
+        validated_strategy_id = input_validator.validate_integer(strategy_id, "strategy_id", min_value=1)
+        
+        # Check if strategy exists
+        existing_strategy = await get_strategy_by_id(db, validated_strategy_id)
+        if not existing_strategy:
+            raise HTTPException(status_code=404, detail="Strategy not found")
+        
+        # Disable the strategy
+        updated_strategy = await disable_strategy(db, validated_strategy_id)
+        logger.info(f"Strategy {validated_strategy_id} disabled successfully")
+        return StrategyDetailResponse(**updated_strategy)
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error disabling strategy {strategy_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to disable strategy")
 
 @router.get("/{strategy_id}/configs", response_model=List[StrategyConfigListResponse])
 async def list_strategy_configs_for_strategy(strategy_id: int, db=Depends(get_db)):

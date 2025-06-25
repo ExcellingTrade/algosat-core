@@ -72,18 +72,21 @@ class StrategyListResponse(BaseModel):
     enabled: bool
     order_type: OrderTypeEnum
     product_type: ProductTypeEnum
-    class Config:
-        from_attributes = True
-
-class StrategyDetailResponse(StrategyListResponse):
     created_at: datetime
     updated_at: datetime
-
+    
     @field_serializer("created_at", "updated_at")
     def serialize_dt(self, v):
         if isinstance(v, str):
             return v
         return v.isoformat() if v else None
+    
+    class Config:
+        from_attributes = True
+
+class StrategyDetailResponse(StrategyListResponse):
+    # Inherits all fields from StrategyListResponse including created_at and updated_at
+    pass
 
 class StrategyConfigListResponse(BaseModel):
     id: int

@@ -389,6 +389,32 @@ async def get_strategy_by_id(session, strategy_id):
     row = result.first()
     return dict(row._mapping) if row else None
 
+async def update_strategy(session, strategy_id, update_data):
+    """
+    Update a strategy with new data.
+    """
+    from algosat.core.time_utils import get_ist_now
+    now = get_ist_now()
+    update_data['updated_at'] = now
+    
+    stmt = update(strategies).where(strategies.c.id == strategy_id).values(**update_data)
+    await session.execute(stmt)
+    await session.commit()
+    
+    return await get_strategy_by_id(session, strategy_id)
+
+async def enable_strategy(session, strategy_id):
+    """
+    Enable a strategy by setting enabled=True.
+    """
+    return await update_strategy(session, strategy_id, {'enabled': True})
+
+async def disable_strategy(session, strategy_id):
+    """
+    Disable a strategy by setting enabled=False.
+    """
+    return await update_strategy(session, strategy_id, {'enabled': False})
+
 async def get_strategy_configs_by_strategy_id(session, strategy_id):
     result = await session.execute(
         select(strategy_configs).where(strategy_configs.c.strategy_id == strategy_id).order_by(strategy_configs.c.created_at.desc())
