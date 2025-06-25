@@ -142,6 +142,20 @@ async def update_strategy_config_for_strategy(strategy_id: int, config_id: int, 
     # Prepare update data
     update_data = {}
     
+    # Handle basic field updates
+    if update.name is not None:
+        update_data["name"] = update.name
+    if update.description is not None:
+        update_data["description"] = update.description
+    if update.exchange is not None:
+        update_data["exchange"] = update.exchange
+    if update.instrument is not None:
+        update_data["instrument"] = update.instrument
+    if update.order_type is not None:
+        update_data["order_type"] = update.order_type.value
+    if update.product_type is not None:
+        update_data["product_type"] = update.product_type.value
+    
     # Handle trade configuration updates
     if update.trade is not None:
         current_trade = row.get("trade", {})
@@ -153,14 +167,6 @@ async def update_strategy_config_for_strategy(strategy_id: int, config_id: int, 
         current_indicators = row.get("indicators", {})
         new_indicators = {**current_indicators, **update.indicators}
         update_data["indicators"] = new_indicators
-    
-    # Handle other field updates
-    if update.enabled is not None:
-        update_data["enabled"] = update.enabled
-    if update.order_type:
-        update_data["order_type"] = update.order_type
-    if update.product_type:
-        update_data["product_type"] = update.product_type
     
     updated = await update_strategy_config(db, validated_config_id, update_data)
     if hasattr(updated, "_mapping"):

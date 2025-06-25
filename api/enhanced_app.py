@@ -147,8 +147,10 @@ def get_allowed_origins():
         # Production/VPS IP address - both HTTP and HTTPS
         "http://82.25.109.188:3000",
         "https://82.25.109.188:3000",
-        # Allow all origins for testing (remove in production)
-        "*"
+        "http://82.25.109.188",
+        "https://82.25.109.188",
+        # Add null origin for certain development scenarios
+        "null"
     ]
     
     return base_origins
@@ -189,8 +191,9 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=get_allowed_origins(),
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allow_headers=["*"],
+    expose_headers=["*"]
 )
 
 app.add_middleware(
