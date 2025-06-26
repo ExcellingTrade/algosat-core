@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 import datetime
+from .models import BalanceSummary
 
 class BrokerInterface(ABC):
     """
@@ -95,7 +96,7 @@ class BrokerInterface(ABC):
         ...
 
     @abstractmethod
-    async def get_balance_summary(self, *args, **kwargs) -> dict:
+    async def get_balance_summary(self, *args, **kwargs) -> BalanceSummary:
         """
         Return summary: total_balance, available, utilized (standardized output).
         """

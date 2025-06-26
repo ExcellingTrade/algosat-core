@@ -7,6 +7,7 @@ from typing import Dict, Any, List
 import re
 from datetime import datetime
 from algosat.brokers.base import BrokerInterface
+from algosat.brokers.models import BalanceSummary
 from algosat.common.broker_utils import get_broker_credentials, upsert_broker_credentials, can_reuse_token
 from algosat.common.logger import get_logger
 from kiteconnect import KiteConnect, exceptions as kite_exceptions
@@ -445,16 +446,65 @@ class ZerodhaWrapper(BrokerInterface):
 
     async def get_balance(self, segment: str = "equity") -> dict:
         """
-        Fetch account balance (raw API response) for Zerodha. Not implemented, returns empty dict.
+        Fetch account balance (raw API response) for Zerodha using margins API.
         """
-        return {}
+        try:
+            if not self.kite:
+                logger.error("Kite client not initialized. Please login first.")
+                return {}
+            
+            loop = asyncio.get_event_loop()
+            try:
+                margins_data = await loop.run_in_executor(None, self.kite.margins)
+                return margins_data
+            except (kite_exceptions.PermissionException, kite_exceptions.TokenException):
+                logger.warning("Zerodha: PermissionException or TokenException in get_balance, attempting reauth...")
+                if await self.login(force_reauth=True):
+                    margins_data = await loop.run_in_executor(None, self.kite.margins)
+                    return margins_data
+                else:
+                    logger.error("Zerodha: Reauth failed in get_balance.")
+                    return {}
+        except Exception as e:
+            logger.error(f"Failed to fetch Zerodha balance: {e}")
+            return {}
 
-    async def get_balance_summary(self, segment: str = "equity") -> dict:
+    async def get_balance_summary(self, segment: str = "equity") -> BalanceSummary:
         """
-        Return summary: total_balance, available, utilized for Zerodha. Not implemented, returns 0s.
+        Return summary: total_balance, available, utilized for equity from Zerodha margins API.
+        
+        Calculation:
+        - available = net
+        - utilized = utilised.debits  
+        - total = available + utilized
         """
-        return {
-            "total_balance": 0,
-            "available": 0,
-            "utilized": 0
-        }
+        try:
+            raw = await self.get_balance(segment)
+            if not raw or not isinstance(raw, dict):
+                logger.error(f"Zerodha get_balance_summary: Invalid or failed response: {raw}")
+                return BalanceSummary()
+            
+            # Extract equity segment data
+            equity_data = raw.get("equity", {})
+            if not equity_data:
+                logger.error(f"Zerodha get_balance_summary: No equity data found in response: {raw}")
+                return BalanceSummary()
+            
+            # Get values from equity segment
+            net = float(equity_data.get("net", 0))
+            utilised_data = equity_data.get("utilised", {})
+            debits = float(utilised_data.get("debits", 0))
+            
+            # Calculate as per requirement
+            available = net
+            utilized = debits
+            total = available + utilized
+            
+            return BalanceSummary(
+                total_balance=total,
+                available=available,
+                utilized=utilized
+            )
+        except Exception as e:
+            logger.error(f"Failed to summarize Zerodha balance: {e}")
+            return BalanceSummary()

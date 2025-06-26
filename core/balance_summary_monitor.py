@@ -2,6 +2,7 @@ import asyncio
 from datetime import datetime, timezone
 from algosat.core.db import AsyncSessionLocal, upsert_broker_balance_summary, get_all_brokers
 from algosat.core.broker_manager import BrokerManager
+from algosat.brokers.models import BalanceSummary
 from algosat.common.logger import get_logger
 
 logger = get_logger("BalanceSummaryMonitor")
@@ -23,7 +24,9 @@ class BalanceSummaryMonitor:
                     broker_obj = self.broker_manager.brokers.get(broker_name)
                     if broker_obj and hasattr(broker_obj, "get_balance_summary"):
                         summary = await broker_obj.get_balance_summary()
-                        await upsert_broker_balance_summary(session, broker_id, summary)
+                        # Convert BalanceSummary model to dict for storage
+                        summary_dict = summary.model_dump() if hasattr(summary, 'model_dump') else summary.to_dict()
+                        await upsert_broker_balance_summary(session, broker_id, summary_dict)
                         logger.debug(f"Updated balance summary for {broker_name}")
                 except Exception as e:
                     logger.error(f"Failed to fetch/store balance for {broker_name}: {e}")

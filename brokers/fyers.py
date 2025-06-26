@@ -41,6 +41,7 @@ from selenium.webdriver.common.by import By
 from seleniumbase import SB
 
 from algosat.brokers.base import BrokerInterface
+from algosat.brokers.models import BalanceSummary
 from algosat.common import constants
 from algosat.common.broker_utils import shutdown_gracefully, get_broker_credentials, upsert_broker_credentials, can_reuse_token
 from algosat.common.logger import get_logger
@@ -322,9 +323,13 @@ class FyersWrapper(BrokerInterface):
         else:
             return self.get_balance_sync()
 
-    async def get_balance_summary(self) -> dict:
+    async def get_balance_summary(self) -> BalanceSummary:
         """
         Return summary: total_balance, available, utilized for equity from Fyers funds API.
+        Calculation:
+        - total = "Limit at start of the day" + "Fund Transfer" (Payin)
+        - available = "Available Balance"
+        - utilized = "Utilized Amount"
         """
         try:
             raw = await self.get_balance()
@@ -333,24 +338,37 @@ class FyersWrapper(BrokerInterface):
                 raw = await raw
             if not raw or not isinstance(raw, dict) or raw.get("code") != 200:
                 logger.error(f"Fyers get_balance_summary: Invalid or failed response: {raw}")
-                return {}
+                return BalanceSummary()
             fund_limit = raw.get("fund_limit", [])
-            total = available = utilized = 0
+            
+            # Initialize values
+            limit_at_start = payin = available = utilized = 0.0
+            
+            # Extract required fields from fund_limit
             for item in fund_limit:
-                if item.get("title", "").lower() == "total balance":
-                    total = item.get("equityAmount", 0)
-                if item.get("title", "").lower() == "available balance":
-                    available = item.get("equityAmount", 0)
-                if item.get("title", "").lower() == "utilized amount":
-                    utilized = item.get("equityAmount", 0)
-            return {
-                "total_balance": total,
-                "available": available,
-                "utilized": utilized
-            }
+                title = item.get("title", "").lower()
+                equity_amount = float(item.get("equityAmount", 0))
+                
+                if title == "limit at start of the day":
+                    limit_at_start = equity_amount
+                elif title == "fund transfer":
+                    payin = equity_amount
+                elif title == "available balance":
+                    available = equity_amount
+                elif title == "utilized amount":
+                    utilized = equity_amount
+            
+            # Calculate total as per new logic: Limit at start of the day + Fund Transfer (Payin)
+            total = limit_at_start + payin
+            
+            return BalanceSummary(
+                total_balance=total,
+                available=available,
+                utilized=utilized
+            )
         except Exception as e:
             logger.error(f"Failed to summarize Fyers balance: {e}")
-            return {}
+            return BalanceSummary()
     async def get_profile_async(self):
         """Fetch account profile asynchronously using Fyers async SDK."""
         try:

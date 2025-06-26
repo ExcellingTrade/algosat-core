@@ -5,6 +5,7 @@ import asyncio
 import logging
 from jose import jwt, JWTError
 import algosat.api.auth_dependencies as auth_deps
+from algosat.utils.market_hours import should_enable_websocket, get_market_status, get_next_market_session_change
 
 router = APIRouter()
 logger = logging.getLogger("ws.livefeed")
@@ -53,10 +54,45 @@ async def fyers_live_feed_loop():
     """
     A single, long-running task that connects to the Fyers WebSocket,
     subscribes to symbols, and broadcasts data to all connected clients.
-    This loop will shut down when the last client disconnects.
+    This loop will shut down when the last client disconnects or when markets are closed.
     """
     global fyers_feed_task
     logger.info("[FyersFeedLoop] Starting Fyers live feed loop...")
+
+    # Check if websocket should be enabled based on market hours
+    if not should_enable_websocket():
+        market_status = get_market_status()
+        logger.info(f"[FyersFeedLoop] Markets are {market_status['state']}. WebSocket feed disabled.")
+        await manager.broadcast({
+            "event": "market_closed",
+            "message": market_status['message'],
+            "status": market_status
+        })
+        
+        # Wait until next market session
+        next_change_time, next_state = get_next_market_session_change()
+        wait_seconds = (next_change_time - market_status['current_time']).total_seconds()
+        logger.info(f"[FyersFeedLoop] Waiting {wait_seconds/3600:.1f} hours until {next_state}")
+        
+        # Sleep in chunks to allow for early termination if no clients
+        while wait_seconds > 0:
+            if not manager.active_connections:
+                logger.info("[FyersFeedLoop] No active clients. Terminating early.")
+                return
+            
+            sleep_time = min(60, wait_seconds)  # Check every minute
+            await asyncio.sleep(sleep_time)
+            wait_seconds -= sleep_time
+            
+            # Re-check if websocket should be enabled (in case of time changes)
+            if should_enable_websocket():
+                logger.info("[FyersFeedLoop] Market opened early. Starting websocket feed.")
+                break
+        
+        # If we're still here and markets aren't open, terminate
+        if not should_enable_websocket():
+            logger.info("[FyersFeedLoop] Markets still closed after wait. Terminating.")
+            return
 
     try:
         login_success = await fyers_wrapper_instance.login()
@@ -93,13 +129,39 @@ async def fyers_live_feed_loop():
         fyers_wrapper_instance.connect_websocket()
         logger.info("[FyersFeedLoop] Fyers WebSocket connection process initiated.")
 
+        # Send market open status to clients
+        market_status = get_market_status()
+        await manager.broadcast({
+            "event": "market_status",
+            "message": f"Live feed active - {market_status['message']}",
+            "status": market_status
+        })
+
+        last_market_check = asyncio.get_event_loop().time()
+        market_check_interval = 60  # Check market status every minute
+
         while True:
+            # Check if we have active connections
             if not manager.active_connections:
                 logger.info("[FyersFeedLoop] No active clients. Waiting 5s for reconnect before shutdown...")
                 await asyncio.sleep(5)  # Grace period for clients to reconnect (e.g., on page refresh)
                 if not manager.active_connections:
                     logger.info("[FyersFeedLoop] No clients reconnected. Shutting down.")
                     break
+            
+            # Periodically check if markets are still open
+            current_time = asyncio.get_event_loop().time()
+            if current_time - last_market_check > market_check_interval:
+                if not should_enable_websocket():
+                    logger.info("[FyersFeedLoop] Markets closed during session. Shutting down websocket.")
+                    market_status = get_market_status()
+                    await manager.broadcast({
+                        "event": "market_closed",
+                        "message": f"Markets closed - {market_status['message']}",
+                        "status": market_status
+                    })
+                    break
+                last_market_check = current_time
             
             try:
                 msg = await asyncio.wait_for(queue.get(), timeout=1.0)

@@ -8,6 +8,7 @@ import logzero
 import requests  # Add this import for better error handling
 logzero.loglevel(logging.ERROR)
 from algosat.brokers.base import BrokerInterface
+from algosat.brokers.models import BalanceSummary
 from algosat.common.broker_utils import get_broker_credentials, upsert_broker_credentials
 from algosat.common.logger import get_logger
 from typing import Dict, Any, List
@@ -372,15 +373,11 @@ class AngelWrapper(BrokerInterface):
             logger.error(f"Error fetching Angel order details: {e}")
             return []
 
-    async def get_balance_summary(self, *args, **kwargs) -> dict:
+    async def get_balance_summary(self, *args, **kwargs) -> BalanceSummary:
         """
         Return summary: total_balance, available, utilized for Angel. Not implemented, returns 0s.
         """
-        return {
-            "total_balance": 0,
-            "available": 0,
-            "utilized": 0
-        }
+        return BalanceSummary()
 
     async def get_balance(self, *args, **kwargs) -> dict:
         """
