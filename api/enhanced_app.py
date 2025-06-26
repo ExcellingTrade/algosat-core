@@ -209,7 +209,7 @@ app.add_middleware(
     allowed_hosts=["localhost", "127.0.0.1", "82.25.109.188", "*.local", "*"]
 )
 
-@app.post("/auth/token/refresh", response_model=TokenResponse, tags=["Authentication"])
+@app.post("/auth/refresh", response_model=TokenResponse, tags=["Authentication"])
 async def refresh_token(current_user_info: Dict[str, Any] = Depends(get_current_user)):
     """Refresh JWT token."""
     global security_manager, error_tracker, logger # Ensure globals are accessible

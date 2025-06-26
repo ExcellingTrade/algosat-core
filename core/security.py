@@ -706,3 +706,38 @@ class SecurityManager:
         """Validate request for security checks."""
         # Basic request validation - can be expanded
         return True
+    
+    async def logout_user(self, user_id: str) -> bool:
+        """Logout user by invalidating their session."""
+        try:
+            # Log the logout event for audit trail
+            self.logger.info(f"User logout requested for user_id: {user_id}")
+            
+            # In a real-world scenario, you might want to:
+            # 1. Add token to blacklist/revocation list
+            # 2. Clear user sessions from Redis/cache
+            # 3. Log security event
+            
+            # For now, we'll just log the event and return success
+            # The actual token invalidation happens on the client side
+            # by clearing localStorage
+            
+            # Log security event
+            try:
+                conn = sqlite3.connect(str(self.security_db_path))
+                cursor = conn.cursor()
+                cursor.execute("""
+                    INSERT INTO security_events 
+                    (event_type, description, severity, user_id, timestamp) 
+                    VALUES (?, ?, ?, ?, ?)
+                """, ("logout", f"User {user_id} logged out", "INFO", user_id, datetime.utcnow()))
+                conn.commit()
+                conn.close()
+            except Exception as e:
+                self.logger.warning(f"Failed to log logout event: {e}")
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error during logout for user {user_id}: {e}")
+            return False
