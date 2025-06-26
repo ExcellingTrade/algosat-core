@@ -128,7 +128,9 @@ def get_log_file():
     Return the single daily log file for the whole project.
     """
     today_date = get_ist_now().strftime("%Y-%m-%d")
-    log_file = os.path.join(constants.LOG_DIR, f"algosat-{today_date}.log")
+    date_dir = os.path.join(constants.LOG_DIR, today_date)
+    os.makedirs(date_dir, exist_ok=True)
+    log_file = os.path.join(date_dir, f"algosat-{today_date}.log")
     return log_file
 
 
@@ -208,12 +210,13 @@ def get_logger(module_name: str) -> logging.Logger:
         from datetime import datetime
         import os
         log_dir = os.path.join(os.path.dirname(__file__), '../../logs')
-        os.makedirs(log_dir, exist_ok=True)
         today = get_ist_now().strftime('%Y-%m-%d')
+        date_dir = os.path.join(log_dir, today)
+        os.makedirs(date_dir, exist_ok=True)
         if module_name.startswith("api."):
-            log_file = os.path.join(log_dir, f"api-{today}.log")
+            log_file = os.path.join(date_dir, f"api-{today}.log")
         else:
-            log_file = os.path.join(log_dir, f"algosat-{today}.log")
+            log_file = os.path.join(date_dir, f"algosat-{today}.log")
         file_handler = RotatingFileHandler(log_file, maxBytes=2*1024*1024, backupCount=7, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         file_formatter = ISTFormatter(
