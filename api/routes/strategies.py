@@ -183,8 +183,6 @@ async def create_strategy_config_for_strategy(strategy_id: int, config: Strategy
             'description': config.description,
             'exchange': config.exchange,
             'instrument': config.instrument,
-            'order_type': config.order_type.value,
-            'product_type': config.product_type.value,
             'trade': config.trade,
             'indicators': config.indicators
         }
@@ -245,10 +243,6 @@ async def update_strategy_config_for_strategy(strategy_id: int, config_id: int, 
         update_data["exchange"] = update.exchange
     if update.instrument is not None:
         update_data["instrument"] = update.instrument
-    if update.order_type is not None:
-        update_data["order_type"] = update.order_type.value
-    if update.product_type is not None:
-        update_data["product_type"] = update.product_type.value
     
     # Handle trade configuration updates
     if update.trade is not None:

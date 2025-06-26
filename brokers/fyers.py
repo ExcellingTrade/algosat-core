@@ -36,6 +36,7 @@ import pytz
 import requests
 from asynciolimiter import Limiter
 from fyers_apiv3 import fyersModel
+from fyers_apiv3.FyersWebsocket import data_ws
 from selenium.webdriver.common.by import By
 from seleniumbase import SB
 
@@ -125,6 +126,9 @@ class FyersWrapper(BrokerInterface):
         self.is_async = True  # Default to asynchronous mode
         self.token = None
         self.appId = None
+        self.ws = None  # WebSocket instance
+        self.ws_connected = False
+        self._ws_callbacks = {}
 
     @staticmethod
     def _make_margin_request(data):
@@ -1099,6 +1103,93 @@ class FyersWrapper(BrokerInterface):
                     sb.disconnect()
                     sb.sleep(1)
         return None
+
+    def init_websocket(self, access_token=None, log_path="", litemode=False, write_to_file=False, reconnect=True,
+                      on_connect=None, on_close=None, on_error=None, on_message=None):
+        """
+        Initialize the Fyers WebSocket connection. Call this after login/setup_auth.
+        You can pass custom callback functions for connect, close, error, and message events.
+        If not provided, default print-based callbacks will be used.
+        """
+        if not access_token:
+            if not self.token or not self.appId:
+                raise RuntimeError("FyersWrapper: Access token not available. Please login first.")
+            access_token = f"{self.appId}:{self.token}"
+        # Store callbacks for later use
+        self._ws_callbacks = {
+            "on_connect": on_connect or self._default_on_connect,
+            "on_close": on_close or self._default_on_close,
+            "on_error": on_error or self._default_on_error,
+            "on_message": on_message or self._default_on_message,
+        }
+        self.ws = data_ws.FyersDataSocket(
+            access_token=access_token,
+            log_path=log_path,
+            litemode=litemode,
+            write_to_file=write_to_file,
+            reconnect=reconnect,
+            on_connect=self._ws_callbacks["on_connect"],
+            on_close=self._ws_callbacks["on_close"],
+            on_error=self._ws_callbacks["on_error"],
+            on_message=self._ws_callbacks["on_message"],
+        )
+        logger.info("Fyers WebSocket initialized.")
+
+    def connect_websocket(self):
+        """
+        Connect to the Fyers WebSocket. Call after init_websocket().
+        """
+        if not self.ws:
+            raise RuntimeError("WebSocket not initialized. Call init_websocket() first.")
+        self.ws.connect()
+        self.ws_connected = True
+        logger.info("Fyers WebSocket connection started.")
+
+    def subscribe_websocket(self, symbols, data_type="SymbolUpdate"):
+        """
+        Subscribe to symbols and data type on the WebSocket.
+        """
+        if not self.ws or not self.ws_connected:
+            raise RuntimeError("WebSocket not connected. Call connect_websocket() first.")
+        self.ws.subscribe(symbols=symbols, data_type=data_type)
+        logger.info(f"Subscribed to {symbols} for {data_type}.")
+
+    def keep_websocket_running(self):
+        """
+        Keep the WebSocket running to receive real-time data.
+        """
+        if not self.ws or not self.ws_connected:
+            raise RuntimeError("WebSocket not connected. Call connect_websocket() first.")
+        self.ws.keep_running()
+
+    def close_websocket(self):
+        """
+        Close the WebSocket connection.
+        """
+        if self.ws:
+            self.ws.close_connection()
+            self.ws_connected = False
+            logger.info("Fyers WebSocket connection closed.")
+
+    # Default callbacks (can be overridden)
+    def _default_on_message(self, message):
+        logger.info(f"WebSocket Response: {message}")
+        if hasattr(self, 'ws_queue') and self.ws_queue:
+            try:
+                asyncio.create_task(self.ws_queue.put(message))
+            except Exception as e:
+                logger.error(f"Failed to queue WebSocket message: {e}")
+
+    def _default_on_error(self, message):
+        logger.error(f"WebSocket Error: {message}")
+
+    def _default_on_close(self, message):
+        logger.info(f"WebSocket Connection closed: {message}")
+        self.ws_connected = False
+
+    def _default_on_connect(self):
+        logger.info("WebSocket Connected.")
+        self.ws_connected = True
 
 
 # Assuming from_date and to_date are in 'YYYY-MM-DD HH:MM:SS' format or datetime objects

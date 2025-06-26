@@ -39,7 +39,7 @@ from algosat.core.db import AsyncSessionLocal, get_user_by_username, get_user_by
 from .auth_dependencies import get_current_user
 
 # Import existing API routes
-from .routes import strategies, brokers, positions, trades, orders, nse_data, balance, logs # Added logs import
+from .routes import strategies, brokers, positions, trades, orders, nse_data, balance, logs, livefeed_ws # Added logs import
 
 # Use default port for now
 API_PORT = 8000
@@ -144,9 +144,13 @@ def get_allowed_origins():
         "http://127.0.0.1:3001",
         "http://localhost:5173",  # Vite dev server
         "http://127.0.0.1:5173",
-        # Production/VPS IP address - both HTTP and HTTPS
-        "http://82.25.109.188:3000",
+        "http://localhost:8001",  # API port (for dev tools)
+        "http://127.0.0.1:8001",
+        # Production/VPS IP address - both HTTP and HTTPS with multiple ports
+        "http://82.25.109.188:3000",   # UI port
         "https://82.25.109.188:3000",
+        "http://82.25.109.188:8001",   # API port
+        "https://82.25.109.188:8001",
         "http://82.25.109.188",
         "https://82.25.109.188",
         # Add null origin for certain development scenarios
@@ -172,10 +176,14 @@ def is_origin_allowed(origin: str) -> bool:
     # Check IP-based patterns for local network access
     ip_patterns = [
         r"http://192\.168\.\d{1,3}\.\d{1,3}:3000",
+        r"http://192\.168\.\d{1,3}\.\d{1,3}:8001",
         r"http://10\.\d{1,3}\.\d{1,3}\.\d{1,3}:3000", 
+        r"http://10\.\d{1,3}\.\d{1,3}\.\d{1,3}:8001",
         r"http://172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}:3000",
+        r"http://172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}:8001",
         # Pattern for any public IP (be careful with this in production)
         r"http://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:3000",
+        r"http://\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:8001",
     ]
     
     for pattern in ip_patterns:
@@ -618,6 +626,7 @@ create_secured_router(orders.router, "/orders", ["Orders"]) # Added orders route
 create_secured_router(nse_data.router, "/nse", ["NSE Data"]) # Added NSE Data router
 create_secured_router(balance.router, "/api/v1", ["Balance Summary"]) # Added balance router
 create_secured_router(logs.router, "/logs", ["Log Management"]) # Added logs router
+app.include_router(livefeed_ws.router, tags=["WebSocket"])
 
 @app.get("/")
 async def root():

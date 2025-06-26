@@ -34,8 +34,6 @@ class StrategyConfigBase(BaseModel):
     instrument: Optional[str] = Field(None, description="Instrument type")
     trade: Dict[str, Any] = Field(default_factory=dict)
     indicators: Dict[str, Any] = Field(default_factory=dict)
-    order_type: OrderTypeEnum = Field(..., description="Order type: MARKET or LIMIT")
-    product_type: ProductTypeEnum = Field(..., description="Product type: INTRADAY or DELIVERY")
 
 class StrategyConfigCreate(StrategyConfigBase):
     pass
@@ -47,8 +45,6 @@ class StrategyConfigUpdate(BaseModel):
     instrument: Optional[str] = None
     trade: Optional[Dict[str, Any]] = None
     indicators: Optional[Dict[str, Any]] = None
-    order_type: Optional[OrderTypeEnum] = None
-    product_type: Optional[ProductTypeEnum] = None
 
 class StrategyConfigResponse(StrategyConfigBase):
     id: int
@@ -102,8 +98,14 @@ class StrategyConfigListResponse(BaseModel):
     description: Optional[str] = None
     exchange: str
     instrument: Optional[str] = None
-    order_type: OrderTypeEnum
-    product_type: ProductTypeEnum
+    created_at: datetime
+    updated_at: datetime
+    
+    @field_serializer("created_at", "updated_at")
+    def serialize_dt(self, v):
+        if isinstance(v, str):
+            return v
+        return v.isoformat() if v else None
     
     class Config:
         from_attributes = True
@@ -112,14 +114,6 @@ class StrategyConfigDetailResponse(StrategyConfigListResponse):
     trade: Dict[str, Any] = Field(default_factory=dict)
     indicators: Dict[str, Any] = Field(default_factory=dict)
     strategy_id: int
-    created_at: datetime
-    updated_at: datetime
-
-    @field_serializer("created_at", "updated_at")
-    def serialize_dt(self, v):
-        if isinstance(v, str):
-            return v
-        return v.isoformat() if v else None
 
 # --- Broker Schemas ---
 class BrokerBase(BaseModel):

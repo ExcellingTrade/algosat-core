@@ -34,8 +34,6 @@ strategy_configs = Table(
     Column("description", String, nullable=True),  # Added description
     Column("exchange", String, nullable=False),
     Column("instrument", String, nullable=True),
-    Column("order_type", String, nullable=False, server_default=text("'MARKET'")),
-    Column("product_type", String, nullable=False, server_default=text("'INTRADAY'")),  # "INTRADAY" or "DELIVERY"
     Column("trade", JSON, nullable=False, server_default=text("'{}'::jsonb")),
     Column("indicators", JSON, nullable=False, server_default=text("'{}'::jsonb")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
