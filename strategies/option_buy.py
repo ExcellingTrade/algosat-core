@@ -163,21 +163,34 @@ class OptionBuyStrategy(StrategyBase):
             logger.info(f"Selected strikes for entry: {self._strikes}")
 
     async def sync_open_positions(self):
-        """Synchronize self._positions with open orders in the database for all strikes for the current trade day using strategy_symbol_id."""
+        """
+        Synchronize self._positions with open orders in the database for all strikes for the current trade day.
+        Uses the strategy_id from config to find related strategy_symbols and their open orders.
+        Now uses the strike_symbol field directly from orders table instead of joining with strategy_symbols.
+        """
         self._positions = {}
         async with AsyncSessionLocal() as session:
+            from algosat.core.db import get_open_orders_for_strategy_and_tradeday
+            
             trade_day = get_trade_day(get_ist_datetime())
             strategy_id = getattr(self.cfg, 'strategy_id', None)
-            config_id = self.get_config_id()
-            for strike in self._strikes:
-                strategy_symbol_id = None
-                if strategy_id and strike and config_id:
-                    strategy_symbol_id = await get_strategy_symbol_id(session, strategy_id, strike, config_id)
-                if not strategy_symbol_id:
-                    continue
-                open_orders = await get_open_orders_for_strategy_symbol_and_tradeday(session, strategy_symbol_id, trade_day)
-                if open_orders:
-                    self._positions[strike] = open_orders
+            
+            if not strategy_id:
+                logger.warning("No strategy_id found in config, cannot sync open positions")
+                return
+            
+            # Get all open orders for this strategy on the current trade day
+            open_orders = await get_open_orders_for_strategy_and_tradeday(session, strategy_id, trade_day)
+            
+            # Group orders by strike symbol (now direct from orders.strike_symbol)
+            for order in open_orders:
+                strike_symbol = order.get("strike_symbol")
+                if strike_symbol and strike_symbol in self._strikes:
+                    if strike_symbol not in self._positions:
+                        self._positions[strike_symbol] = []
+                    self._positions[strike_symbol].append(order)
+            
+            logger.debug(f"Synced positions for strategy {strategy_id}: {list(self._positions.keys())}")
 
     async def process_cycle(self) -> Optional[dict]:
         """

@@ -389,7 +389,7 @@ class BrokerManager:
             async with AsyncSessionLocal() as session:
                 strat = await get_strategy_by_id(session, strategy_id)
                 if strat:
-                    strategy_name = strat.get('name')
+                    strategy_name = strat.get('key')
                     if strategy_name in ["OptionBuy", "OptionSell"]:
                         order_type = "OPTION_STRATEGY"
                         product_type = "OPTION_STRATEGY"

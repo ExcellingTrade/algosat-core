@@ -451,8 +451,53 @@ async def get_strategy_configs_paginated(session, strategy_id, page=1, page_size
         'total_pages': (total_count + page_size - 1) // page_size
     }
 
+async def get_active_strategy_symbols_with_configs(session):
+    """
+    Fetch all active symbols for enabled strategies along with their config details.
+    Returns symbols with full strategy and config information needed for trading.
+    
+    Returns:
+        List of rows with columns: symbol_id, strategy_id, strategy_key, strategy_name, 
+        symbol, config_id, config_name, config_description, exchange, instrument, 
+        trade_config, indicators_config, order_type, product_type
+    """
+    from sqlalchemy import select
+    
+    stmt = (
+        select(
+            strategy_symbols.c.id.label('symbol_id'),
+            strategies.c.id.label('strategy_id'),
+            strategies.c.key.label('strategy_key'),
+            strategies.c.name.label('strategy_name'),
+            strategies.c.order_type,
+            strategies.c.product_type,
+            strategy_symbols.c.symbol,
+            strategy_symbols.c.status.label('symbol_status'),
+            strategy_configs.c.id.label('config_id'),
+            strategy_configs.c.name.label('config_name'),
+            strategy_configs.c.description.label('config_description'),
+            strategy_configs.c.exchange,
+            strategy_configs.c.instrument,
+            strategy_configs.c.trade.label('trade_config'),
+            strategy_configs.c.indicators.label('indicators_config')
+        )
+        .select_from(
+            strategy_symbols
+            .join(strategies, strategy_symbols.c.strategy_id == strategies.c.id)
+            .join(strategy_configs, strategy_symbols.c.config_id == strategy_configs.c.id)
+        )
+        .where(strategies.c.enabled == True)
+        .where(strategy_symbols.c.status == 'active')
+    )
+    
+    result = await session.execute(stmt)
+    return result.fetchall()
+
 async def get_enabled_default_strategy_configs(session):
     """
+    DEPRECATED: This function is for the old schema where configs had is_default flag.
+    Use get_active_strategy_symbols_with_configs() instead for the new schema.
+    
     Fetch all default configs for enabled strategies.
     """
     stmt = (
@@ -463,15 +508,6 @@ async def get_enabled_default_strategy_configs(session):
     )
     result = await session.execute(stmt)
     return result.fetchall()
-
-async def get_strategy_name_by_id(session, strategy_id):
-    """
-    Fetch the strategy name for a given strategy_id.
-    """
-    stmt = select(strategies.c.name).where(strategies.c.id == strategy_id)
-    result = await session.execute(stmt)
-    row = result.first()
-    return row[0] if row else None
 
 
 # New: Insert only default strategies (no configs)
@@ -776,6 +812,54 @@ async def get_open_orders_for_symbol_and_tradeday(session, symbol: str, trade_da
 async def get_open_orders_for_strategy_symbol_and_tradeday(session, strategy_config_id: int, symbol: str, trade_day):
     """Return all open orders for a given strategy config, symbol, and trade day."""
     return await get_open_orders_for_symbol_and_tradeday(session, symbol, trade_day, strategy_config_id)
+
+async def get_open_orders_for_strategy_and_tradeday(session, strategy_id: int, trade_day):
+    """
+    Return all open orders for a given strategy on a specific trade day.
+    Joins orders -> strategy_symbols -> strategies to find orders by strategy_id.
+    """
+    from sqlalchemy import join, func, or_
+    
+    # Convert trade_day to date for comparison
+    if hasattr(trade_day, 'date'):
+        trade_date = trade_day.date()
+    else:
+        trade_date = trade_day
+    
+    # Define what we consider "open" statuses - include more statuses
+    open_statuses = ['AWAITING_ENTRY', 'OPEN', 'PARTIALLY_FILLED', 'PENDING', 'TRIGGER_PENDING']
+    
+    # Join orders with strategy_symbols to get strategy_id relationship
+    join_stmt = join(
+        orders, 
+        strategy_symbols, 
+        orders.c.strategy_symbol_id == strategy_symbols.c.id
+    )
+    
+    stmt = (
+        select(orders)
+        .select_from(join_stmt)
+        .where(
+            and_(
+                strategy_symbols.c.strategy_id == strategy_id,
+                orders.c.status.in_(open_statuses),
+                or_(
+                    func.date(orders.c.signal_time) == trade_date,
+                    func.date(orders.c.entry_time) == trade_date,
+                    # If both are null, check created_at
+                    and_(
+                        orders.c.signal_time.is_(None),
+                        orders.c.entry_time.is_(None),
+                        func.date(orders.c.created_at) == trade_date
+                    )
+                )
+            )
+        )
+        .order_by(orders.c.signal_time.desc())
+    )
+    
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
 
 # --- Data Provider Broker ---
 async def get_data_enabled_broker(session):

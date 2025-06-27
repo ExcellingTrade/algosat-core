@@ -263,6 +263,10 @@ class DataManager:
             async with AsyncSessionLocal() as session:
                 order_row = await get_order_by_id(session, parent_order_id)
                 broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
+                
+                # Get symbol directly from orders.strike_symbol (no need for additional query)
+                symbol = order_row.get("strike_symbol", "Unknown")
+                
                 broker_orders: List[BrokerOrder] = []
                 for be in broker_execs:
                     broker_orders.append(BrokerOrder(
@@ -272,9 +276,9 @@ class DataManager:
                         raw_response=be.get("raw_response")
                     ))
                 return OrderAggregate(
-                    strategy_config_id=order_row.get("strategy_config_id"),
+                    strategy_config_id=order_row.get("strategy_symbol_id"),
                     parent_order_id=parent_order_id,
-                    symbol=order_row.get("symbol"),
+                    symbol=symbol,
                     entry_price=order_row.get("entry_price"),
                     side=order_row.get("side"),
                     broker_orders=broker_orders

@@ -42,7 +42,7 @@ class OrderStatus(str, Enum):
     AMO_REQ_RECEIVED = "AMO_REQ_RECEIVED"
 
 class OrderRequest(BaseModel):
-    symbol: str
+    symbol: str  # Strike/tradeable symbol (e.g., "NIFTY50-25JUN25-23400-CE")
     quantity: int
     side: Side
     order_type: OrderType

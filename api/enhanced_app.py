@@ -20,6 +20,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse, PlainTextResponse
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
+from algosat.api.routes import dashboard
 from algosat.common.logger import get_logger
 from pydantic import BaseModel # Added
 from sqlalchemy import select
@@ -627,6 +628,7 @@ create_secured_router(nse_data.router, "/nse", ["NSE Data"]) # Added NSE Data ro
 create_secured_router(balance.router, "/api/v1", ["Balance Summary"]) # Added balance router
 create_secured_router(logs.router, "/logs", ["Log Management"]) # Added logs router
 app.include_router(livefeed_ws.router, tags=["WebSocket"])
+app.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 
 @app.get("/")
 async def root():

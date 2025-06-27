@@ -3,7 +3,7 @@ import asyncio
 import math
 from sqlalchemy import select
 from algosat.core.dbschema import strategies as strategies_table
-from algosat.core.db import AsyncSessionLocal, get_strategy_name_by_id
+from algosat.core.db import AsyncSessionLocal #, get_strategy_name_by_id
 from algosat.common.logger import get_logger
 from algosat.core.execution_manager import get_execution_manager
 from algosat.strategies.option_buy import OptionBuyStrategy
@@ -43,11 +43,11 @@ async def run_strategy_config(config_row, data_manager: DataManager, order_manag
     else:
         config = config_row
 
-    strategy_name = getattr(config, "strategy_name", None)
-    if not strategy_name:
-        # Fallback: fetch from strategies table using strategy_id
-        async with AsyncSessionLocal() as session:
-            strategy_name = await get_strategy_name_by_id(session, config.strategy_id)
+    strategy_name = getattr(config, "strategy_key", None)
+    # if not strategy_name:
+    #     # Fallback: fetch from strategies table using strategy_id
+    #     async with AsyncSessionLocal() as session:
+    #         strategy_name = await get_strategy_name_by_id(session, config.strategy_id)
     logger.debug(f"Config id: {getattr(config, 'id', None)}, strategy_name resolved: '{strategy_name}'")
     StrategyClass = STRATEGY_MAP.get(strategy_name)
     if not StrategyClass:

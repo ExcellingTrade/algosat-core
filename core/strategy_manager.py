@@ -4,7 +4,7 @@ import asyncio
 import datetime
 from typing import Dict
 from sqlalchemy.exc import ProgrammingError
-from algosat.core.db import get_enabled_default_strategy_configs, AsyncSessionLocal
+from algosat.core.db import get_active_strategy_symbols_with_configs, AsyncSessionLocal
 from algosat.config import settings
 from algosat.common.logger import get_logger
 from algosat.core.strategy_runner import run_strategy_config
@@ -65,28 +65,30 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
         async with AsyncSessionLocal() as session:
             while True:
                 try:
-                    configs = await get_enabled_default_strategy_configs(session)
+                    active_symbols = await get_active_strategy_symbols_with_configs(session)
                     now = get_ist_datetime().time()  # Use IST time for all time logic
-                    if configs:
-                        # Only print found configs the first time
+                    if active_symbols:
+                        # Only print found symbols the first time
                         if not running_tasks:
-                            logger.debug(f"🟢 Found configs: {[row.id for row in configs]}")
-                        current_ids = {row.id for row in configs}
+                            logger.info(f"🟢 Found active symbols: {[row.symbol for row in active_symbols]}")
+                        current_symbol_ids = {row.symbol_id for row in active_symbols}
                         
 
-                        # Cancel tasks for configs no longer present as default
-                        for cfg_id in list(running_tasks):
-                            if cfg_id not in current_ids:
-                                logger.info(f"🟡 Cancelling runner for config {cfg_id}")
-                                running_tasks[cfg_id].cancel()
-                                running_tasks.pop(cfg_id, None)
+                        # Cancel tasks for symbols no longer active
+                        for symbol_id in list(running_tasks):
+                            if symbol_id not in current_symbol_ids:
+                                logger.info(f"🟡 Cancelling runner for symbol {symbol_id}")
+                                running_tasks[symbol_id].cancel()
+                                running_tasks.pop(symbol_id, None)
 
-                        # Launch/stop tasks for configs based on time and trade_type
-                        for row in configs:
-                            cfg_id = row.id
-                            trade_type = getattr(row, "trade_type", "intraday")
-                            square_off_time = getattr(row, "square_off_time", "19:15")
-                            start_time = getattr(row, "start_time", "09:15")
+                        # Launch/stop tasks for symbols based on time and product_type
+                        for row in active_symbols:
+                            symbol_id = row.symbol_id
+                            product_type = row.product_type  # Now comes from strategy table
+                            # Use default times if not specified in trade_config
+                            trade_config = row.trade_config or {}
+                            square_off_time = trade_config.get("square_off_time", "15:15")
+                            start_time = trade_config.get("start_time", "09:15")
                             sq_time = datetime.datetime.strptime(square_off_time, "%H:%M").time()
                             st_time = datetime.datetime.strptime(start_time, "%H:%M").time()
                             st_time = st_time.replace(hour=4, minute=0)  # Adjust start time to 4 AM
@@ -96,47 +98,68 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                                     return start <= now < end
                                 else:
                                     return start <= now or now < end
-                            if trade_type == "intraday":
+                            if product_type == "INTRADAY":
                                 if is_time_between(st_time, sq_time, now):
-                                    if cfg_id not in running_tasks:
-                                        logger.debug(f"Starting runner task for config {cfg_id} (intraday window)")
-                                        # Convert row to StrategyConfig
-                                        if hasattr(row, '_mapping'):
-                                            config_dict = dict(row._mapping)
-                                        elif isinstance(row, dict):
-                                            config_dict = row
-                                        else:
-                                            config_dict = dict(row)
+                                    if symbol_id not in running_tasks:
+                                        logger.debug(f"Starting runner task for symbol {symbol_id} (intraday window)")
+                                        # Create StrategyConfig from symbol data
+                                        config_dict = {
+                                            'id': row.config_id,
+                                            'strategy_id': row.strategy_id,
+                                            'name': row.config_name,
+                                            'description': row.config_description,
+                                            'exchange': row.exchange,
+                                            'instrument': row.instrument,
+                                            'trade': row.trade_config,
+                                            'indicators': row.indicators_config,
+                                            'symbol': row.symbol,
+                                            'symbol_id': row.symbol_id,
+                                            'strategy_key': row.strategy_key,
+                                            'strategy_name': row.strategy_name,
+                                            'order_type': row.order_type,
+                                            'product_type': row.product_type
+                                        }
                                         config = StrategyConfig(**config_dict)
                                         task = asyncio.create_task(run_strategy_config(config, data_manager, order_manager, order_queue))
-                                        running_tasks[cfg_id] = task
+                                        running_tasks[symbol_id] = task
                                 else:
-                                    if cfg_id in running_tasks:
-                                        logger.info(f"Stopping intraday runner for config {cfg_id} (outside window)")
-                                        running_tasks[cfg_id].cancel()
-                                        running_tasks.pop(cfg_id, None)
-                            else:  # delivery
+                                    if symbol_id in running_tasks:
+                                        logger.info(f"Stopping intraday runner for symbol {symbol_id} (outside window)")
+                                        running_tasks[symbol_id].cancel()
+                                        running_tasks.pop(symbol_id, None)
+                            else:  # DELIVERY
                                 # Optionally, stop at night (e.g., 00:00-06:00), else run 24/7
                                 # To always run, comment out the next 4 lines
                                 if is_time_between(datetime.time(0,0), datetime.time(6,0), now):
-                                    if cfg_id in running_tasks:
-                                        logger.info(f"Stopping delivery runner for config {cfg_id} (maintenance window)")
-                                        running_tasks[cfg_id].cancel()
-                                        running_tasks.pop(cfg_id, None)
+                                    if symbol_id in running_tasks:
+                                        logger.info(f"Stopping delivery runner for symbol {symbol_id} (maintenance window)")
+                                        running_tasks[symbol_id].cancel()
+                                        running_tasks.pop(symbol_id, None)
                                 else:
-                                    if cfg_id not in running_tasks:
-                                        logger.debug(f"Starting runner task for config {cfg_id} (delivery)")
-                                        if hasattr(row, '_mapping'):
-                                            config_dict = dict(row._mapping)
-                                        elif isinstance(row, dict):
-                                            config_dict = row
-                                        else:
-                                            config_dict = dict(row)
+                                    if symbol_id not in running_tasks:
+                                        logger.debug(f"Starting runner task for symbol {symbol_id} (delivery)")
+                                        # Create StrategyConfig from symbol data
+                                        config_dict = {
+                                            'id': row.config_id,
+                                            'strategy_id': row.strategy_id,
+                                            'name': row.config_name,
+                                            'description': row.config_description,
+                                            'exchange': row.exchange,
+                                            'instrument': row.instrument,
+                                            'trade': row.trade_config,
+                                            'indicators': row.indicators_config,
+                                            'symbol': row.symbol,
+                                            'symbol_id': row.symbol_id,
+                                            'strategy_key': row.strategy_key,
+                                            'strategy_name': row.strategy_name,
+                                            'order_type': row.order_type,
+                                            'product_type': row.product_type
+                                        }
                                         config = StrategyConfig(**config_dict)
                                         task = asyncio.create_task(run_strategy_config(config, data_manager, order_manager, order_queue))
-                                        running_tasks[cfg_id] = task
+                                        running_tasks[symbol_id] = task
                     else:
-                        logger.info("🟡 No configs found")
+                        logger.info("🟡 No active symbols found")
                 except ProgrammingError as pe:
                     logger.warning(f"🟡 DB schema not ready: {pe}")
                 except Exception as e:

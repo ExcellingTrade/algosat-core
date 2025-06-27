@@ -2,7 +2,7 @@
 
 from sqlalchemy import (
     MetaData, Table, Column, Integer, String, Boolean,
-    JSON, DateTime, ForeignKey, text, UniqueConstraint, Index, Float
+    JSON, DateTime, ForeignKey, text, UniqueConstraint, Index, Float, Numeric
 )
 from sqlalchemy.dialects.postgresql import JSONB
 
@@ -148,6 +148,8 @@ orders = Table(
     "orders", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("strategy_symbol_id", Integer, ForeignKey("strategy_symbols.id"), nullable=False, index=True),
+    Column("strike_symbol", String(100), nullable=True, index=True),  # NEW: Actual tradeable symbol (e.g., "NSE:NIFTY50-25JUN25-23400-CE")
+    Column("pnl", Numeric(15, 2), nullable=True, index=True),  # NEW: Profit/Loss for this order
     Column("candle_range",  Float, nullable=True),
     Column("entry_price",  Float, nullable=True),
     Column("stop_loss",  Float, nullable=True),

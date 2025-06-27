@@ -19,7 +19,6 @@ from datetime import datetime
 from algosat.core.time_utils import to_ist
 import pytz
 from enum import Enum
-from algosat.core.strategy_symbol_utils import get_strategy_symbol_id
 
 logger = get_logger("OrderManager")
 
@@ -300,19 +299,21 @@ class OrderManager:
             if not strategy_config_id:
                 logger.error(f"[OrderManager] Could not extract strategy_config_id from config: {repr(config)}. Order will not be inserted.")
                 return None
-            # --- NEW: Resolve strategy_symbol_id ---
-            strategy_id = getattr(config, 'strategy_id', None) or (config.get('strategy_id') if isinstance(config, dict) else None)
-            symbol = getattr(order_payload, 'symbol', None)
-            config_id = strategy_config_id
-            strategy_symbol_id = None
-            if strategy_id and symbol and config_id:
-                strategy_symbol_id = await get_strategy_symbol_id(sess, strategy_id, symbol, config_id)
+            # --- Use symbol_id directly from config (already contains strategy_symbols.id) ---
+            strategy_symbol_id = getattr(config, 'symbol_id', None)
             if not strategy_symbol_id:
-                logger.error(f"[OrderManager] Could not resolve strategy_symbol_id for (strategy_id={strategy_id}, symbol={symbol}, config_id={config_id}). Order will not be inserted.")
+                logger.error(f"[OrderManager] Could not extract strategy_symbol_id from config: {repr(config)}. Config must have symbol_id field. Order will not be inserted.")
                 return None
+            
+            # Log for clarity: underlying vs strike symbol distinction
+            underlying_symbol = getattr(config, 'symbol', 'Unknown')  # e.g., "NIFTY50" 
+            strike_symbol = getattr(order_payload, 'symbol', 'Unknown')  # e.g., "NIFTY50-25JUN25-23400-CE"
+            logger.debug(f"[OrderManager] Order for underlying={underlying_symbol}, strike={strike_symbol}, strategy_symbol_id={strategy_symbol_id}")
             # --- Build order_data for logical order (orders table) ---
             order_data = {
                 "strategy_symbol_id": strategy_symbol_id,
+                "strike_symbol": strike_symbol,  # NEW: Store the actual tradeable strike symbol
+                "pnl": 0.0,  # NEW: Initialize PnL to 0 (will be updated when order is closed)
                 "candle_range": order_payload.extra.get("candle_range"),
                 "entry_price": order_payload.extra.get("entry_price", order_payload.price),
                 "stop_loss": order_payload.extra.get("stop_loss"),
@@ -415,6 +416,39 @@ class OrderManager:
                 new_values={"stop_loss": stop_loss}
             )
             logger.debug(f"Order {order_id} stop_loss updated to {stop_loss} in DB.")
+
+    async def update_order_pnl_in_db(self, order_id: int, pnl: float):
+        """
+        Update the PnL value for an order in the DB.
+        """
+        from algosat.core.db import AsyncSessionLocal, update_rows_in_table
+        from algosat.core.dbschema import orders
+        async with AsyncSessionLocal() as session:
+            await update_rows_in_table(
+                target_table=orders,
+                condition=orders.c.id == order_id,
+                new_values={"pnl": pnl}
+            )
+            logger.debug(f"Order {order_id} PnL updated to {pnl} in DB.")
+
+    async def update_order_exit_details_in_db(self, order_id: int, exit_price: float, exit_time, pnl: float, status: str):
+        """
+        Update exit details (exit_price, exit_time, PnL, status) for an order in the DB.
+        """
+        from algosat.core.db import AsyncSessionLocal, update_rows_in_table
+        from algosat.core.dbschema import orders
+        async with AsyncSessionLocal() as session:
+            await update_rows_in_table(
+                target_table=orders,
+                condition=orders.c.id == order_id,
+                new_values={
+                    "exit_price": exit_price,
+                    "exit_time": exit_time,
+                    "pnl": pnl,
+                    "status": status
+                }
+            )
+            logger.debug(f"Order {order_id} exit details updated: exit_price={exit_price}, pnl={pnl}, status={status}")
 
     async def get_all_broker_order_details(self) -> list:
         """
