@@ -483,7 +483,8 @@ async def insert_default_strategies(conn, default_strategy_configs) -> bool:
     for key, default_cfg in default_strategy_configs.items():
         ins = strategies.insert().values(
             key=key,
-            name=key,
+            name=default_cfg.get("name", key),
+            description=default_cfg.get("description", ""),
             enabled=True,
             created_at=now,
             updated_at=now,

@@ -13,6 +13,7 @@ strategies = Table(
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("key", String, nullable=False, unique=True),  # e.g. OptionBuy, OptionSell, SwingHighLow
     Column("name", String, nullable=False),
+    Column("description", String, nullable=True),
     Column("order_type", String, nullable=False, server_default=text("'MARKET'"),
            info={"choices": ["MARKET", "LIMIT"]}),
     Column("product_type", String, nullable=False, server_default=text("'INTRADAY'"),

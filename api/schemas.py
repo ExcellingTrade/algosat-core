@@ -65,6 +65,7 @@ class StrategyListResponse(BaseModel):
     id: int
     key: str
     name: str
+    description: Optional[str] = Field(None, description="Strategy description")
     enabled: bool
     order_type: OrderTypeEnum
     product_type: ProductTypeEnum
