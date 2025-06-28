@@ -98,7 +98,7 @@ def get_log_files_for_date(date: str) -> List[LogFile]:
     log_files = []
     
     try:
-        for log_file in LOGS_BASE_DIR.glob("*.log*"):
+        for log_file in LOGS_BASE_DIR.rglob("*.log*"):
             file_matched = False
             for pattern_name, pattern in LOG_PATTERNS.items():
                 match = re.match(pattern, log_file.name)
@@ -148,7 +148,7 @@ def get_available_log_dates() -> List[str]:
     cutoff_date = datetime.now() - timedelta(days=MAX_LOG_RETENTION_DAYS)
     
     try:
-        for log_file in LOGS_BASE_DIR.glob("*.log*"):
+        for log_file in LOGS_BASE_DIR.rglob("*.log*"):
             for pattern_name, pattern in LOG_PATTERNS.items():
                 match = re.match(pattern, log_file.name)
                 if match:
@@ -179,7 +179,7 @@ async def cleanup_old_logs():
     deleted_count = 0
     
     try:
-        for log_file in LOGS_BASE_DIR.glob("*.log*"):
+        for log_file in LOGS_BASE_DIR.rglob("*.log*"):
             if log_file.stat().st_mtime < cutoff_date.timestamp():
                 log_file.unlink()
                 deleted_count += 1
