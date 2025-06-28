@@ -169,19 +169,42 @@ orders = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 )
 
-# Broker executions table: one row per broker per order
+# Broker executions table: one row per actual execution (ENTRY/EXIT)
+# Each actual fill/execution from broker gets a separate row
 broker_executions = Table(
     "broker_executions", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
-    Column("parent_order_id", Integer, ForeignKey("orders.id"), nullable=False, index=True),  # renamed from order_id
+    Column("parent_order_id", Integer, ForeignKey("orders.id"), nullable=False, index=True),
     Column("broker_id", Integer, ForeignKey("broker_credentials.id"), nullable=False, index=True),
-    # Deprecated: broker_name, keep for migration only
-    Column("broker_name", String, nullable=True, index=True),
-    Column("broker_order_ids", JSONB, nullable=True),  # Broker's order ids (list)
-    Column("order_status_map", JSONB, nullable=True),  # {order_id: status}
-    Column("order_messages", JSONB, nullable=True),
-    Column("status", String, nullable=False, index=True),
-    Column("raw_response", JSONB, nullable=True),
+    
+    # Core execution details - one execution per row
+    Column("broker_order_id", String(100), nullable=False, index=True),  # Single broker order ID for this execution
+    Column("side", String(10), nullable=False, index=True),  # 'ENTRY' or 'EXIT'
+    Column("execution_price", Numeric(15, 4), nullable=False),  # Actual traded price for this execution
+    Column("executed_quantity", Integer, nullable=False),  # Actual executed quantity for this execution
+    Column("execution_time", DateTime(timezone=True), nullable=True),  # When this execution happened
+    Column("execution_id", String(100), nullable=True, index=True),  # Broker's trade/execution ID (if available)
+    
+    # Execution metadata
+    Column("is_partial_fill", Boolean, nullable=False, server_default=text("false")),  # True if this was a partial fill
+    Column("sequence_number", Integer, nullable=True),  # For ordering multiple executions of same order
+    Column("symbol", String(100), nullable=True),  # Symbol for this execution (useful for hedge orders)
+    
+    # Status and tracking
+    Column("status", String(50), nullable=False, index=True),  # FILLED, PARTIAL, CANCELLED, etc.
+    Column("order_type", String(20), nullable=True),  # MARKET, LIMIT, SL, etc.
+    Column("notes", String(500), nullable=True),  # Any additional notes (manual exit, BO leg, etc.)
+    
+    # Legacy and raw data
+    Column("raw_execution_data", JSONB, nullable=True),  # Complete broker response for this execution
+    Column("order_messages", JSONB, nullable=True),  # Any messages related to this execution
+    
+    # Deprecated fields - keep for migration compatibility
+    Column("broker_name", String, nullable=True),  # Deprecated: use broker_id
+    Column("broker_order_ids", JSONB, nullable=True),  # Deprecated: now single broker_order_id
+    Column("order_status_map", JSONB, nullable=True),  # Deprecated: status per execution
+    Column("raw_response", JSONB, nullable=True),  # Deprecated: use raw_execution_data
+    
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 )

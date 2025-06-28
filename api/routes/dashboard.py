@@ -5,7 +5,7 @@ Dashboard API routes for main dashboard statistics.
 from datetime import datetime, timedelta
 from typing import Dict, Any
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, cast, Float
 from algosat.api.dependencies import get_db
 from algosat.api.auth_dependencies import get_current_user
 from algosat.core.dbschema import broker_balance_summaries, broker_credentials
@@ -32,9 +32,11 @@ async def get_dashboard_summary(session=Depends(get_db)) -> Dict[str, Any]:
         
         # Get today's total balance across all brokers
         today_balance_query = select(
-            func.sum(func.json_extract(broker_balance_summaries.c.summary, '$.total_balance')).label('total_balance')
+            func.sum(
+                cast(broker_balance_summaries.c.summary.op('->>')('total_balance'), Float)
+            ).label('total_balance')
         ).where(
-            func.date(broker_balance_summaries.c.created_at) == today
+            func.date(broker_balance_summaries.c.date) == today
         )
         
         today_result = await session.execute(today_balance_query)
@@ -43,9 +45,11 @@ async def get_dashboard_summary(session=Depends(get_db)) -> Dict[str, Any]:
         
         # Get yesterday's total balance for comparison
         yesterday_balance_query = select(
-            func.sum(func.json_extract(broker_balance_summaries.c.summary, '$.total_balance')).label('total_balance')
+            func.sum(
+                cast(broker_balance_summaries.c.summary.op('->>')('total_balance'), Float)
+            ).label('total_balance')
         ).where(
-            func.date(broker_balance_summaries.c.created_at) == yesterday
+            func.date(broker_balance_summaries.c.date) == yesterday
         )
         
         yesterday_result = await session.execute(yesterday_balance_query)

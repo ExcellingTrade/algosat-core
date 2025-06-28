@@ -11,7 +11,7 @@ except ModuleNotFoundError as e:
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import inspect, Table, MetaData, update, select, delete, func, text, and_ # Modified import
+from sqlalchemy import inspect, Table, MetaData, update, select, delete, func, text, and_, case # Modified import
 
 import os
 from datetime import datetime, timezone  # moved to top
@@ -34,6 +34,16 @@ AsyncSessionLocal = sessionmaker(
     class_=AsyncSession,
     expire_on_commit=False,  # keep objects alive after commit
 )
+
+# Database session getter for backward compatibility
+def get_database_session():
+    """
+    Get a database session. Use this in async context managers.
+    Example:
+        async with get_database_session() as session:
+            # Your database operations
+    """
+    return AsyncSessionLocal()
 
 async def has_table(table_name: str) -> bool:
     """
@@ -671,7 +681,29 @@ async def get_all_orders(session: AsyncSession):
     Retrieve all orders (no broker join).
     """
     stmt = (
-        select(orders)
+        select(
+            orders.c.id,
+            orders.c.strategy_symbol_id,
+            orders.c.strike_symbol,
+            orders.c.pnl,
+            orders.c.candle_range,
+            orders.c.entry_price,
+            orders.c.stop_loss,
+            orders.c.target_price,
+            orders.c.signal_time,
+            orders.c.entry_time,
+            orders.c.exit_time,
+            orders.c.exit_price,
+            orders.c.status,
+            orders.c.reason,
+            orders.c.atr,
+            orders.c.supertrend_signal,
+            orders.c.lot_qty,
+            orders.c.side,
+            orders.c.qty,
+            orders.c.created_at,
+            orders.c.updated_at
+        )
         .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
     )
     result = await session.execute(stmt)
@@ -739,6 +771,40 @@ async def get_orders_by_broker_and_strategy(session: AsyncSession, broker_name: 
         .select_from(orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id))
         .where(broker_credentials.c.broker_name == broker_name)
         .where(orders.c.strategy_config_id == strategy_config_id)
+        .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
+    )
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_orders_by_symbol(session: AsyncSession, symbol: str):
+    """
+    Retrieve orders filtered by symbol.
+    """
+    stmt = (
+        select(
+            orders.c.id,
+            orders.c.strategy_symbol_id,
+            orders.c.strike_symbol,
+            orders.c.pnl,
+            orders.c.candle_range,
+            orders.c.entry_price,
+            orders.c.stop_loss,
+            orders.c.target_price,
+            orders.c.signal_time,
+            orders.c.entry_time,
+            orders.c.exit_time,
+            orders.c.exit_price,
+            orders.c.status,
+            orders.c.reason,
+            orders.c.atr,
+            orders.c.supertrend_signal,
+            orders.c.lot_qty,
+            orders.c.side,
+            orders.c.qty,
+            orders.c.created_at,
+            orders.c.updated_at
+        )
+        .where(orders.c.strike_symbol.ilike(f'%{symbol}%'))
         .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
     )
     result = await session.execute(stmt)
@@ -884,87 +950,87 @@ async def get_broker_executions_by_order_id(session, order_id: int):
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
 
-async def get_all_open_orders(session):
+async def get_granular_executions_by_order_id(session, order_id: int, side: str = None):
     """
-    Return all orders that are not in a final state (FILLED, CANCELLED, REJECTED, COMPLETE).
+    Return granular execution records for a given logical order_id.
+    
+    Args:
+        session: Database session
+        order_id: Parent order ID from orders table
+        side: Optional filter by 'ENTRY' or 'EXIT'
+        
+    Returns:
+        List of execution records with actual traded prices and quantities
     """
-    from algosat.core.dbschema import orders
-    from algosat.core.order_request import OrderStatus
-    final_statuses = [
-        OrderStatus.FILLED,
-        OrderStatus.CANCELLED,
-        OrderStatus.REJECTED,
-        OrderStatus.COMPLETE
-    ]
-    stmt = select(orders).where(~orders.c.status.in_([s.value for s in final_statuses]))
+    from algosat.core.dbschema import broker_executions
+    from sqlalchemy import and_
+    
+    conditions = [broker_executions.c.parent_order_id == order_id]
+    if side:
+        conditions.append(broker_executions.c.side == side)
+    
+    stmt = select(broker_executions).where(and_(*conditions)).order_by(
+        broker_executions.c.execution_time,
+        broker_executions.c.sequence_number
+    )
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
 
-async def insert_broker_balance_summary(session, broker_id: int, summary: dict):
+async def get_executions_summary_by_order_id(session, order_id: int):
     """
-    Insert a new broker balance summary record.
+    Get execution summary for an order with VWAP calculations.
+    
+    Returns:
+        {
+            'entry_executions': [...],
+            'exit_executions': [...],
+            'entry_vwap': float,
+            'exit_vwap': float,
+            'entry_qty': int,
+            'exit_qty': int,
+            'realized_pnl': float,
+            'unrealized_pnl': float
+        }
     """
-    stmt = broker_balance_summaries.insert().values(
-        broker_id=broker_id,
-        summary=summary,
-        fetched_at=datetime.utcnow()
-    )
-    await session.execute(stmt)
-    await session.commit()
-
-async def upsert_broker_balance_summary(session, broker_id: int, summary: dict):
-    """
-    Upsert broker balance summary for today (overwrite if exists for today).
-    """
-    # Get today's date at midnight UTC
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    stmt = select(broker_balance_summaries).where(
-        and_ (broker_balance_summaries.c.broker_id == broker_id, broker_balance_summaries.c.date == today)
-    )
-    result = await session.execute(stmt)
-    row = result.first()
-    if row:
-        # Update existing
-        await session.execute(
-            broker_balance_summaries.update()
-            .where(broker_balance_summaries.c.id == row._mapping['id'])
-            .values(summary=summary, fetched_at=datetime.now(timezone.utc))
-        )
-    else:
-        # Insert new
-        await session.execute(
-            broker_balance_summaries.insert().values(
-                broker_id=broker_id,
-                summary=summary,
-                date=today,
-                fetched_at=datetime.now(timezone.utc)
-            )
-        )
-    await session.commit()
-
-async def get_latest_broker_balance_summary(session, broker_id: int):
-    """
-    Get today's broker balance summary for a broker.
-    """
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    stmt = (
-        select(broker_balance_summaries)
-        .where(and_(broker_balance_summaries.c.broker_id == broker_id, broker_balance_summaries.c.date == today))
-        .order_by(broker_balance_summaries.c.fetched_at.desc())
-        .limit(1)
-    )
-    result = await session.execute(stmt)
-    row = result.first()
-    return dict(row._mapping) if row else None
-
-async def get_latest_balance_summaries_for_all_brokers(session):
-    """
-    Get today's balance summary for each broker (by broker_id).
-    """
-    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    stmt = select(broker_balance_summaries).where(broker_balance_summaries.c.date == today)
-    result = await session.execute(stmt)
-    return [dict(row._mapping) for row in result.fetchall()]
+    entry_executions = await get_granular_executions_by_order_id(session, order_id, 'ENTRY')
+    exit_executions = await get_granular_executions_by_order_id(session, order_id, 'EXIT')
+    
+    # Calculate entry VWAP
+    entry_total_value = sum(float(ex['execution_price']) * int(ex['executed_quantity']) for ex in entry_executions)
+    entry_qty = sum(int(ex['executed_quantity']) for ex in entry_executions)
+    entry_vwap = entry_total_value / entry_qty if entry_qty > 0 else 0.0
+    
+    # Calculate exit VWAP
+    exit_total_value = sum(float(ex['execution_price']) * int(ex['executed_quantity']) for ex in exit_executions)
+    exit_qty = sum(int(ex['executed_quantity']) for ex in exit_executions)
+    exit_vwap = exit_total_value / exit_qty if exit_qty > 0 else 0.0
+    
+    # Calculate P&L
+    realized_pnl = 0.0
+    unrealized_pnl = 0.0
+    
+    if entry_vwap > 0 and exit_vwap > 0:
+        # Realized P&L based on closed quantity
+        closed_qty = min(entry_qty, exit_qty)
+        # Note: This assumes BUY side - in production, should read actual side from orders table
+        realized_pnl = (exit_vwap - entry_vwap) * closed_qty
+    
+    # Unrealized P&L would need current market price (to be implemented later)
+    remaining_qty = entry_qty - exit_qty
+    if remaining_qty > 0:
+        # unrealized_pnl = (current_market_price - entry_vwap) * remaining_qty
+        pass
+    
+    return {
+        'entry_executions': entry_executions,
+        'exit_executions': exit_executions,
+        'entry_vwap': entry_vwap,
+        'exit_vwap': exit_vwap,
+        'entry_qty': entry_qty,
+        'exit_qty': exit_qty,
+        'realized_pnl': realized_pnl,
+        'unrealized_pnl': unrealized_pnl
+    }
 
 # --- Trade Statistics and P&L Functions ---
 
@@ -995,32 +1061,46 @@ async def get_strategy_symbol_trade_stats(session: AsyncSession, strategy_symbol
     completed_result = await session.execute(completed_stmt)
     completed_orders = completed_result.fetchall()
     
-    # Calculate live P&L (unrealized)
+    # Calculate live P&L (unrealized) - enhanced with granular executions
     live_pnl = 0.0
     for order in live_orders:
         order_dict = dict(order._mapping)
-        entry_price = order_dict.get('entry_price')
-        # For live trades, we might use current market price instead of exit_price
-        # For now, we'll calculate based on available data
-        qty = order_dict.get('qty', 0)
-        # Live P&L calculation would need current market price - for now set to 0
-        # This can be enhanced later with real-time price data
+        order_id = order_dict.get('id')
+        
+        # Try to get granular P&L first, fallback to legacy calculation
+        try:
+            summary = await get_executions_summary_by_order_id(session, order_id)
+            live_pnl += summary.get('unrealized_pnl', 0.0)
+        except:
+            # Fallback to legacy calculation
+            entry_price = order_dict.get('entry_price')
+            qty = order_dict.get('qty', 0)
+            # Live P&L calculation would need current market price - for now set to 0
+            # This can be enhanced later with real-time price data
     
-    # Calculate total P&L (realized)
+    # Calculate total P&L (realized) - enhanced with granular executions
     total_pnl = 0.0
     for order in completed_orders:
         order_dict = dict(order._mapping)
-        entry_price = order_dict.get('entry_price')
-        exit_price = order_dict.get('exit_price')
-        qty = order_dict.get('qty', 0)
-        side = order_dict.get('side', 'BUY')
+        order_id = order_dict.get('id')
         
-        if entry_price and exit_price and qty:
-            if side.upper() == 'BUY':
-                pnl = (exit_price - entry_price) * qty
-            else:  # SELL
-                pnl = (entry_price - exit_price) * qty
-            total_pnl += pnl
+        # Try to get granular P&L first, fallback to legacy calculation
+        try:
+            summary = await get_executions_summary_by_order_id(session, order_id)
+            total_pnl += summary.get('realized_pnl', 0.0)
+        except:
+            # Fallback to legacy calculation
+            entry_price = order_dict.get('entry_price')
+            exit_price = order_dict.get('exit_price')
+            qty = order_dict.get('qty', 0)
+            side = order_dict.get('side', 'BUY')
+            
+            if entry_price and exit_price and qty:
+                if side.upper() == 'BUY':
+                    pnl = (exit_price - entry_price) * qty
+                else:  # SELL
+                    pnl = (entry_price - exit_price) * qty
+                total_pnl += pnl
     
     return {
         'live_trade_count': len(live_orders),
@@ -1116,3 +1196,175 @@ async def get_trades_for_symbol(session: AsyncSession, strategy_symbol_id: int, 
     
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
+
+async def insert_broker_balance_summary(session, broker_id: int, summary: dict):
+    """
+    Insert a new broker balance summary record.
+    """
+    stmt = broker_balance_summaries.insert().values(
+        broker_id=broker_id,
+        summary=summary,
+        fetched_at=datetime.utcnow()
+    )
+    await session.execute(stmt)
+    await session.commit()
+
+async def upsert_broker_balance_summary(session, broker_id: int, summary: dict):
+    """
+    Upsert broker balance summary for today (overwrite if exists for today).
+    """
+    # Get today's date at midnight UTC
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    stmt = select(broker_balance_summaries).where(
+        and_ (broker_balance_summaries.c.broker_id == broker_id, broker_balance_summaries.c.date == today)
+    )
+    result = await session.execute(stmt)
+    row = result.first()
+    if row:
+        # Update existing
+        await session.execute(
+            broker_balance_summaries.update()
+            .where(broker_balance_summaries.c.id == row._mapping['id'])
+            .values(summary=summary, fetched_at=datetime.now(timezone.utc))
+        )
+    else:
+        # Insert new
+        await session.execute(
+            broker_balance_summaries.insert().values(
+                broker_id=broker_id,
+                summary=summary,
+                date=today,
+                fetched_at=datetime.now(timezone.utc)
+            )
+        )
+    await session.commit()
+
+async def get_latest_broker_balance_summary(session, broker_id: int):
+    """
+    Get today's broker balance summary for a broker.
+    """
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    stmt = (
+        select(broker_balance_summaries)
+        .where(and_(broker_balance_summaries.c.broker_id == broker_id, broker_balance_summaries.c.date == today))
+        .order_by(broker_balance_summaries.c.fetched_at.desc())
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    row = result.first()
+    return dict(row._mapping) if row else None
+
+async def get_latest_balance_summaries_for_all_brokers(session):
+    """
+    Get today's balance summary for each broker (by broker_id).
+    """
+    today = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    stmt = select(broker_balance_summaries).where(broker_balance_summaries.c.date == today)
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_orders_summary_by_symbol(session: AsyncSession, symbol: str):
+    """
+    Get aggregated P&L and trade statistics for a specific symbol.
+    Returns total P&L, trade count, and other statistics from orders.
+    """
+    from sqlalchemy import func
+    
+    stmt = (
+        select(
+            func.count(orders.c.id).label('total_trades'),
+            func.sum(orders.c.pnl).label('total_pnl'),
+            func.sum(case((orders.c.status == 'OPEN', orders.c.pnl), else_=0)).label('live_pnl'),
+            func.count(case((orders.c.status == 'OPEN', orders.c.id))).label('open_trades'),
+            func.count(case((orders.c.status == 'CLOSED', orders.c.id))).label('closed_trades'),
+            func.count(case((and_(orders.c.status == 'CLOSED', orders.c.pnl > 0), orders.c.id))).label('winning_trades')
+        )
+        .where(orders.c.strike_symbol.ilike(f'%{symbol}%'))
+    )
+    result = await session.execute(stmt)
+    row = result.first()
+    
+    if row:
+        return {
+            'symbol': symbol,
+            'total_trades': row.total_trades or 0,
+            'total_pnl': float(row.total_pnl) if row.total_pnl else 0.0,
+            'live_pnl': float(row.live_pnl) if row.live_pnl else 0.0,
+            'open_trades': row.open_trades or 0,
+            'closed_trades': row.closed_trades or 0,
+            'winning_trades': row.winning_trades or 0
+        }
+    else:
+        return {
+            'symbol': symbol,
+            'total_trades': 0,
+            'total_pnl': 0.0,
+            'live_pnl': 0.0,
+            'open_trades': 0,
+            'closed_trades': 0,
+            'winning_trades': 0
+        }
+async def get_orders_by_strategy_symbol_id(session: AsyncSession, strategy_symbol_id: int):
+    """
+    Retrieve all orders for a specific strategy_symbol_id.
+    Uses the same logic as get_all_orders but filters by strategy_symbol_id.
+    """
+    stmt = (
+        select(
+            orders.c.id,
+            orders.c.strategy_symbol_id,
+            orders.c.strike_symbol,
+            orders.c.pnl,
+            orders.c.candle_range,
+            orders.c.entry_price,
+            orders.c.stop_loss,
+            orders.c.target_price,
+            orders.c.signal_time,
+            orders.c.entry_time,
+            orders.c.exit_time,
+            orders.c.exit_price,
+            orders.c.status,
+            orders.c.reason,
+            orders.c.atr,
+            orders.c.supertrend_signal,
+            orders.c.lot_qty,
+            orders.c.side,
+            orders.c.qty,
+            orders.c.created_at,
+            orders.c.updated_at
+        )
+        .where(orders.c.strategy_symbol_id == strategy_symbol_id)
+        .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
+    )
+    result = await session.execute(stmt)
+    rows = result.fetchall()
+    print(f"DEBUG DB: get_orders_by_strategy_symbol_id({strategy_symbol_id}) fetched {len(rows)} rows")
+    if rows:
+        print(f"DEBUG DB: first row raw: {rows[0]}")
+    converted = [dict(row._mapping) for row in rows]
+    print(f"DEBUG DB: converted to {len(converted)} dicts")
+    if converted:
+        print(f"DEBUG DB: first dict: {converted[0]}")
+    return converted
+
+async def get_strategy_symbol_by_name(session: AsyncSession, symbol_name: str):
+    """
+    Get strategy_symbol record by symbol name.
+    """
+    stmt = (
+        select(
+            strategy_symbols.c.id,
+            strategy_symbols.c.symbol,
+            strategy_symbols.c.strategy_id,
+            strategy_symbols.c.config_id
+        )
+        .where(strategy_symbols.c.symbol == symbol_name)
+    )
+    result = await session.execute(stmt)
+    row = result.first()
+    
+    if row:
+        return dict(row._mapping)
+    else:
+        return None
+

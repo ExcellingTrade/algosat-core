@@ -11,6 +11,11 @@ class Side(str, Enum):
     def to_zerodha(self):
         return self.value
 
+class ExecutionSide(str, Enum):
+    """Indicates whether an execution represents opening or closing a position"""
+    ENTRY = "ENTRY"  # Opening a position (initial buy/sell)
+    EXIT = "EXIT"    # Closing a position (square-off, SL, TP, manual exit)
+
 class OrderType(str, Enum):
     MARKET = "MARKET"
     LIMIT = "LIMIT"
@@ -27,16 +32,19 @@ class ProductType(str, Enum):
     BO = "BO"  # Accept broker-specific value for validation
 
 class OrderStatus(str, Enum):
-    AWAITING_ENTRY = "AWAITING_ENTRY"
+    AWAITING_ENTRY = "AWAITING_ENTRY"  # Order placed but not yet executed (all broker orders in trigger pending state)
+    OPEN = "OPEN"                      # At least one broker order has been executed
+    CANCELLED = "CANCELLED"            # Order has been cancelled
+    CLOSED = "CLOSED"                  # Order is closed (exit executed)
+    FAILED = "FAILED"                  # All broker orders failed
+    
+    # Legacy statuses for backward compatibility
     PENDING = "PENDING"
-    OPEN = "OPEN"
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     FILLED = "FILLED"
     COMPLETED = "COMPLETED"
     COMPLETE = "COMPLETE"
-    CANCELLED = "CANCELLED"
     REJECTED = "REJECTED"
-    FAILED = "FAILED"
     EXPIRED = "EXPIRED"
     TRIGGER_PENDING = "TRIGGER_PENDING"
     AMO_REQ_RECEIVED = "AMO_REQ_RECEIVED"

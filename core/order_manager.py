@@ -8,10 +8,11 @@ from algosat.brokers.factory import get_broker
 from algosat.common.logger import get_logger
 from algosat.core.dbschema import trade_logs
 from algosat.core.broker_manager import BrokerManager
-from algosat.core.order_request import OrderRequest, OrderStatus, Side, OrderType
+from algosat.core.order_request import OrderRequest, OrderStatus, Side, OrderType, ExecutionSide
 from algosat.core.dbschema import orders as orders_table
 from algosat.models.strategy_config import StrategyConfig
 from algosat.models.order_aggregate import OrderAggregate, BrokerOrder
+from sqlalchemy import text
 import json
 import numpy as np
 import pandas as pd
@@ -140,7 +141,14 @@ class OrderManager:
             for broker_name, response in broker_responses.items():
                 await self._insert_broker_execution(session, order_id, broker_name, response)
             await session.commit()
-        return {"order_id": order_id}
+        
+        # Return enhanced response with traded_price
+        return {
+            "order_id": order_id,
+            "traded_price": 0.0,  # Default value for now, will be updated per broker later
+            "status": "AWAITING_ENTRY",  # Initial status
+            "broker_responses": broker_responses
+        }
 
     async def split_and_place_order(
         self,
@@ -335,39 +343,232 @@ class OrderManager:
 
     async def _insert_broker_execution(self, session, parent_order_id, broker_name, response):
         """
-        Insert a row into broker_executions for a broker's response to an order.
-        Always stores all broker order ids as a list in broker_order_ids (even if only one), and one entry per broker per logical order.
+        DEPRECATED: Legacy method for backward compatibility.
+        Use insert_granular_execution() for new execution tracking.
         """
+        # Keep existing logic for now during migration
         from algosat.core.dbschema import broker_executions
         broker_id = response.get("broker_id")
         if broker_id is None:
             broker_id = await self._get_broker_id(broker_name)
-        # Always store broker_order_ids as a list
+        
+        # Legacy storage - store in deprecated fields
         broker_order_ids = []
-        # Accept both OrderResponse and dict
         order_ids = response.get("order_ids")
         if isinstance(order_ids, list):
             broker_order_ids = order_ids
         elif order_ids:
             broker_order_ids = [order_ids]
-        # Always store status as string value
+        
         status_val = response.get("status", "FAILED")
         if hasattr(status_val, 'value'):
             status_val = status_val.value
-        # Ensure order_messages is a list or dict
+        
         order_messages = response.get("order_messages")
         if order_messages is not None and not isinstance(order_messages, (list, dict)):
             order_messages = [order_messages]
-        broker_exec_data = dict(
-            parent_order_id=parent_order_id,
-            broker_id=broker_id,
-            broker_name=broker_name,  # Deprecated: broker_name, keep for migration only
-            broker_order_ids=broker_order_ids,
-            order_messages=order_messages,
-            status=status_val,
-            raw_response=response,
-        )
-        await session.execute(broker_executions.insert().values(**broker_exec_data))
+        
+        # For backward compatibility, create a single execution record in new format
+        # This is a migration helper - new code should use insert_granular_execution
+        if broker_order_ids:
+            first_order_id = broker_order_ids[0]
+            broker_exec_data = dict(
+                parent_order_id=parent_order_id,
+                broker_id=broker_id,
+                broker_order_id=first_order_id,
+                side=ExecutionSide.ENTRY.value,  # Default to ENTRY for legacy orders
+                execution_price=0.0,  # Will be updated when actual execution is tracked
+                executed_quantity=0,   # Will be updated when actual execution is tracked
+                status=status_val,
+                order_messages=order_messages,
+                raw_execution_data=response,
+                # Legacy fields
+                broker_name=broker_name,
+                broker_order_ids=broker_order_ids,
+                raw_response=response,
+            )
+            await session.execute(broker_executions.insert().values(**broker_exec_data))
+
+    async def insert_granular_execution(
+        self,
+        parent_order_id: int,
+        broker_id: int,
+        broker_order_id: str,
+        side: ExecutionSide,
+        execution_price: float,
+        executed_quantity: int,
+        symbol: str = None,
+        execution_time: datetime = None,
+        execution_id: str = None,
+        is_partial_fill: bool = False,
+        sequence_number: int = None,
+        order_type: str = None,
+        notes: str = None,
+        raw_execution_data: dict = None
+    ):
+        """
+        Insert a granular execution record for each actual fill/execution.
+        This is the new method for tracking individual executions.
+        
+        Args:
+            parent_order_id: ID from orders table
+            broker_id: ID from broker_credentials table
+            broker_order_id: Single broker order ID for this execution
+            side: ExecutionSide.ENTRY or ExecutionSide.EXIT
+            execution_price: Actual traded price
+            executed_quantity: Actual executed quantity
+            symbol: Symbol for this execution (useful for multi-symbol strategies)
+            execution_time: When the execution happened
+            execution_id: Broker's trade/execution ID if available
+            is_partial_fill: True if this was a partial fill
+            sequence_number: For ordering multiple executions
+            order_type: MARKET, LIMIT, SL, etc.
+            notes: Additional notes (e.g., "BO SL leg", "Manual exit")
+            raw_execution_data: Complete broker response
+        """
+        # Input validation
+        if not isinstance(parent_order_id, int) or parent_order_id <= 0:
+            raise ValueError("parent_order_id must be a positive integer")
+        
+        if not isinstance(broker_id, int) or broker_id <= 0:
+            raise ValueError("broker_id must be a positive integer")
+        
+        if not broker_order_id or not isinstance(broker_order_id, str):
+            raise ValueError("broker_order_id must be a non-empty string")
+        
+        if not isinstance(side, ExecutionSide):
+            raise ValueError("side must be an ExecutionSide enum")
+        
+        if not isinstance(execution_price, (int, float)) or execution_price <= 0:
+            raise ValueError("execution_price must be a positive number")
+        
+        if not isinstance(executed_quantity, int) or executed_quantity <= 0:
+            raise ValueError("executed_quantity must be a positive integer")
+        
+        from algosat.core.dbschema import broker_executions
+        
+        execution_data = {
+            "parent_order_id": parent_order_id,
+            "broker_id": broker_id,
+            "broker_order_id": broker_order_id,
+            "side": side.value if isinstance(side, ExecutionSide) else side,
+            "execution_price": float(execution_price),
+            "executed_quantity": int(executed_quantity),
+            "symbol": symbol,
+            "execution_time": execution_time or datetime.utcnow(),
+            "execution_id": execution_id,
+            "is_partial_fill": bool(is_partial_fill),
+            "sequence_number": sequence_number,
+            "order_type": order_type,
+            "notes": notes,
+            "status": "FILLED",  # Default status for successful executions
+            "raw_execution_data": raw_execution_data
+        }
+        
+        try:
+            async with AsyncSessionLocal() as session:
+                await session.execute(broker_executions.insert().values(**execution_data))
+                await session.commit()
+                logger.info(f"Recorded {side.value} execution: order_id={broker_order_id}, price={execution_price}, qty={executed_quantity}")
+        except Exception as e:
+            logger.error(f"Failed to insert granular execution: {e}", exc_info=True)
+            raise
+
+    async def get_granular_executions(self, parent_order_id: int, side: ExecutionSide = None):
+        """
+        Get all granular executions for a logical order.
+        
+        Args:
+            parent_order_id: ID from orders table
+            side: Optional filter by ExecutionSide.ENTRY or ExecutionSide.EXIT
+            
+        Returns:
+            List of execution records
+        """
+        from algosat.core.dbschema import broker_executions
+        from sqlalchemy import select, and_
+        
+        async with AsyncSessionLocal() as session:
+            conditions = [broker_executions.c.parent_order_id == parent_order_id]
+            if side:
+                conditions.append(broker_executions.c.side == side.value)
+            
+            stmt = select(broker_executions).where(and_(*conditions)).order_by(
+                broker_executions.c.execution_time,
+                broker_executions.c.sequence_number
+            )
+            result = await session.execute(stmt)
+            return [dict(row._mapping) for row in result.fetchall()]
+
+    async def calculate_vwap_for_executions(self, executions: List[dict]) -> tuple[float, int]:
+        """
+        Calculate Volume Weighted Average Price for a list of executions.
+        
+        Args:
+            executions: List of execution records
+            
+        Returns:
+            tuple: (vwap_price, total_quantity)
+        """
+        if not executions:
+            return 0.0, 0
+        
+        total_value = 0.0
+        total_quantity = 0
+        
+        for execution in executions:
+            price = float(execution['execution_price'])
+            qty = int(execution['executed_quantity'])
+            total_value += price * qty
+            total_quantity += qty
+        
+        vwap = total_value / total_quantity if total_quantity > 0 else 0.0
+        return vwap, total_quantity
+
+    async def update_order_aggregated_prices(self, parent_order_id: int):
+        """
+        Update the orders table with aggregated ENTRY and EXIT prices based on granular executions.
+        This should be called whenever new executions are recorded.
+        """
+        # Get all executions for this order
+        entry_executions = await self.get_granular_executions(parent_order_id, ExecutionSide.ENTRY)
+        exit_executions = await self.get_granular_executions(parent_order_id, ExecutionSide.EXIT)
+        
+        # Calculate VWAP for entry and exit
+        entry_vwap, entry_qty = await self.calculate_vwap_for_executions(entry_executions)
+        exit_vwap, exit_qty = await self.calculate_vwap_for_executions(exit_executions)
+        
+        # Calculate P&L
+        pnl = 0.0
+        if entry_vwap > 0 and exit_vwap > 0:
+            # For now, assume BUY side (can be enhanced to read actual side from orders table)
+            pnl = (exit_vwap - entry_vwap) * min(entry_qty, exit_qty)
+        
+        # Update orders table
+        from algosat.core.db import update_rows_in_table
+        from algosat.core.dbschema import orders
+        
+        update_values = {}
+        if entry_vwap > 0:
+            update_values["entry_price"] = entry_vwap
+        if exit_vwap > 0:
+            update_values["exit_price"] = exit_vwap
+            update_values["pnl"] = pnl
+            # If we have exit executions, update status
+            if exit_qty >= entry_qty:
+                update_values["status"] = "FILLED"
+            else:
+                update_values["status"] = "PARTIALLY_FILLED"
+        
+        if update_values:
+            async with AsyncSessionLocal() as session:
+                await update_rows_in_table(
+                    target_table=orders,
+                    condition=orders.c.id == parent_order_id,
+                    new_values=update_values
+                )
+                await session.commit()
+                logger.info(f"Updated order {parent_order_id} aggregated prices: entry_vwap={entry_vwap}, exit_vwap={exit_vwap}, pnl={pnl}")
 
     async def _get_broker_id(self, broker_name):
         async with AsyncSessionLocal() as sess:
@@ -505,6 +706,149 @@ class OrderManager:
                             "raw": o
                         })
         return normalized_orders
+
+    async def process_broker_order_update(
+        self,
+        parent_order_id: int,
+        broker_name: str,
+        broker_order_data: dict
+    ):
+        """
+        Process broker order status updates and create granular execution records.
+        This method should be called when polling broker order status or receiving webhooks.
+        
+        Args:
+            parent_order_id: ID from orders table
+            broker_name: Name of the broker
+            broker_order_data: Broker's order/execution data
+            
+        Expected broker_order_data format:
+        {
+            "order_id": "123456",
+            "status": "FILLED" | "PARTIAL" | "CANCELLED",
+            "executed_qty": 100,
+            "executed_price": 245.50,
+            "execution_time": "2025-06-28T10:30:00Z",
+            "execution_id": "E123456",
+            "order_type": "MARKET",
+            "symbol": "NSE:NIFTY50-25JUN25-23400-CE",
+            "is_exit": false,  # true for SL/TP/manual exit orders
+            "notes": "BO SL leg filled"
+        }
+        """
+        try:
+            broker_id = await self._get_broker_id(broker_name)
+            if not broker_id:
+                logger.error(f"Unknown broker: {broker_name}")
+                return
+            
+            order_id = broker_order_data.get("order_id")
+            status = broker_order_data.get("status", "").upper()
+            executed_qty = broker_order_data.get("executed_qty", 0)
+            executed_price = broker_order_data.get("executed_price", 0.0)
+            
+            # Skip if no execution happened
+            if status not in ["FILLED", "PARTIAL"] or executed_qty <= 0:
+                logger.debug(f"No execution to record for order {order_id}, status: {status}")
+                return
+            
+            # Determine if this is ENTRY or EXIT
+            is_exit = broker_order_data.get("is_exit", False)
+            side = ExecutionSide.EXIT if is_exit else ExecutionSide.ENTRY
+            
+            # Check if we already recorded this execution (avoid duplicates)
+            existing_executions = await self.get_granular_executions(parent_order_id)
+            execution_id = broker_order_data.get("execution_id")
+            
+            # Simple duplicate check based on execution_id or order_id + qty + price
+            for existing in existing_executions:
+                if execution_id and existing.get("execution_id") == execution_id:
+                    logger.debug(f"Execution {execution_id} already recorded, skipping")
+                    return
+                if (existing.get("broker_order_id") == order_id and 
+                    existing.get("executed_quantity") == executed_qty and
+                    abs(float(existing.get("execution_price", 0)) - executed_price) < 0.01):
+                    logger.debug(f"Duplicate execution detected for order {order_id}, skipping")
+                    return
+            
+            # Record the execution
+            await self.insert_granular_execution(
+                parent_order_id=parent_order_id,
+                broker_id=broker_id,
+                broker_order_id=order_id,
+                side=side,
+                execution_price=executed_price,
+                executed_quantity=executed_qty,
+                symbol=broker_order_data.get("symbol"),
+                execution_time=broker_order_data.get("execution_time"),
+                execution_id=execution_id,
+                is_partial_fill=(status == "PARTIAL"),
+                order_type=broker_order_data.get("order_type"),
+                notes=broker_order_data.get("notes"),
+                raw_execution_data=broker_order_data
+            )
+            
+            # Update aggregated prices in orders table
+            await self.update_order_aggregated_prices(parent_order_id)
+            
+            # Update order status based on executions
+            await self.update_order_status(parent_order_id)
+            
+            logger.info(f"Processed {side.value} execution for order {parent_order_id}: {executed_qty}@{executed_price}")
+            
+        except Exception as e:
+            logger.error(f"Error processing broker order update: {e}", exc_info=True)
+
+    async def determine_order_status(self, order_id: int) -> str:
+        """
+        Determine the order status based on broker executions.
+        
+        Returns:
+        - AWAITING_ENTRY: Order placed but not yet executed (all broker orders in trigger pending state)
+        - OPEN: At least one broker order has been executed
+        - CANCELLED: Order has been cancelled
+        - CLOSED: Order is closed (exit executed)
+        - FAILED: All broker orders failed
+        """
+        executions = await self.get_granular_executions(order_id)
+        
+        if not executions:
+            return "AWAITING_ENTRY"
+        
+        # Check for any executions with EXIT side - if found, order is closed
+        exit_executions = [e for e in executions if e.get('side') == 'EXIT']
+        if exit_executions:
+            return "CLOSED"
+        
+        # Check status of executions
+        statuses = [e.get('status', '').upper() for e in executions]
+        
+        # If any execution is filled or partial, order is open
+        if any(status in ['FILLED', 'PARTIAL', 'PARTIALLY_FILLED'] for status in statuses):
+            return "OPEN"
+        
+        # If all executions are cancelled, order is cancelled
+        if all(status == 'CANCELLED' for status in statuses):
+            return "CANCELLED"
+        
+        # If all executions are failed/rejected, order is failed
+        if all(status in ['FAILED', 'REJECTED'] for status in statuses):
+            return "FAILED"
+        
+        # Default to awaiting entry for pending/trigger pending states
+        return "AWAITING_ENTRY"
+    
+    async def update_order_status(self, order_id: int) -> None:
+        """Update the order status in the database based on current executions."""
+        new_status = await self.determine_order_status(order_id)
+        
+        async with AsyncSessionLocal() as session:
+            await session.execute(
+                text("UPDATE orders SET status = :status, updated_at = NOW() WHERE id = :order_id"),
+                {"status": new_status, "order_id": order_id}
+            )
+            await session.commit()
+            logger.info(f"Updated order {order_id} status to {new_status}")
 
 _order_manager_instance = None
 

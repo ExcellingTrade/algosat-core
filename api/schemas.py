@@ -168,18 +168,30 @@ class BrokerDetailResponse(BrokerListResponse):
         return cls(**cls.mask_sensitive(data))
 
 # --- Order Schemas ---
+class PlaceOrderResponse(BaseModel):
+    """Response model for place_order API endpoint."""
+    order_id: int = Field(..., description="Unique order ID from the orders table")
+    traded_price: float = Field(default=0.0, description="Traded price (0.0 for pending orders, will be updated per broker)")
+    status: str = Field(default="AWAITING_ENTRY", description="Current order status")
+    broker_responses: Dict[str, Any] = Field(default_factory=dict, description="Responses from individual brokers")
+
 class OrderListResponse(BaseModel):
     """Order list response with basic metadata."""
     id: int
-    symbol: str
-    status: str
+    symbol: Optional[str] = None  # This will be the strategy symbol name (from join)
+    strike_symbol: Optional[str] = None  # Actual tradeable symbol
+    pnl: Optional[float] = None  # Profit/Loss for this order
+    status: str  # Now supports: AWAITING_ENTRY, OPEN, CLOSED, CANCELLED, FAILED
     side: Optional[str] = None
     entry_price: Optional[float] = None
     lot_qty: Optional[int] = None
+    qty: Optional[int] = None
     signal_time: Optional[datetime] = None
     entry_time: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    traded_price: Optional[float] = Field(default=0.0, description="Actual traded price")
 
-    @field_serializer("signal_time", "entry_time")
+    @field_serializer("signal_time", "entry_time", "created_at")
     def serialize_dt(self, v):
         if v is None:
             return None
@@ -202,7 +214,7 @@ class OrderDetailResponse(BaseModel):
     entry_time: Optional[datetime] = None
     exit_time: Optional[datetime] = None
     exit_price: Optional[float] = None
-    status: str
+    status: str  # Now supports: AWAITING_ENTRY, OPEN, CLOSED, CANCELLED, FAILED
     reason: Optional[str] = None
     atr: Optional[float] = None
     supertrend_signal: Optional[str] = None
@@ -211,6 +223,7 @@ class OrderDetailResponse(BaseModel):
     qty: Optional[int] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    traded_price: Optional[float] = Field(default=0.0, description="Actual traded price")
     # Add any other fields from the orders table as needed
 
     @field_serializer("signal_time", "entry_time", "exit_time", "created_at", "updated_at")
@@ -353,3 +366,54 @@ class StrategySymbolWithConfigResponse(StrategySymbolResponse):
     trade_count: Optional[int] = 0
     current_pnl: Optional[float] = 0.0
     enabled: Optional[bool] = None  # Computed from status
+
+# --- Execution and P&L Schemas ---
+class ExecutionSideEnum(str, Enum):
+    ENTRY = "ENTRY"
+    EXIT = "EXIT"
+
+class GranularExecutionResponse(BaseModel):
+    """Response model for individual execution records."""
+    id: int
+    parent_order_id: int
+    broker_id: int
+    broker_order_id: str
+    side: ExecutionSideEnum
+    execution_price: float
+    executed_quantity: int
+    execution_time: Optional[datetime] = None
+    execution_id: Optional[str] = None
+    is_partial_fill: bool = False
+    sequence_number: Optional[int] = None
+    symbol: Optional[str] = None
+    order_type: Optional[str] = None
+    notes: Optional[str] = None
+    status: str
+    created_at: datetime
+
+    @field_serializer('execution_time', 'created_at')
+    def serialize_datetime(self, dt: Optional[datetime]) -> Optional[str]:
+        return to_ist(dt).isoformat() if dt else None
+
+class ExecutionSummaryResponse(BaseModel):
+    """Response model for execution summary with VWAP calculations."""
+    order_id: int
+    entry_executions: List[GranularExecutionResponse]
+    exit_executions: List[GranularExecutionResponse]
+    entry_vwap: float
+    exit_vwap: float
+    entry_qty: int
+    exit_qty: int
+    realized_pnl: float
+    unrealized_pnl: float
+
+# --- Orders Summary Schema ---
+class OrdersSummaryResponse(BaseModel):
+    """Response model for orders summary by symbol."""
+    symbol: str = Field(..., description="Symbol name")
+    total_trades: int = Field(default=0, description="Total number of trades/orders")
+    open_trades: int = Field(default=0, description="Number of open trades")
+    closed_trades: int = Field(default=0, description="Number of closed trades")
+    total_pnl: float = Field(default=0.0, description="Total P&L for all orders")
+    live_pnl: float = Field(default=0.0, description="Live P&L for open positions")
+    avg_trade_pnl: float = Field(default=0.0, description="Average P&L per trade")
