@@ -399,7 +399,7 @@ class OptionBuyStrategy(StrategyBase):
                 self._positions.pop(strike, None)
                 return TradeSignal(
                     symbol=strike,
-                    side=-1,  # SELL
+                    side=Side.SELL,
                     price=exit_price,
                     signal_type=SignalType.STOPLOSS
                 )
@@ -410,7 +410,7 @@ class OptionBuyStrategy(StrategyBase):
                 self._positions.pop(strike, None)
                 return TradeSignal(
                     symbol=strike,
-                    side=-1,  # SELL
+                    side=Side.SELL,
                     price=stoploss_price,
                     signal_type=SignalType.STOPLOSS
                 )
@@ -421,7 +421,7 @@ class OptionBuyStrategy(StrategyBase):
                 self._positions.pop(strike, None)
                 return TradeSignal(
                     symbol=strike,
-                    side=-1,  # SELL
+                    side=Side.SELL,
                     price=target_price,
                     signal_type=SignalType.TRAIL
                 )
