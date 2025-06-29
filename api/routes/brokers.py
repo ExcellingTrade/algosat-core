@@ -163,3 +163,40 @@ async def update_broker_api(
     if not row:
         raise HTTPException(status_code=404, detail="Broker not found")
     return BrokerResponse(**row)
+
+@router.get("/{broker_name}/credentials")
+async def get_broker_credentials(broker_name: str, db=Depends(get_db)):
+    """Get broker credentials configuration including required auth fields"""
+    validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
+    
+    try:
+        # Query broker_credentials table for the broker's required auth fields
+        from algosat.core.dbschema import broker_credentials
+        from sqlalchemy import select
+        
+        query = select(broker_credentials.c.required_auth_fields).where(
+            broker_credentials.c.broker_name == validated_broker_name
+        )
+        result = await db.execute(query)
+        row = result.fetchone()
+        
+        if not row or not row[0]:
+            # Return default config if not found in broker_credentials table
+            default_config = {
+                "broker_name": validated_broker_name,
+                "required_auth_fields": [
+                    {"field_name": "api_key", "field_type": "password", "is_required": True, "description": "API Key from broker portal"},
+                    {"field_name": "api_secret", "field_type": "password", "is_required": True, "description": "API Secret from broker portal"},
+                    {"field_name": "client_id", "field_type": "string", "is_required": True, "description": "Client ID"}
+                ]
+            }
+            return default_config
+        
+        return {
+            "broker_name": validated_broker_name,
+            "required_auth_fields": row[0] or []
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching credentials config for {validated_broker_name}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch broker credentials configuration")
