@@ -12,7 +12,11 @@ from algosat.core.db import (
     get_executions_summary_by_order_id,
     get_orders_summary_by_symbol,
     get_orders_by_strategy_symbol_id,
-    get_strategy_symbol_by_name
+    get_strategy_symbol_by_name,
+    get_orders_pnl_stats,
+    get_orders_pnl_stats_by_symbol_id,
+    get_strategy_profit_loss_stats,
+    get_daily_pnl_history
 )
 from algosat.api.schemas import (
     OrderListResponse, 
@@ -20,7 +24,11 @@ from algosat.api.schemas import (
     BrokerExecutionResponse,
     GranularExecutionResponse,
     ExecutionSummaryResponse,
-    OrdersSummaryResponse
+    OrdersSummaryResponse,
+    OrdersPnlStatsResponse,
+    StrategyStatsResponse,
+    DailyPnlHistoryResponse,
+    DailyPnlData
 )
 from algosat.api.dependencies import get_db
 from algosat.api.auth_dependencies import get_current_user
@@ -88,6 +96,166 @@ async def list_orders(
     except Exception as e:
         logger.error(f"Error in list_orders: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve orders")
+
+# === Statistics Routes (Must come before /{order_id} to avoid path conflicts) ===
+
+@router.get("/pnl-stats", response_model=OrdersPnlStatsResponse)
+async def get_orders_pnl_stats_endpoint(
+    symbol: Optional[str] = Query(None, description="Filter by symbol (supports partial match)"),
+    date: Optional[str] = Query(None, description="Date filter in YYYY-MM-DD format (defaults to today)"),
+    db=Depends(get_db), 
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get overall and today's P&L statistics from orders.
+    
+    This endpoint provides:
+    - Overall P&L and trade count (all completed trades)
+    - Today's P&L and trade count (trades completed today)
+    
+    Optional filters:
+    - symbol: Filter by strike_symbol (supports partial matching)
+    - date: Override "today" with a specific date (YYYY-MM-DD format)
+    
+    Returns P&L statistics for completed/closed trades only.
+    """
+    try:
+        # Validate and parse date if provided
+        import datetime
+        parsed_date = None
+        if date:
+            parsed_date = input_validator.validate_date(date)
+        
+        # Validate symbol if provided
+        validated_symbol = None
+        if symbol:
+            validated_symbol = input_validator.validate_symbol(symbol)
+        
+        stats = await get_orders_pnl_stats(db, symbol=validated_symbol, date=parsed_date)
+        
+        # Debug logging
+        print(f"DEBUG: orders P&L stats for symbol '{validated_symbol}', date '{parsed_date}': {stats}")
+        
+        return OrdersPnlStatsResponse(**stats)
+        
+    except InvalidInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error in get_orders_pnl_stats_endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@router.get("/strategy-stats", response_model=StrategyStatsResponse)
+async def get_strategy_profit_loss_stats_endpoint(
+    db=Depends(get_db), 
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get strategy profit/loss statistics.
+    
+    This endpoint provides:
+    - Number of strategies currently in profit
+    - Number of strategies currently in loss
+    - Total number of strategies with trades
+    
+    Statistics are calculated by aggregating P&L from all orders per strategy symbol.
+    """
+    try:
+        stats = await get_strategy_profit_loss_stats(db)
+        
+        # Debug logging
+        print(f"DEBUG: strategy stats: {stats}")
+        
+        return StrategyStatsResponse(**stats)
+        
+    except Exception as e:
+        logger.error(f"Error in get_strategy_profit_loss_stats_endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@router.get("/daily-pnl-history", response_model=DailyPnlHistoryResponse)
+async def get_daily_pnl_history_endpoint(
+    days: int = Query(30, description="Number of days to look back (default 30)", ge=1, le=365),
+    db=Depends(get_db), 
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get daily P&L history for charting and performance analysis.
+    
+    This endpoint provides:
+    - Daily P&L for each trading day
+    - Number of trades per day  
+    - Cumulative P&L progression
+    
+    Parameters:
+    - days: Number of days to look back (1-365, default 30)
+    
+    Returns historical daily P&L data suitable for charting.
+    """
+    try:
+        daily_data = await get_daily_pnl_history(db, days=days)
+        
+        # Convert to response format
+        history = [DailyPnlData(**data) for data in daily_data if data.get('date')]
+        
+        # Debug logging
+        print(f"DEBUG: daily P&L history for {days} days: {len(history)} data points")
+        
+        return DailyPnlHistoryResponse(
+            history=history,
+            total_days=len(history)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in get_daily_pnl_history_endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@router.get("/pnl-stats/by-symbol-id/{strategy_symbol_id}", response_model=OrdersPnlStatsResponse)
+async def get_orders_pnl_stats_by_symbol_id_endpoint(
+    strategy_symbol_id: int,
+    date: Optional[str] = Query(None, description="Date filter in YYYY-MM-DD format (defaults to today)"),
+    db=Depends(get_db), 
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get overall and today's P&L statistics for a specific strategy symbol ID.
+    
+    This endpoint provides:
+    - Overall P&L and trade count (all completed trades)
+    - Today's P&L and trade count (trades completed today)
+    
+    Path parameter:
+    - strategy_symbol_id: The ID of the strategy symbol to filter by
+    
+    Optional query parameter:
+    - date: Override "today" with a specific date (YYYY-MM-DD format)
+    
+    Returns P&L statistics for completed/closed trades only.
+    This is more accurate than filtering by symbol name as it directly matches orders.
+    """
+    try:
+        # Validate and parse date if provided
+        import datetime
+        parsed_date = None
+        if date:
+            parsed_date = input_validator.validate_date(date)
+        
+        # Validate strategy_symbol_id
+        if strategy_symbol_id <= 0:
+            raise HTTPException(status_code=400, detail="Invalid strategy_symbol_id")
+        
+        stats = await get_orders_pnl_stats_by_symbol_id(db, strategy_symbol_id=strategy_symbol_id, date=parsed_date)
+        
+        # Debug logging
+        print(f"DEBUG: orders P&L stats for strategy_symbol_id '{strategy_symbol_id}', date '{parsed_date}': {stats}")
+        
+        return OrdersPnlStatsResponse(**stats)
+        
+    except InvalidInputError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error in get_orders_pnl_stats_by_symbol_id_endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+# === Individual Order Routes ===
 
 @router.get("/{order_id}", response_model=OrderDetailResponse)
 async def get_order(
@@ -327,4 +495,4 @@ async def get_orders_summary_endpoint(
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Error in get_orders_summary_endpoint: {e}")
-        raise HTTPException(status_code=500, detail="Failed to retrieve orders summary")
+        raise HTTPException(status_code=500, detail="Internal Server Error")

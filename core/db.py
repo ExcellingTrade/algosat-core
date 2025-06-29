@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 # algosat/core/db.py
 
 try:
@@ -1172,7 +1173,7 @@ async def get_strategy_trade_stats(session: AsyncSession, strategy_id: int):
             
             symbol_stats[symbol_id]['pnl'] += pnl
             total_pnl += pnl
-        
+    
         symbol_stats[symbol_id]['trade_count'] += 1
         total_trades += 1
     
@@ -1368,3 +1369,268 @@ async def get_strategy_symbol_by_name(session: AsyncSession, symbol_name: str):
     else:
         return None
 
+
+async def get_orders_pnl_stats(session, symbol: str = None, date: datetime.date = None):
+    """
+    Get overall and today's P&L statistics, optionally filtered by symbol and/or date.
+
+    Args:
+        session: Async SQLAlchemy session
+        symbol (str, optional): Filter by strike_symbol (supports partial match)
+        date (datetime.date, optional): Defaults to today's date in UTC
+
+    Returns:
+        dict: {
+            "overall_pnl": float,
+            "overall_trade_count": int,
+            "today_pnl": float,
+            "today_trade_count": int
+        }
+    """
+    from algosat.core.dbschema import orders
+    from sqlalchemy import and_, func
+
+    # Prepare filters
+    filters = []
+    if symbol:
+        filters.append(orders.c.strike_symbol.ilike(f"%{symbol}%"))
+
+    # Only count completed/closed trades (modify as per your logic)
+    # filters.append(orders.c.status.in_(["CLOSED", "FILLED", "COMPLETED"]))
+
+    # Query all orders matching the filter
+    stmt = (
+        select(
+            orders.c.pnl,
+            orders.c.exit_time
+        )
+        .where(and_(*filters))
+    )
+    result = await session.execute(stmt)
+    rows = result.fetchall()
+
+    # Get today's date (UTC, or adjust to IST if needed)
+    if not date:
+        now = datetime.now(timezone.utc)
+        date = now.date()
+
+    overall_pnl = 0.0
+    overall_trade_count = 0
+    today_pnl = 0.0
+    today_trade_count = 0
+
+    for row in rows:
+        pnl = row.pnl if row.pnl is not None else 0.0
+        # Convert any numeric type (Decimal, int, etc.) to float to avoid type conflicts
+        try:
+            pnl = float(pnl)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        exit_time = row.exit_time
+        overall_pnl += pnl
+        overall_trade_count += 1
+
+        # Check if exit_time is today
+        if exit_time and exit_time.date() == date:
+            today_pnl += pnl
+            today_trade_count += 1
+
+    return {
+        "overall_pnl": round(overall_pnl, 2),
+        "overall_trade_count": overall_trade_count,
+        "today_pnl": round(today_pnl, 2),
+        "today_trade_count": today_trade_count,
+    }
+
+async def get_orders_pnl_stats_by_symbol_id(session, strategy_symbol_id: int = None, date: datetime.date = None):
+    """
+    Get overall and today's P&L statistics for a specific strategy symbol ID.
+
+    Args:
+        session: Async SQLAlchemy session
+        strategy_symbol_id (int, optional): Filter by strategy_symbol_id
+        date (datetime.date, optional): Defaults to today's date in UTC
+
+    Returns:
+        dict: {
+            "overall_pnl": float,
+            "overall_trade_count": int,
+            "today_pnl": float,
+            "today_trade_count": int
+        }
+    """
+    from algosat.core.dbschema import orders
+    from sqlalchemy import and_, func
+
+    # Prepare filters
+    filters = []
+    if strategy_symbol_id:
+        filters.append(orders.c.strategy_symbol_id == strategy_symbol_id)
+
+    # Only count completed/closed trades (modify as per your logic)
+    # filters.append(orders.c.status.in_(["CLOSED", "FILLED", "COMPLETED"]))
+
+    # Query all orders matching the filter
+    stmt = (
+        select(
+            orders.c.pnl,
+            orders.c.exit_time
+        )
+        .where(and_(*filters))
+    )
+    result = await session.execute(stmt)
+    rows = result.fetchall()
+
+    # Get today's date (UTC, or adjust to IST if needed)
+    if not date:
+        now = datetime.now(timezone.utc)
+        date = now.date()
+
+    overall_pnl = 0.0
+    overall_trade_count = 0
+    today_pnl = 0.0
+    today_trade_count = 0
+
+    for row in rows:
+        pnl = row.pnl if row.pnl is not None else 0.0
+        # Convert any numeric type (Decimal, int, etc.) to float to avoid type conflicts
+        try:
+            pnl = float(pnl)
+        except (TypeError, ValueError):
+            pnl = 0.0
+        exit_time = row.exit_time
+        overall_pnl += pnl
+        overall_trade_count += 1
+
+        # Check if exit_time is today
+        # if exit_time and exit_time.date() == date:
+        today_pnl += pnl
+        today_trade_count += 1
+
+    return {
+        "overall_pnl": round(overall_pnl, 2),
+        "overall_trade_count": overall_trade_count,
+        "today_pnl": round(today_pnl, 2),
+        "today_trade_count": today_trade_count,
+    }
+
+async def get_strategy_profit_loss_stats(session):
+    """
+    Get strategy profit/loss statistics by aggregating P&L from orders.
+    
+    Args:
+        session: Async SQLAlchemy session
+    
+    Returns:
+        dict: {
+            "strategies_in_profit": int,
+            "strategies_in_loss": int,
+            "total_strategies": int
+        }
+    """
+    from algosat.core.dbschema import orders, strategy_symbols
+    from sqlalchemy import and_, func, case
+    
+    # Query to get P&L sum per strategy_symbol_id
+    stmt = (
+        select(
+            orders.c.strategy_symbol_id,
+            func.sum(orders.c.pnl).label('total_pnl')
+        )
+        .where(orders.c.strategy_symbol_id.is_not(None))
+        .group_by(orders.c.strategy_symbol_id)
+    )
+    
+    result = await session.execute(stmt)
+    rows = result.fetchall()
+    
+    strategies_in_profit = 0
+    strategies_in_loss = 0
+    
+    for row in rows:
+        total_pnl = row.total_pnl if row.total_pnl is not None else 0.0
+        try:
+            total_pnl = float(total_pnl)
+        except (TypeError, ValueError):
+            total_pnl = 0.0
+            
+        if total_pnl > 0:
+            strategies_in_profit += 1
+        elif total_pnl < 0:
+            strategies_in_loss += 1
+    
+    total_strategies = strategies_in_profit + strategies_in_loss
+    
+    return {
+        "strategies_in_profit": strategies_in_profit,
+        "strategies_in_loss": strategies_in_loss,
+        "total_strategies": total_strategies
+    }
+
+async def get_daily_pnl_history(session, days: int = 30):
+    """
+    Get daily P&L history for the specified number of days.
+    
+    Args:
+        session: Async SQLAlchemy session
+        days: Number of days to look back (default 30)
+    
+    Returns:
+        list: [
+            {
+                "date": "2025-06-28",
+                "daily_pnl": 1250.75,
+                "trade_count": 5,
+                "cumulative_pnl": 15750.25
+            },
+            ...
+        ]
+    """
+    from algosat.core.dbschema import orders
+    from sqlalchemy import and_, func, text
+    from datetime import datetime, timezone, timedelta
+    
+    # Calculate start date
+    end_date = datetime.now(timezone.utc)
+    start_date = end_date - timedelta(days=days)
+    
+    # Query to get daily P&L aggregated by exit_time date
+    stmt = (
+        select(
+            func.date(orders.c.exit_time).label('trade_date'),
+            func.sum(orders.c.pnl).label('daily_pnl'),
+            func.count(orders.c.id).label('trade_count')
+        )
+        .where(
+            and_(
+                orders.c.exit_time.is_not(None),
+                orders.c.exit_time >= start_date,
+                orders.c.exit_time <= end_date,
+                orders.c.pnl.is_not(None)
+            )
+        )
+        .group_by(func.date(orders.c.exit_time))
+        .order_by(func.date(orders.c.exit_time))
+    )
+    
+    result = await session.execute(stmt)
+    rows = result.fetchall()
+    
+    # Convert to list and calculate cumulative P&L
+    daily_data = []
+    cumulative_pnl = 0.0
+    
+    for row in rows:
+        daily_pnl = float(row.daily_pnl) if row.daily_pnl is not None else 0.0
+        cumulative_pnl += daily_pnl
+        
+        daily_data.append({
+            "date": row.trade_date.strftime('%Y-%m-%d') if row.trade_date else None,
+            "daily_pnl": round(daily_pnl, 2),
+            "trade_count": row.trade_count or 0,
+            "cumulative_pnl": round(cumulative_pnl, 2)
+        })
+    
+    return daily_data
+
+# End of file

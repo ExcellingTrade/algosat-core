@@ -417,3 +417,31 @@ class OrdersSummaryResponse(BaseModel):
     total_pnl: float = Field(default=0.0, description="Total P&L for all orders")
     live_pnl: float = Field(default=0.0, description="Live P&L for open positions")
     avg_trade_pnl: float = Field(default=0.0, description="Average P&L per trade")
+
+# --- Orders PNL Statistics Schema ---
+class OrdersPnlStatsResponse(BaseModel):
+    """Response model for overall and today's P&L statistics."""
+    overall_pnl: float = Field(..., description="Overall P&L for all trades")
+    overall_trade_count: int = Field(..., description="Total number of trades")
+    today_pnl: float = Field(..., description="Today's P&L")
+    today_trade_count: int = Field(..., description="Today's trade count")
+
+# --- Strategy Statistics Schema ---
+class StrategyStatsResponse(BaseModel):
+    """Response model for strategy profit/loss statistics."""
+    strategies_in_profit: int = Field(..., description="Number of strategies currently in profit")
+    strategies_in_loss: int = Field(..., description="Number of strategies currently in loss")
+    total_strategies: int = Field(..., description="Total number of strategies with trades")
+
+# --- Daily PNL History Schema ---
+class DailyPnlData(BaseModel):
+    """Response model for daily P&L data point."""
+    date: str = Field(..., description="Date in YYYY-MM-DD format")
+    daily_pnl: float = Field(..., description="P&L for this specific day")
+    trade_count: int = Field(..., description="Number of trades on this day")
+    cumulative_pnl: float = Field(..., description="Cumulative P&L up to this date")
+
+class DailyPnlHistoryResponse(BaseModel):
+    """Response model for daily P&L history."""
+    history: List[DailyPnlData] = Field(..., description="List of daily P&L data")
+    total_days: int = Field(..., description="Total number of days with data")
