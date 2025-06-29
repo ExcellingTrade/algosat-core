@@ -170,7 +170,8 @@ def get_market_status() -> Dict[str, Any]:
         "is_trading_day": trading_day,
         "state": state,
         "message": message,
-        "current_time": now_ist.isoformat(),
+        "current_time": now_ist,  # Return datetime object, not ISO string
+        "current_time_iso": now_ist.isoformat(),  # Keep ISO string for API responses
         "next_open_time": next_open_time.isoformat() if next_open_time else None,
         "seconds_until_open": int(time_until_open) if time_until_open else None,
         "market_hours": {

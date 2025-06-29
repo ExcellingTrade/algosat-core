@@ -16,7 +16,8 @@ from algosat.core.db import (
     get_orders_pnl_stats,
     get_orders_pnl_stats_by_symbol_id,
     get_strategy_profit_loss_stats,
-    get_daily_pnl_history
+    get_daily_pnl_history,
+    get_per_strategy_statistics
 )
 from algosat.api.schemas import (
     OrderListResponse, 
@@ -28,7 +29,9 @@ from algosat.api.schemas import (
     OrdersPnlStatsResponse,
     StrategyStatsResponse,
     DailyPnlHistoryResponse,
-    DailyPnlData
+    DailyPnlData,
+    PerStrategyStatsResponse,
+    PerStrategyStatsData
 )
 from algosat.api.dependencies import get_db
 from algosat.api.auth_dependencies import get_current_user
@@ -206,6 +209,40 @@ async def get_daily_pnl_history_endpoint(
         
     except Exception as e:
         logger.error(f"Error in get_daily_pnl_history_endpoint: {e}")
+        raise HTTPException(status_code=500, detail="Internal Server Error")
+
+@router.get("/per-strategy-stats", response_model=PerStrategyStatsResponse)
+async def get_per_strategy_stats_endpoint(
+    db=Depends(get_db), 
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Get per-strategy statistics.
+    
+    This endpoint provides for each strategy:
+    - Live P&L (Today's P&L)
+    - Overall P&L (All-time P&L)
+    - Total number of trades
+    - Win rate percentage
+    
+    Returns comprehensive statistics for all strategies with trading activity.
+    """
+    try:
+        stats_data = await get_per_strategy_statistics(db)
+        
+        # Convert to response format
+        strategies = [PerStrategyStatsData(**data) for data in stats_data]
+        
+        # Debug logging
+        print(f"DEBUG: per-strategy stats: {len(strategies)} strategies")
+        
+        return PerStrategyStatsResponse(
+            strategies=strategies,
+            total_strategies=len(strategies)
+        )
+        
+    except Exception as e:
+        logger.error(f"Error in get_per_strategy_stats_endpoint: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
 
 @router.get("/pnl-stats/by-symbol-id/{strategy_symbol_id}", response_model=OrdersPnlStatsResponse)

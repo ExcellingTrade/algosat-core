@@ -445,3 +445,18 @@ class DailyPnlHistoryResponse(BaseModel):
     """Response model for daily P&L history."""
     history: List[DailyPnlData] = Field(..., description="List of daily P&L data")
     total_days: int = Field(..., description="Total number of days with data")
+
+# --- Per-Strategy Statistics Schema ---
+class PerStrategyStatsData(BaseModel):
+    """Response model for individual strategy statistics."""
+    strategy_id: int = Field(..., description="Strategy ID")
+    strategy_name: str = Field(..., description="Strategy name")
+    live_pnl: float = Field(..., description="Today's P&L for this strategy")
+    overall_pnl: float = Field(..., description="All-time P&L for this strategy")
+    trade_count: int = Field(..., description="Total number of trades for this strategy")
+    win_rate: float = Field(..., description="Win rate percentage (0-100)")
+
+class PerStrategyStatsResponse(BaseModel):
+    """Response model for per-strategy statistics."""
+    strategies: List[PerStrategyStatsData] = Field(..., description="List of strategy statistics")
+    total_strategies: int = Field(..., description="Total number of strategies")

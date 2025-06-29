@@ -1570,6 +1570,7 @@ async def get_strategy_profit_loss_stats(session):
 async def get_daily_pnl_history(session, days: int = 30):
     """
     Get daily P&L history for the specified number of days.
+    Includes both closed and open orders to match overall P&L calculations.
     
     Args:
         session: Async SQLAlchemy session
@@ -1587,15 +1588,16 @@ async def get_daily_pnl_history(session, days: int = 30):
         ]
     """
     from algosat.core.dbschema import orders
-    from sqlalchemy import and_, func, text
+    from sqlalchemy import and_, func, text, case, union_all
     from datetime import datetime, timezone, timedelta
     
     # Calculate start date
     end_date = datetime.now(timezone.utc)
     start_date = end_date - timedelta(days=days)
     
-    # Query to get daily P&L aggregated by exit_time date
-    stmt = (
+    # Split into two queries to avoid complex case statements
+    # Query 1: Closed orders (with exit_time)
+    closed_orders_stmt = (
         select(
             func.date(orders.c.exit_time).label('trade_date'),
             func.sum(orders.c.pnl).label('daily_pnl'),
@@ -1610,27 +1612,168 @@ async def get_daily_pnl_history(session, days: int = 30):
             )
         )
         .group_by(func.date(orders.c.exit_time))
-        .order_by(func.date(orders.c.exit_time))
+    )
+    
+    # Query 2: Open orders (without exit_time, use signal_time)
+    open_orders_stmt = (
+        select(
+            func.date(func.coalesce(orders.c.signal_time, orders.c.entry_time, orders.c.created_at)).label('trade_date'),
+            func.sum(orders.c.pnl).label('daily_pnl'),
+            func.count(orders.c.id).label('trade_count')
+        )
+        .where(
+            and_(
+                orders.c.exit_time.is_(None),  # Open orders only
+                func.coalesce(orders.c.signal_time, orders.c.entry_time, orders.c.created_at) >= start_date,
+                func.coalesce(orders.c.signal_time, orders.c.entry_time, orders.c.created_at) <= end_date,
+                orders.c.pnl.is_not(None)
+            )
+        )
+        .group_by(func.date(func.coalesce(orders.c.signal_time, orders.c.entry_time, orders.c.created_at)))
+    )
+    
+    # Execute both queries separately and combine results in Python
+    closed_result = await session.execute(closed_orders_stmt)
+    open_result = await session.execute(open_orders_stmt)
+    
+    # Combine results by date
+    daily_totals = {}
+    
+    # Process closed orders
+    for row in closed_result.fetchall():
+        date = row.trade_date
+        if date:
+            date_str = date.strftime('%Y-%m-%d')
+            if date_str not in daily_totals:
+                daily_totals[date_str] = {'daily_pnl': 0.0, 'trade_count': 0}
+            daily_totals[date_str]['daily_pnl'] += float(row.daily_pnl) if row.daily_pnl else 0.0
+            daily_totals[date_str]['trade_count'] += row.trade_count or 0
+    
+    # Process open orders
+    for row in open_result.fetchall():
+        date = row.trade_date
+        if date:
+            date_str = date.strftime('%Y-%m-%d')
+            if date_str not in daily_totals:
+                daily_totals[date_str] = {'daily_pnl': 0.0, 'trade_count': 0}
+            daily_totals[date_str]['daily_pnl'] += float(row.daily_pnl) if row.daily_pnl else 0.0
+            daily_totals[date_str]['trade_count'] += row.trade_count or 0
+    
+    # Convert to sorted list and calculate cumulative P&L
+    daily_data = []
+    cumulative_pnl = 0.0
+    
+    # Sort by date
+    for date_str in sorted(daily_totals.keys()):
+        data = daily_totals[date_str]
+        daily_pnl = data['daily_pnl']
+        cumulative_pnl += daily_pnl
+        
+        daily_data.append({
+            "date": date_str,
+            "daily_pnl": round(daily_pnl, 2),
+            "trade_count": data['trade_count'],
+            "cumulative_pnl": round(cumulative_pnl, 2)
+        })
+    
+    return daily_data
+
+async def get_per_strategy_statistics(session):
+    """
+    Get per-strategy statistics including live PNL, overall PNL, trade count, and win rate.
+    
+    Args:
+        session: Async SQLAlchemy session
+    
+    Returns:
+        list: [
+            {
+                "strategy_id": int,
+                "strategy_name": str,
+                "live_pnl": float,    # Today's P&L
+                "overall_pnl": float, # All-time P&L
+                "trade_count": int,   # Total number of trades
+                "win_rate": float     # Percentage of profitable trades
+            }
+        ]
+    """
+    from algosat.core.dbschema import orders, strategy_symbols, strategies
+    from sqlalchemy import and_, func, case
+    from datetime import datetime, date
+    
+    # Get today's date for live P&L calculation
+    today = date.today()
+    
+    # Query to get comprehensive per-strategy statistics
+    stmt = (
+        select(
+            strategies.c.id.label('strategy_id'),
+            strategies.c.name.label('strategy_name'),
+            # Overall P&L (all orders)
+            func.coalesce(func.sum(orders.c.pnl), 0).label('overall_pnl'),
+            # Today's P&L (orders created today)
+            func.coalesce(
+                func.sum(
+                    case(
+                        (func.date(orders.c.created_at) == today, orders.c.pnl),
+                        else_=0
+                    )
+                ), 
+                0
+            ).label('live_pnl'),
+            # Total trade count (all orders)
+            func.count(orders.c.id).label('trade_count'),
+            # Closed trade count (only orders with exit_time)
+            func.count(
+                case(
+                    (orders.c.exit_time.is_not(None), 1),
+                    else_=None
+                )
+            ).label('closed_trade_count'),
+            # Winning closed trades count (only profitable closed orders)
+            func.count(
+                case(
+                    (and_(orders.c.pnl > 0, orders.c.exit_time.is_not(None)), 1),
+                    else_=None
+                )
+            ).label('winning_closed_trades')
+        )
+        .select_from(
+            strategies
+            .join(strategy_symbols, strategies.c.id == strategy_symbols.c.strategy_id)
+            .outerjoin(orders, strategy_symbols.c.id == orders.c.strategy_symbol_id)
+        )
+        .where(orders.c.strategy_symbol_id.is_not(None))
+        .group_by(strategies.c.id, strategies.c.name)
     )
     
     result = await session.execute(stmt)
     rows = result.fetchall()
     
-    # Convert to list and calculate cumulative P&L
-    daily_data = []
-    cumulative_pnl = 0.0
+    strategy_stats = []
     
     for row in rows:
-        daily_pnl = float(row.daily_pnl) if row.daily_pnl is not None else 0.0
-        cumulative_pnl += daily_pnl
+        # Calculate win rate based on closed trades only
+        trade_count = row.trade_count or 0
+        closed_trade_count = row.closed_trade_count or 0
+        winning_closed_trades = row.winning_closed_trades or 0
         
-        daily_data.append({
-            "date": row.trade_date.strftime('%Y-%m-%d') if row.trade_date else None,
-            "daily_pnl": round(daily_pnl, 2),
-            "trade_count": row.trade_count or 0,
-            "cumulative_pnl": round(cumulative_pnl, 2)
+        # Win rate should be calculated from closed trades only
+        win_rate = (winning_closed_trades / closed_trade_count * 100) if closed_trade_count > 0 else 0.0
+        
+        # Convert to float and round values
+        overall_pnl = float(row.overall_pnl) if row.overall_pnl else 0.0
+        live_pnl = float(row.live_pnl) if row.live_pnl else 0.0
+        
+        strategy_stats.append({
+            "strategy_id": row.strategy_id,
+            "strategy_name": row.strategy_name,
+            "live_pnl": round(live_pnl, 2),
+            "overall_pnl": round(overall_pnl, 2),
+            "trade_count": trade_count,  # Total trades (including open)
+            "win_rate": round(win_rate, 2)  # Win rate based on closed trades only
         })
     
-    return daily_data
+    return strategy_stats
 
 # End of file
