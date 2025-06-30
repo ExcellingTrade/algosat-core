@@ -92,12 +92,6 @@ broker_credentials = Table(
         server_default=text("false")
     ),
     Column(
-        "data_source_priority",
-        Integer,
-        nullable=False,
-        server_default=text("0")
-    ),
-    Column(
         "trade_execution_enabled",
         Boolean,
         nullable=False,
@@ -110,16 +104,21 @@ broker_credentials = Table(
         server_default=text("false")
     ),
     Column(
+        "status",
+        String,
+        nullable=False,
+        server_default=text("'DISCONNECTED'")
+    ),
+    Column(
+        "last_auth_check",
+        DateTime(timezone=True),
+        nullable=True
+    ),
+    Column(
         "notes",
         String,
         nullable=True,
         server_default=text("''")
-    ),
-    Column(
-        "global_settings",
-        JSON,
-        nullable=False,
-        server_default=text("'{}'::jsonb")
     ),
     Column(
         "created_at",

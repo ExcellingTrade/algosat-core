@@ -123,7 +123,15 @@ class BrokerBase(BaseModel):
     is_enabled: bool
     is_data_provider: bool
     trade_execution_enabled: bool
+    status: str = "DISCONNECTED"
+    last_auth_check: Optional[datetime] = None  # Accept datetime for DB compatibility
     notes: Optional[str] = None
+
+    @field_serializer("last_auth_check")
+    def serialize_last_auth_check(self, v):
+        if isinstance(v, str):
+            return v
+        return v.isoformat() if v else None
 
 class BrokerCreate(BrokerBase):
     pass
@@ -133,6 +141,8 @@ class BrokerUpdate(BaseModel):
     is_enabled: Optional[bool]
     is_data_provider: Optional[bool]
     trade_execution_enabled: Optional[bool]
+    status: Optional[str]
+    last_auth_check: Optional[datetime] = None
 
 class BrokerResponse(BrokerBase):
     id: int
@@ -145,7 +155,15 @@ class BrokerListResponse(BaseModel):
     is_enabled: bool
     is_data_provider: bool
     trade_execution_enabled: bool
+    status: str = "DISCONNECTED"
+    last_auth_check: Optional[datetime] = None
     notes: Optional[str] = None
+
+    @field_serializer("last_auth_check")
+    def serialize_last_auth_check(self, v):
+        if isinstance(v, str):
+            return v
+        return v.isoformat() if v else None
 
     class Config:
         from_attributes = True

@@ -16,7 +16,6 @@ from datetime import datetime
 from algosat.core.data_manager import DataManager
 from algosat.core.broker_manager import BrokerManager
 from algosat.core.order_manager import get_order_manager
-from algosat.core.balance_summary_monitor import BalanceSummaryMonitor
 
 logger = get_logger(__name__)
 
@@ -37,30 +36,25 @@ async def main():
     logger.debug("🔄 Seeding default strategies and configs...")
     await seed_default_strategies_and_configs()
 
-    # 3) Initialize broker configurations, prompt for missing credentials, and authenticate all enabled brokers
-    await broker_manager.setup()
+    # # 3) Initialize broker configurations, prompt for missing credentials, and authenticate all enabled brokers
+    # await broker_manager.setup()
 
-    # Start BalanceSummaryMonitor
-    logger.info("🔄 Starting BalanceSummaryMonitor...")
-    balance_summary_monitor = BalanceSummaryMonitor(broker_manager)
-    asyncio.create_task(balance_summary_monitor.start())
+    # # Print broker profiles and positions before starting the strategy engine
+    # for broker_name, broker in broker_manager.brokers.items():
+    #     try:
+    #         profile = await broker.get_profile()
+    #         logger.debug(f"Broker {broker_name} profile: {profile}")
+    #     except Exception as e:
+    #         logger.debug(f"Error fetching profile for broker {broker_name}: {e}")
+    #     try:
+    #         positions = await broker.get_positions()
+    #         logger.debug(f"Broker {broker_name} positions: {positions}")
+    #     except Exception as e:
+    #         logger.debug(f"Error fetching positions for broker {broker_name}: {e}")
 
-    # Print broker profiles and positions before starting the strategy engine
-    for broker_name, broker in broker_manager.brokers.items():
-        try:
-            profile = await broker.get_profile()
-            logger.debug(f"Broker {broker_name} profile: {profile}")
-        except Exception as e:
-            logger.debug(f"Error fetching profile for broker {broker_name}: {e}")
-        try:
-            positions = await broker.get_positions()
-            logger.debug(f"Broker {broker_name} positions: {positions}")
-        except Exception as e:
-            logger.debug(f"Error fetching positions for broker {broker_name}: {e}")
-
-    # 6) Initialize DataManager and OrderManager, then start the strategy polling loop
+    # # 6) Initialize DataManager and OrderManager, then start the strategy polling loop
     order_manager = get_order_manager(broker_manager)
-    logger.info("🚦 All brokers authenticated. Starting strategy engine...")
+    # logger.info("🚦 All brokers authenticated. Starting strategy engine...")
     await run_poll_loop(data_manager, order_manager)
     # 7) Close the database connection
     await engine.dispose()

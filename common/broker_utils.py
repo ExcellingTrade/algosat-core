@@ -30,7 +30,7 @@ from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, Ti
 
 from sqlalchemy import select, func
 from sqlalchemy.dialects.postgresql import insert as pg_insert
-from algosat.core.db import AsyncSessionLocal
+from algosat.core.db import AsyncSessionLocal, update_broker
 from algosat.core.dbschema import broker_credentials
 from algosat.core.time_utils import get_ist_now, get_ist_datetime, localize_to_ist
 
@@ -1494,3 +1494,15 @@ def can_reuse_token(generated_on_str, ist_timezone=None):
     except Exception as e:
         logger.error(f"Error in can_reuse_token: {e}")
         return False
+    
+
+async def update_broker_status(broker_name, status, notes="", last_check=None):
+    """Helper to update broker status in DB."""
+    now_ist = last_check or get_ist_now()
+    async with AsyncSessionLocal() as session:
+        await update_broker(session, broker_name, {
+            "status": status,
+            "last_auth_check": now_ist,
+            "updated_at": now_ist,
+            "notes": notes
+        })

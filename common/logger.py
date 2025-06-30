@@ -99,6 +99,8 @@ logging.getLogger("angel").setLevel(logging.WARNING)
 logging.getLogger("zerodha").setLevel(logging.WARNING)
 logging.getLogger("fyers").setLevel(logging.WARNING)
 
+log_dir = os.path.join(os.path.dirname(__file__), '../../logs')
+print(log_dir)
 
 def _ensure_all_directories():
     """Ensure all required directories exist and remove unwanted ones."""
@@ -209,12 +211,13 @@ def get_logger(module_name: str) -> logging.Logger:
         from logging.handlers import RotatingFileHandler
         from datetime import datetime
         import os
-        log_dir = os.path.join(os.path.dirname(__file__), '../../logs')
         today = get_ist_now().strftime('%Y-%m-%d')
         date_dir = os.path.join(log_dir, today)
         os.makedirs(date_dir, exist_ok=True)
         if module_name.startswith("api."):
             log_file = os.path.join(date_dir, f"api-{today}.log")
+        elif module_name == "broker_monitor":
+            log_file = os.path.join(date_dir, f"broker_monitor-{today}.log")
         else:
             log_file = os.path.join(date_dir, f"algosat-{today}.log")
         file_handler = RotatingFileHandler(log_file, maxBytes=2*1024*1024, backupCount=7, encoding="utf-8")
@@ -252,7 +255,7 @@ def cleanup_logs_and_cache():
     logger = get_logger("logger_cleanup")
     
     try:
-        from core.time_utils import get_ist_datetime
+        from algosat.core.time_utils import get_ist_datetime
         now = get_ist_datetime()
         
         # Cleanup logs in Fyer folder (keep 3-day files)
@@ -263,11 +266,18 @@ def cleanup_logs_and_cache():
                 logger.debug(f"Deleted old log file: {log_file}")
         
         # Cleanup general logs (keep 7-day files)
-        for log_file in glob.glob(os.path.join(constants.LOG_DIR, "*.log*")):
-            file_time = datetime.fromtimestamp(os.path.getmtime(log_file)).astimezone(now.tzinfo).date()
-            if (now.date() - file_time).days > 7:
-                os.remove(log_file)
-                logger.debug(f"Deleted old log file: {log_file}")
+        for date_dir in os.listdir(log_dir):
+            full_date_dir = os.path.join(log_dir, date_dir)
+            if not os.path.isdir(full_date_dir):
+                continue
+            try:
+                dir_date = datetime.strptime(date_dir, "%Y-%m-%d").date()
+            except Exception:
+                continue  # skip non-date dirs
+            if (now.date() - dir_date).days > 1:
+                import shutil
+                shutil.rmtree(full_date_dir)
+                logger.debug(f"Deleted old log directory: {full_date_dir}")
         
         # Cleanup cache files (keep 15-day files)
         for cache_file in glob.glob(os.path.join(constants.CACHE_DIR, "*")):
@@ -287,16 +297,26 @@ def cleanup_logs_and_cache():
         logger.error(f"Error during log cleanup: {e}", exc_info=True)
 
 
+def clean_broker_monitor_logs():
+    """Remove broker_monitor logs older than 1 day from the logs directory."""
+    try:
+        from algosat.core.time_utils import get_ist_datetime
+        now = get_ist_datetime()
+        log_dir = os.path.join(os.path.dirname(__file__), '../../logs')
+        for date_dir in os.listdir(log_dir):
+            full_date_dir = os.path.join(log_dir, date_dir)
+            if not os.path.isdir(full_date_dir):
+                continue
+            for fname in os.listdir(full_date_dir):
+                if fname.startswith("broker_monitor-") and fname.endswith(".log"):
+                    fpath = os.path.join(full_date_dir, fname)
+                    file_time = datetime.fromtimestamp(os.path.getmtime(fpath)).astimezone(now.tzinfo)
+                    if (now - file_time).days > 1:
+                        os.remove(fpath)
+                        print(f"Deleted old broker_monitor log: {fpath}")
+    except Exception as e:
+        print(f"Error during broker_monitor log cleanup: {e}")
+
+
 # Example usage
-if __name__ == "__main__":
-    # Clean up old logs
-    cleanup_logs_and_cache()
-    
-    # Use the logger
-    logger = get_logger("example_module")
-    logger.info("This is an INFO message to test console output.")
-    logger.debug("This is a DEBUG message that should go to the file.")
-    
-    # Test the legacy function too
-    legacy_logger = configure_logger("legacy_module")
-    legacy_logger.info("This is a message from the legacy logger function.")
+# (Removed __main__ block; call cleanup_logs_and_cache and clean_broker_monitor_logs from your main app entrypoint)

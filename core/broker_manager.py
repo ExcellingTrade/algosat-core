@@ -3,7 +3,7 @@
 import asyncio
 from typing import Dict, Optional, List, Callable
 from algosat.brokers.factory import get_broker
-from algosat.common.broker_utils import get_broker_credentials, upsert_broker_credentials
+from algosat.common.broker_utils import get_broker_credentials, upsert_broker_credentials, update_broker_status
 from algosat.common.default_broker_configs import DEFAULT_BROKER_CONFIGS
 from algosat.common.logger import get_logger
 from algosat.core.db import AsyncSessionLocal, get_strategy_by_id, get_trade_enabled_brokers as db_get_trade_enabled_brokers
@@ -129,29 +129,38 @@ class BrokerManager:
         enabled_brokers = await self._discover_enabled_brokers()
         for broker_key in enabled_brokers:
             await self._prompt_for_missing_credentials(broker_key)
-            await self._authenticate_broker(broker_key)
+            # Set status to AUTHENTICATING before authentication
+            await update_broker_status(broker_key, "AUTHENTICATING", notes="Authenticating...")
+            success = await self._authenticate_broker(broker_key)
+            # Update DB with authentication result for each broker
+            status = "CONNECTED" if success else "FAILED"
+            await update_broker_status(broker_key, status, notes="" if success else "Initial authentication failed")
         logger.info("🟢 BrokerManager setup complete.")
 
     async def reauthenticate_broker(self, broker_key: str, retries=3, delay=1) -> bool:
+        # Set status to AUTHENTICATING before re-authentication
+        await update_broker_status(broker_key, "AUTHENTICATING", notes="Re-authenticating...")
         broker = self.brokers.get(broker_key)
         if not broker:
             logger.info(f"🔄 Broker {broker_key} not initialized. Initializing now...")
-            # Attempt to authenticate broker if not initialized
-            return await self._authenticate_broker(broker_key, retries=retries, delay=delay, force_reauth=True)
-        logger.info(f"🔄 Reauthenticating broker: {broker_key}")
-        try:
-            # Pass force_reauth=True if supported
-            if hasattr(broker, 'login'):
-                import inspect
-                if 'force_reauth' in inspect.signature(broker.login).parameters:
-                    success = await async_retry(broker.login, force_reauth=True, retries=retries, delay=delay)
+            success = await self._authenticate_broker(broker_key, retries=retries, delay=delay, force_reauth=True)
+        else:
+            logger.info(f"🔄 Reauthenticating broker: {broker_key}")
+            try:
+                if hasattr(broker, 'login'):
+                    import inspect
+                    if 'force_reauth' in inspect.signature(broker.login).parameters:
+                        success = await async_retry(broker.login, force_reauth=True, retries=retries, delay=delay)
+                    else:
+                        success = await async_retry(broker.login, retries=retries, delay=delay)
                 else:
-                    success = await async_retry(broker.login, retries=retries, delay=delay)
-            else:
+                    success = False
+            except Exception as e:
+                logger.error(f"Reauthentication failed for {broker_key}: {e}")
                 success = False
-        except Exception as e:
-            logger.error(f"Reauthentication failed for {broker_key}: {e}")
-            return False
+        # Update status after re-auth
+        status = "CONNECTED" if success else "FAILED"
+        await update_broker_status(broker_key, status, notes="" if success else "Re-authentication failed")
         if success:
             logger.info(f"🟢 Reauthentication successful for {broker_key}")
         else:

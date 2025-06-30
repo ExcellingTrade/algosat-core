@@ -98,8 +98,22 @@ async def disable_trade_execution(broker_name: str, db=Depends(get_db)):
     return {"status": "trade_execution_disabled", "broker_name": validated_broker_name}
 
 @router.post("/{broker_name}/auth")
-async def reauth_broker(broker_name: str):
+async def reauth_broker(broker_name: str, db=Depends(get_db)):
     validated_broker_name = input_validator.validate_and_sanitize(broker_name, "broker_name", expected_type=str, max_length=256, pattern=r"^[a-zA-Z0-9_-]+$")
+    
+    # Update broker status to AUTHENTICATING and set last_auth_check timestamp
+    try:
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc)
+        await update_broker(db, validated_broker_name, {
+            "status": "AUTHENTICATING",
+            "last_auth_check": now.isoformat()
+        })
+        logger.info(f"Set broker {validated_broker_name} status to AUTHENTICATING and updated last_auth_check")
+    except Exception as e:
+        logger.error(f"Failed to update broker status for {validated_broker_name}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to update broker status")
+    
     from algosat.main import broker_manager
     # Schedule the reauth as a background task using asyncio.create_task
     asyncio.create_task(broker_manager.reauthenticate_broker(validated_broker_name))
@@ -131,6 +145,11 @@ async def update_broker_api(
         elif key in ["is_enabled", "is_data_provider", "trade_execution_enabled"]:
             if not isinstance(value, bool):
                 raise InvalidInputError(f"Invalid type for {key}, expected boolean.")
+            validated_update_data[key] = value
+        elif key == "status":
+            allowed_statuses = ["CONNECTED", "DISCONNECTED", "AUTHENTICATING", "ERROR"]
+            if value not in allowed_statuses:
+                raise InvalidInputError(f"Invalid status value. Allowed values: {allowed_statuses}")
             validated_update_data[key] = value
         elif key == "config": # Assuming config is a dict
             if not isinstance(value, dict):
