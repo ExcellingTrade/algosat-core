@@ -69,6 +69,7 @@ async def serial_health_check(broker_name, broker):
                 broker_id = broker_data["id"]
                 summary = await broker.get_balance_summary()
                 summary_dict = summary.model_dump() if hasattr(summary, 'model_dump') else summary.to_dict()
+                logger.info(f"[{broker_name}] Balance summary fetched: {summary_dict}")
                 async with AsyncSessionLocal() as session:
                     await upsert_broker_balance_summary(session, broker_id, summary_dict)
                 logger.info(f"[{broker_name}] get_balance_summary successful. Balance summary updated.")

@@ -9,7 +9,7 @@ from algosat.core.data_manager import DataManager
 from algosat.core.order_manager import OrderManager
 from algosat.core.order_cache import OrderCache
 from algosat.core.order_request import OrderStatus
-from algosat.common.strategy_utils import wait_for_next_candle
+from algosat.common.strategy_utils import wait_for_next_candle, fetch_strikes_history
 
 logger = get_logger("OrderMonitor")
 
@@ -82,7 +82,7 @@ class OrderMonitor:
             elif any(status_str(s) == OrderStatus.CANCELLED.value for s in all_order_statuses):
                 await self.order_manager.update_order_status_in_db(self.order_id, OrderStatus.CANCELLED)
             try:
-                ltp = await self.data_manager.get_ltp(agg.symbol, self.order_id)
+                ltp = await self.data_manager.get_ltp(agg.symbol)
             except Exception as e:
                 logger.error(f"OrderMonitor: Error in get_ltp for symbol={agg.symbol}, order_id={self.order_id}: {e}")
                 ltp = None
@@ -126,7 +126,7 @@ class OrderMonitor:
                 logger.error(f"OrderMonitor: Error in fetch_history (slow) for symbol={agg.symbol}, order_id={self.order_id}: {e}")
                 history = None
             try:
-                ltp = await self.data_manager.get_ltp(agg.symbol, self.order_id)
+                ltp = await self.data_manager.get_ltp(agg.symbol)
             except Exception as e:
                 logger.error(f"OrderMonitor: Error in get_ltp (slow) for symbol={agg.symbol}, order_id={self.order_id}: {e}")
                 ltp = None

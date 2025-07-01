@@ -117,6 +117,13 @@ def validate_broker_response(response: Any, expected_type: str = "option_chain",
         else:
             logger.debug(f"Invalid history data type for '{symbol}': {type(response)}")
             raise ValueError(f"Invalid history data type for '{symbol}'")
+    elif expected_type == "ltp":
+        # LTP can be a number, dict with LTP field, or other broker-specific format
+        if response is None:
+            logger.debug(f"No LTP data received for '{symbol}' (None returned)")
+            raise ValueError(f"No LTP data received for '{symbol}'")
+        # Don't validate structure since LTP format varies by broker
+        # Just ensure it's not None
     else:
         if not (isinstance(response, dict) and response.get("code", response.get("statuscode")) == 200 and response.get("data")):
             logger.debug(f"Invalid data received for '{symbol}': {response}")
@@ -249,26 +256,84 @@ class DataManager:
             logger.error(f"Error in get_history for symbol={symbol}: {e}", exc_info=True)
             raise
 
-    async def get_strike_list(self, symbol: str, max_strikes: int = 40) -> List[str]:
+    async def get_ltp(self, symbol: str, ttl: int = 5) -> Any:
+        """
+        Get the last traded price (LTP) for the given symbol.
+        Uses short TTL cache since LTP data is frequently changing.
+        """
         try:
             if not self.broker:
                 raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
-            if hasattr(self.broker, "get_strike_list"):
-                return await self.broker.get_strike_list(symbol, max_strikes)
-            raise NotImplementedError(f"Broker {self.get_current_broker_name()} does not implement get_strike_list.")
+            cache_key = f"ltp:{symbol}"
+            cached = self.cache.get(cache_key, ttl=ttl)
+            if cached is not None:
+                logger.debug(f"Cache hit for LTP: {cache_key}")
+                return cached
+            async def _fetch():
+                async with self.get_active_rate_limiter():
+                    result = self.broker.get_ltp(symbol)
+                    ltp = await result if inspect.isawaitable(result) else result
+                    validate_broker_response(ltp, expected_type="ltp", symbol=symbol)
+                    # Cache the LTP value for short duration
+                    self.cache.set(cache_key, ltp, ttl=ttl)
+                    return ltp
+            return await _async_retry(_fetch)
         except Exception as e:
-            logger.error(f"Error in get_strike_list for symbol={symbol}: {e}", exc_info=True)
+            logger.error(f"Error in get_ltp for symbol={symbol}: {e}", exc_info=True)
             raise
 
-    async def get_broker_symbol(self, symbol: str, instrument_type: Optional[str] = None) -> Dict[str, Any]:
+    async def fetch_history(self, symbol: str, interval_minutes: int = 1, lookback: int = 1) -> Optional[pd.DataFrame]:
+        """
+        Fetch history for a single symbol using strategy_utils.fetch_strikes_history.
+        This method provides a simplified interface for single symbol history fetching.
+        
+        Args:
+            symbol: The trading symbol
+            interval_minutes: OHLC interval in minutes (default: 1)
+            lookback: Number of periods to look back (default: 1)
+            
+        Returns:
+            DataFrame with OHLC data or None if error
+        """
         try:
-            broker_name = self.get_current_broker_name()
-            if not self.broker_manager or not broker_name:
-                raise RuntimeError("BrokerManager or broker_name not set in DataManager.")
-            return await self.broker_manager.get_symbol_info(broker_name, symbol, instrument_type)
+            from datetime import datetime, timedelta
+            from algosat.core.time_utils import get_ist_datetime
+            from algosat.common.strategy_utils import fetch_strikes_history
+            
+            # Calculate date range based on lookback
+            end_time = get_ist_datetime()
+            # Calculate how many days back we need based on interval and lookback
+            # Add extra buffer for weekends and holidays
+            days_back = max(1, (lookback * interval_minutes) // (6 * 60) + 3)  # Rough estimate
+            start_time = end_time - timedelta(days=days_back)
+            
+            # Use fetch_strikes_history for a single symbol
+            history_data = await fetch_strikes_history(
+                broker=self,
+                strike_symbols=[symbol],
+                from_date=start_time,
+                to_date=end_time,
+                interval_minutes=interval_minutes,
+                ins_type="",
+                cache=True
+            )
+            
+            # Return the data for our symbol, or None if not found
+            return history_data.get(symbol)
+            
         except Exception as e:
-            logger.error(f"Error in get_broker_symbol for symbol={symbol}, instrument_type={instrument_type}: {e}", exc_info=True)
-            raise
+            logger.error(f"Error in fetch_history for symbol={symbol}, interval_minutes={interval_minutes}, lookback={lookback}: {e}", exc_info=True)
+            return None
+        
+    async def get_broker_symbol(self, symbol: str, instrument_type: Optional[str] = None) -> Dict[str, Any]:
+            try:
+                broker_name = self.get_current_broker_name()
+                if not self.broker_manager or not broker_name:
+                    raise RuntimeError("BrokerManager or broker_name not set in DataManager.")
+                return await self.broker_manager.get_symbol_info(broker_name, symbol, instrument_type)
+            except Exception as e:
+                logger.error(f"Error in get_broker_symbol for symbol={symbol}, instrument_type={instrument_type}: {e}", exc_info=True)
+                raise
 
     async def get_order_aggregate(self, parent_order_id: int) -> OrderAggregate:
         try:
@@ -309,13 +374,3 @@ class DataManager:
         except Exception as e:
             logger.error(f"Error in get_broker_name_by_id for broker_id={broker_id}: {e}", exc_info=True)
             raise
-
-
-# Example: instantiate a global DataManager with per-broker rate limiting
-# (Replace ... with actual broker and broker_manager if using as singleton)
-# data_manager = DataManager(
-#     broker=...,                # your broker instance
-#     broker_name=...,           # broker name string (e.g., "fyers")
-#     broker_manager=...,        # your broker manager
-#     rate_limiter_map=rate_limiter_map,
-# )
