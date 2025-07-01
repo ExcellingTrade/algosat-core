@@ -1776,4 +1776,10 @@ async def get_per_strategy_statistics(session):
     
     return strategy_stats
 
-# End of file
+async def get_all_open_orders(session):
+    """Return all orders with open status for monitoring."""
+    from algosat.core.dbschema import orders
+    result = await session.execute(
+        select(orders).where(orders.c.status.in_(["OPEN", "PENDING", "PLACED", "AWAITING_ENTRY"]))
+    )
+    return [dict(row._mapping) for row in result.fetchall()]

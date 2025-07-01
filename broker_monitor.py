@@ -21,6 +21,15 @@ def seconds_until_next_6_01am_ist():
         next_6_01am += timedelta(days=1)
     return (next_6_01am - now).total_seconds()
 
+def seconds_until_next_market_open(now_ist):
+    """Return seconds until next market open (9:15 IST)."""
+    market_open = now_ist.replace(hour=9, minute=15, second=0, microsecond=0)
+    if now_ist.time() < dt_time(9, 15):
+        return (market_open - now_ist).total_seconds()
+    # If after market close, next open is tomorrow
+    market_open += timedelta(days=1)
+    return (market_open - now_ist).total_seconds()
+
 def is_market_hours(now_ist):
     """Return True if now_ist is within market hours (IST 9:15 to 15:30)."""
     market_open = dt_time(9, 15)
@@ -71,34 +80,45 @@ async def serial_health_check(broker_name, broker):
 async def monitor_broker(broker_name, broker_manager):
     logger.info(f"[{broker_name}] Starting broker monitor loop...")
     while True:
+        async with AsyncSessionLocal() as session:
+            broker_row = await get_broker_by_name(session, broker_name)
+            status = broker_row["status"] if broker_row else None
+        broker = broker_manager.brokers.get(broker_name)
+        logger.debug(f"[{broker_name}] Broker status from DB: {status}")
         now_ist = get_ist_now()
-        logger.debug(f"[{broker_name}] Current IST time: {now_ist}. Calculating seconds until next 6:01am IST.")
-        seconds_to_601 = seconds_until_next_6_01am_ist()
-        logger.info(f"[{broker_name}] Time until next 6:01am IST: {seconds_to_601/3600:.2f} hours ({seconds_to_601/60:.1f} minutes)")
-        end_time = now_ist + timedelta(seconds=seconds_to_601)
-        while get_ist_now() < end_time:
-            async with AsyncSessionLocal() as session:
-                broker_row = await get_broker_by_name(session, broker_name)
-                status = broker_row["status"] if broker_row else None
-            broker = broker_manager.brokers.get(broker_name)
-            logger.debug(f"[{broker_name}] Broker status from DB: {status}")
-            now_ist = get_ist_now()
-            if status == "CONNECTED" and broker is not None:
-                if is_market_hours(now_ist):
-                    logger.info(f"[{broker_name}] Status CONNECTED and within market hours. Running serial_health_check.")
-                    await serial_health_check(broker_name, broker)
-                else:
-                    logger.info(f"[{broker_name}] Status CONNECTED but outside market hours. Skipping serial_health_check.")
-            elif status == "FAILED":
-                logger.info(f"[{broker_name}] Status FAILED. Attempting re-authentication...")
-                await broker_manager.reauthenticate_broker(broker_name)
+        
+        if status == "CONNECTED" and broker is not None:
+            if is_market_hours(now_ist):
+                logger.info(f"[{broker_name}] Status CONNECTED and within market hours. Running serial_health_check.")
+                await serial_health_check(broker_name, broker)
+                logger.debug(f"[{broker_name}] Sleeping for {PROFILE_CHECK_INTERVAL_MIN} minutes before next check.")
+                await asyncio.sleep(PROFILE_CHECK_INTERVAL_MIN * 60)
             else:
-                logger.debug(f"[{broker_name}] Status is '{status}'. No health check or re-auth needed right now.")
+                logger.info(f"[{broker_name}] Status CONNECTED but outside market hours. Sleeping for {PROFILE_CHECK_INTERVAL_MIN} minutes.")
+                await asyncio.sleep(PROFILE_CHECK_INTERVAL_MIN * 60)
+        elif status == "FAILED":
+            logger.info(f"[{broker_name}] Status FAILED. Attempting re-authentication...")
+            await broker_manager.reauthenticate_broker(broker_name)
             logger.debug(f"[{broker_name}] Sleeping for {PROFILE_CHECK_INTERVAL_MIN} minutes before next check.")
             await asyncio.sleep(PROFILE_CHECK_INTERVAL_MIN * 60)
-        # At 6:01am IST, re-run setup (idempotent) and clean logs
-        logger.info(f"[{broker_name}] Running scheduled 6:01am IST re-authentication via setup() and log cleanup.")
-        await broker_manager.setup()
+        else:
+            logger.debug(f"[{broker_name}] Status is '{status}'. No health check or re-auth needed right now.")
+            logger.debug(f"[{broker_name}] Sleeping for {PROFILE_CHECK_INTERVAL_MIN} minutes before next check.")
+            await asyncio.sleep(PROFILE_CHECK_INTERVAL_MIN * 60)
+
+async def daily_reauth_scheduler(broker_manager):
+    """Separate task to handle daily 6:01am re-authentication"""
+    while True:
+        now_ist = get_ist_now()
+        seconds_to_601 = seconds_until_next_6_01am_ist()
+        logger.info(f"Daily scheduler: Time until next 6:01am IST: {seconds_to_601/3600:.2f} hours ({seconds_to_601/60:.1f} minutes)")
+        
+        # Sleep until 6:01am
+        await asyncio.sleep(seconds_to_601)
+        
+        # At 6:01am IST, re-run setup with force_auth and clean logs
+        logger.info("Running scheduled 6:01am IST re-authentication via setup() and log cleanup.")
+        await broker_manager.setup(force_auth=True)
         cleanup_logs_and_cache()
         clean_broker_monitor_logs()
 
@@ -109,11 +129,18 @@ async def main():
     broker_manager = BrokerManager()
     await broker_manager.setup()
     logger.info(f"Brokers to monitor: {list(broker_manager.brokers.keys())}")
+    
     tasks = []
+    # Create monitoring tasks for each broker
     for broker_name in broker_manager.brokers.keys():
         logger.info(f"[{broker_name}] Creating monitor task.")
         tasks.append(asyncio.create_task(monitor_broker(broker_name, broker_manager)))
-    logger.info(f"Started broker monitor for {len(tasks)} brokers.")
+    
+    # Create daily re-authentication scheduler task
+    logger.info("Creating daily re-authentication scheduler task.")
+    tasks.append(asyncio.create_task(daily_reauth_scheduler(broker_manager)))
+    
+    logger.info(f"Started broker monitor for {len(broker_manager.brokers)} brokers plus scheduler.")
     await asyncio.gather(*tasks, return_exceptions=True)
 
 if __name__ == "__main__":

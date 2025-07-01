@@ -6,7 +6,9 @@ from algosat.brokers.factory import get_broker
 from algosat.common.broker_utils import get_broker_credentials, upsert_broker_credentials, update_broker_status
 from algosat.common.default_broker_configs import DEFAULT_BROKER_CONFIGS
 from algosat.common.logger import get_logger
+from algosat.core.time_utils import get_ist_now
 from algosat.core.db import AsyncSessionLocal, get_strategy_by_id, get_trade_enabled_brokers as db_get_trade_enabled_brokers
+from datetime import datetime, time as dt_time
 from algosat.core.order_request import OrderRequest, OrderType, Side
 from algosat.core.signal import TradeSignal, SignalType
 from algosat.core.order_defaults import ORDER_DEFAULTS
@@ -38,6 +40,55 @@ async def async_retry(func: Callable, *args, retries=3, delay=1, **kwargs):
                 logger.warning(f"Retryable error in {func.__name__}: {exc}. Retrying ({attempt+1}/{retries})...")
                 await asyncio.sleep(delay)
     raise last_exc
+
+async def is_token_stale(broker_key: str) -> bool:
+    """
+    Check if the broker's token is stale (generated before today's 6:00 AM IST).
+    Returns True if token needs refresh, False if still valid.
+    """
+    try:
+        full_config = await get_broker_credentials(broker_key)
+        if not full_config or not isinstance(full_config, dict):
+            return True  # No config means we need to authenticate
+        
+        credentials = full_config.get("credentials", {})
+        generated_on_str = credentials.get("generated_on")
+        
+        if not generated_on_str:
+            return True  # No generation time means we need to authenticate
+        
+        # Parse the generated_on timestamp (format: "DD/MM/YYYY HH:MM:SS")
+        try:
+            generated_on_naive = datetime.strptime(generated_on_str, "%d/%m/%Y %H:%M:%S")
+        except ValueError:
+            logger.warning(f"Invalid generated_on format for {broker_key}: {generated_on_str}")
+            return True
+        
+        # Convert the parsed datetime to IST timezone-aware datetime
+        from algosat.core.time_utils import localize_to_ist
+        generated_on = localize_to_ist(generated_on_naive)
+        
+        # Get current IST time and today's 6:00 AM IST
+        now_ist = get_ist_now()
+        today_6am = now_ist.replace(hour=6, minute=0, second=0, microsecond=0)
+        
+        # If current time is before 6 AM, check against yesterday's 6 AM
+        if now_ist.time() < dt_time(6, 0):
+            from datetime import timedelta
+            today_6am = today_6am - timedelta(days=1)
+        
+        # Token is stale if it was generated before today's 6:00 AM
+        is_stale = generated_on < today_6am
+        
+        if is_stale:
+            logger.info(f"Token for {broker_key} is stale (generated: {generated_on_str}, cutoff: {today_6am})")
+        else:
+            logger.debug(f"Token for {broker_key} is still valid (generated: {generated_on_str}, cutoff: {today_6am})")
+        
+        return is_stale
+    except Exception as e:
+        logger.error(f"Error checking token staleness for {broker_key}: {e}")
+        return True  # On error, assume stale and re-authenticate
 
 class BrokerManager:
     def __init__(self):
@@ -124,17 +175,69 @@ class BrokerManager:
             logger.warning(f"🟡 Authentication failed for {broker_key}")
         return success
 
-    async def setup(self):
+    async def setup(self, poll_interval=2, max_wait=60, force_auth=False):
         logger.debug("🔄 Starting BrokerManager setup...")
         enabled_brokers = await self._discover_enabled_brokers()
+        from algosat.core.db import AsyncSessionLocal, get_broker_by_name
         for broker_key in enabled_brokers:
             await self._prompt_for_missing_credentials(broker_key)
-            # Set status to AUTHENTICATING before authentication
-            await update_broker_status(broker_key, "AUTHENTICATING", notes="Authenticating...")
-            success = await self._authenticate_broker(broker_key)
-            # Update DB with authentication result for each broker
-            status = "CONNECTED" if success else "FAILED"
-            await update_broker_status(broker_key, status, notes="" if success else "Initial authentication failed")
+            # Check broker status in DB
+            status = None
+            wait_time = 0
+            while True:
+                async with AsyncSessionLocal() as session:
+                    broker_row = await get_broker_by_name(session, broker_key)
+                    status = broker_row["status"] if broker_row else None
+                if status == "AUTHENTICATING":
+                    if wait_time >= max_wait:
+                        logger.warning(f"Timeout waiting for {broker_key} to finish authenticating. Proceeding to authenticate.")
+                        break
+                    logger.info(f"{broker_key} is currently authenticating. Waiting...")
+                    await asyncio.sleep(poll_interval)
+                    wait_time += poll_interval
+                elif status == "CONNECTED":
+                    # Check if token is stale even if status is CONNECTED
+                    token_is_stale = await is_token_stale(broker_key)
+                    if force_auth or token_is_stale:
+                        reason = "force_auth is set" if force_auth else "token is stale"
+                        logger.info(f"{broker_key} is CONNECTED but {reason}. Proceeding to re-authenticate.")
+                        await update_broker_status(broker_key, "AUTHENTICATING", notes=f"Re-authenticating ({reason})...")
+                        success = await self._authenticate_broker(broker_key, force_reauth=True)
+                        status_final = "CONNECTED" if success else "FAILED"
+                        await update_broker_status(broker_key, status_final, notes="" if success else f"Re-authentication failed ({reason})")
+                    else:
+                        logger.info(f"{broker_key} is already CONNECTED and token is fresh. Re-instantiating and authenticating broker wrapper.")
+                        # Re-instantiate and authenticate the broker wrapper
+                        broker = get_broker(broker_key)
+                        if broker:
+                            try:
+                                import inspect
+                                if hasattr(broker, 'login') and 'force_reauth' in inspect.signature(broker.login).parameters:
+                                    success = await async_retry(broker.login, force_reauth=False, retries=3, delay=1)
+                                else:
+                                    success = await async_retry(broker.login, retries=3, delay=1)
+                                
+                                if success:
+                                    self.brokers[broker_key] = broker
+                                    logger.info(f"🟢 Re-authentication successful for {broker_key}")
+                                else:
+                                    logger.warning(f"🟡 Re-authentication failed for {broker_key}")
+                                    self.brokers[broker_key] = None
+                            except Exception as e:
+                                logger.error(f"🔴 Re-authentication failed for {broker_key}: {e}")
+                                self.brokers[broker_key] = None
+                        else:
+                            logger.error(f"🔴 Could not re-instantiate broker: {broker_key}")
+                            self.brokers[broker_key] = None
+                    break
+                else:
+                    # Set status to AUTHENTICATING before authentication
+                    await update_broker_status(broker_key, "AUTHENTICATING", notes="Authenticating...")
+                    success = await self._authenticate_broker(broker_key, force_reauth=force_auth)
+                    # Update DB with authentication result for each broker
+                    status_final = "CONNECTED" if success else "FAILED"
+                    await update_broker_status(broker_key, status_final, notes="" if success else "Initial authentication failed")
+                    break
         logger.info("🟢 BrokerManager setup complete.")
 
     async def reauthenticate_broker(self, broker_key: str, retries=3, delay=1) -> bool:

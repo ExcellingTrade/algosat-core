@@ -5,7 +5,7 @@ class BrokerOrder(BaseModel):
     broker_id: int
     order_id: Union[str, int, List[Union[str, int]], None]  # Accepts str, int, or list
     status: str
-    raw_response: Dict[str, Any]
+    raw_response: Optional[Dict[str, Any]] = None  # Allow None/null values
 
 class OrderAggregate(BaseModel):
     strategy_config_id: int

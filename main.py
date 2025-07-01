@@ -37,7 +37,7 @@ async def main():
     await seed_default_strategies_and_configs()
 
     # # 3) Initialize broker configurations, prompt for missing credentials, and authenticate all enabled brokers
-    # await broker_manager.setup()
+    await broker_manager.setup()
 
     # # Print broker profiles and positions before starting the strategy engine
     # for broker_name, broker in broker_manager.brokers.items():

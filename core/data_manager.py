@@ -8,7 +8,7 @@ import inspect
 import pandas as pd
 from algosat.common.logger import get_logger
 from algosat.models.order_aggregate import OrderAggregate, BrokerOrder
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional, Union
 from algosat.core.db import get_order_by_id, get_broker_executions_by_order_id
 
 logger = get_logger("data_manager")
@@ -40,17 +40,17 @@ class _CacheManager:
     """
     A hybrid in-memory + persistent disk cache manager.
     """
-    def __init__(self, maxsize=512, shelve_path="/tmp/algosat_cache.db"):
-        self.caches = {}
+    def __init__(self, maxsize: int = 512, shelve_path: str = "/tmp/algosat_cache.db"):
+        self.caches: Dict[int, TTLCache] = {}
         self.maxsize = maxsize
         self.shelve_path = shelve_path
 
-    def get_cache(self, ttl: int):
+    def get_cache(self, ttl: int) -> TTLCache:
         if ttl not in self.caches:
             self.caches[ttl] = TTLCache(maxsize=self.maxsize, ttl=ttl)
         return self.caches[ttl]
 
-    def get(self, key, ttl=60):
+    def get(self, key: str, ttl: int = 60) -> Any:
         # Check in-memory
         cache = self.get_cache(ttl)
         if key in cache:
@@ -59,33 +59,33 @@ class _CacheManager:
         with shelve.open(self.shelve_path) as db:
             return db.get(key)
 
-    def set(self, key, value, ttl=60):
+    def set(self, key: str, value: Any, ttl: int = 60) -> None:
         cache = self.get_cache(ttl)
         cache[key] = value
         with shelve.open(self.shelve_path) as db:
             db[key] = value
 
     @staticmethod
-    def seconds_until_midnight_ist():
+    def seconds_until_midnight_ist() -> int:
         now = datetime.utcnow() + timedelta(hours=5, minutes=30)
         tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
         return int((tomorrow - now).total_seconds())
 
 class _RateLimiter:
-    def __init__(self, max_calls, interval_sec):
+    def __init__(self, max_calls: int, interval_sec: float):
         self.semaphore = asyncio.Semaphore(max_calls)
         self.interval = interval_sec
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> None:
         await self.semaphore.acquire()
 
-    async def __aexit__(self, exc_type, exc, tb):
+    async def __aexit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         await asyncio.sleep(self.interval)
         self.semaphore.release()
 
 
 # Build the per-broker rate limiter map
-rate_limiter_map = {
+rate_limiter_map: Dict[str, _RateLimiter] = {
     broker_name: _RateLimiter(max_calls=limit, interval_sec=1)
     for broker_name, limit in _RATE_LIMITS.items()
 }
@@ -99,7 +99,7 @@ rate_limiter_map = {
 #     rate_limiter_map=rate_limiter_map,
 # )
 
-def validate_broker_response(response, expected_type="option_chain", symbol=None):
+def validate_broker_response(response: Any, expected_type: str = "option_chain", symbol: Optional[str] = None) -> None:
     """Validate broker API response. Raise ValueError if invalid."""
     if expected_type == "option_chain":
         if not (isinstance(response, dict) and response.get("code", response.get("statuscode")) == 200 and response.get("data") and response["data"].get("optionsChain")):
@@ -127,7 +127,13 @@ class DataManager:
     Central data manager responsible for broker API access,
     per-broker rate-limiting, and caching.
     """
-    def __init__(self, broker=None, broker_name=None, cache=None, rate_limiter=None, rate_limiter_map=None, broker_manager=None):
+    def __init__(self, 
+                 broker: Optional[Any] = None, 
+                 broker_name: Optional[str] = None, 
+                 cache: Optional[_CacheManager] = None, 
+                 rate_limiter: Optional[_RateLimiter] = None, 
+                 rate_limiter_map: Optional[Dict[str, _RateLimiter]] = None, 
+                 broker_manager: Optional[Any] = None):
         self.broker = broker
         self.broker_name = broker_name
         self.broker_manager = broker_manager
@@ -135,7 +141,7 @@ class DataManager:
         self.rate_limiter = rate_limiter or _RateLimiter(max_calls=10, interval_sec=1)
         self.rate_limiter_map = rate_limiter_map or {}
 
-    def get_current_broker_name(self):
+    def get_current_broker_name(self) -> Optional[str]:
         if self.broker_name:
             return self.broker_name
         # Try to get name from broker object if possible
@@ -143,13 +149,13 @@ class DataManager:
             return self.broker.name
         return None
 
-    def get_active_rate_limiter(self):
+    def get_active_rate_limiter(self) -> _RateLimiter:
         broker_name = self.get_current_broker_name()
         if broker_name and broker_name in self.rate_limiter_map:
             return self.rate_limiter_map[broker_name]
         return self.rate_limiter
 
-    async def ensure_broker(self):
+    async def ensure_broker(self) -> None:
         try:
             logger.debug(f"Entering ensure_broker. Current broker: {self.broker}, broker_name: {self.broker_name}")
             if self.broker:
@@ -177,7 +183,7 @@ class DataManager:
             logger.error(f"Error in ensure_broker: {e}", exc_info=True)
             raise
 
-    async def get_option_chain(self, symbol, expiry=None, ttl=120):
+    async def get_option_chain(self, symbol: str, expiry: Optional[str] = None, ttl: int = 120) -> Dict[str, Any]:
         try:
             if not self.broker:
                 raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
@@ -197,7 +203,14 @@ class DataManager:
             logger.error(f"Error in get_option_chain for symbol={symbol}, expiry={expiry}: {e}", exc_info=True)
             raise
 
-    async def get_history(self, symbol, from_date, to_date, ohlc_interval, ins_type="", ttl=600, cache=True):
+    async def get_history(self, 
+                          symbol: str, 
+                          from_date: Union[str, datetime], 
+                          to_date: Union[str, datetime], 
+                          ohlc_interval: Union[int, str], 
+                          ins_type: str = "", 
+                          ttl: int = 600, 
+                          cache: bool = True) -> pd.DataFrame:
         try:
             if not self.broker:
                 raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
@@ -236,7 +249,7 @@ class DataManager:
             logger.error(f"Error in get_history for symbol={symbol}: {e}", exc_info=True)
             raise
 
-    async def get_strike_list(self, symbol, max_strikes=40):
+    async def get_strike_list(self, symbol: str, max_strikes: int = 40) -> List[str]:
         try:
             if not self.broker:
                 raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
@@ -247,7 +260,7 @@ class DataManager:
             logger.error(f"Error in get_strike_list for symbol={symbol}: {e}", exc_info=True)
             raise
 
-    async def get_broker_symbol(self, symbol, instrument_type=None):
+    async def get_broker_symbol(self, symbol: str, instrument_type: Optional[str] = None) -> Dict[str, Any]:
         try:
             broker_name = self.get_current_broker_name()
             if not self.broker_manager or not broker_name:
@@ -287,7 +300,7 @@ class DataManager:
             logger.error(f"Error in get_order_aggregate for parent_order_id={parent_order_id}: {e}", exc_info=True)
             raise
 
-    async def get_broker_name_by_id(self, broker_id: int) -> str:
+    async def get_broker_name_by_id(self, broker_id: int) -> Optional[str]:
         try:
             from algosat.core.db import AsyncSessionLocal, get_broker_by_id
             async with AsyncSessionLocal() as session:

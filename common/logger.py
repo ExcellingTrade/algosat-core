@@ -100,7 +100,7 @@ logging.getLogger("zerodha").setLevel(logging.WARNING)
 logging.getLogger("fyers").setLevel(logging.WARNING)
 
 log_dir = os.path.join(os.path.dirname(__file__), '../../logs')
-print(log_dir)
+
 
 def _ensure_all_directories():
     """Ensure all required directories exist and remove unwanted ones."""
