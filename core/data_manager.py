@@ -108,7 +108,7 @@ def validate_broker_response(response: Any, expected_type: str = "option_chain",
     elif expected_type == "history":
         if response is None:
             logger.debug(f"No history data received for '{symbol}' (None returned)")
-            raise ValueError(f"No history data received for '{symbol}'")
+            # raise ValueError(f"No history data received for '{symbol}'")
         if isinstance(response, pd.DataFrame):
             required_cols = {"timestamp", "open", "high", "low", "close", "volume"}
             if not required_cols.issubset(set(response.columns)) or response.empty:
@@ -325,15 +325,26 @@ class DataManager:
             logger.error(f"Error in fetch_history for symbol={symbol}, interval_minutes={interval_minutes}, lookback={lookback}: {e}", exc_info=True)
             return None
         
-    async def get_broker_symbol(self, symbol: str, instrument_type: Optional[str] = None) -> Dict[str, Any]:
-            try:
-                broker_name = self.get_current_broker_name()
-                if not self.broker_manager or not broker_name:
-                    raise RuntimeError("BrokerManager or broker_name not set in DataManager.")
-                return await self.broker_manager.get_symbol_info(broker_name, symbol, instrument_type)
-            except Exception as e:
-                logger.error(f"Error in get_broker_symbol for symbol={symbol}, instrument_type={instrument_type}: {e}", exc_info=True)
-                raise
+    async def get_strike_list(self, symbol, max_strikes=40):
+        try:
+            if not self.broker:
+                raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
+            if hasattr(self.broker, "get_strike_list"):
+                return await self.broker.get_strike_list(symbol, max_strikes)
+            raise NotImplementedError(f"Broker {self.get_current_broker_name()} does not implement get_strike_list.")
+        except Exception as e:
+            logger.error(f"Error in get_strike_list for symbol={symbol}: {e}", exc_info=True)
+            raise
+
+    async def get_broker_symbol(self, symbol, instrument_type=None):
+        try:
+            broker_name = self.get_current_broker_name()
+            if not self.broker_manager or not broker_name:
+                raise RuntimeError("BrokerManager or broker_name not set in DataManager.")
+            return await self.broker_manager.get_symbol_info(broker_name, symbol, instrument_type)
+        except Exception as e:
+            logger.error(f"Error in get_broker_symbol for symbol={symbol}, instrument_type={instrument_type}: {e}", exc_info=True)
+            raise
 
     async def get_order_aggregate(self, parent_order_id: int) -> OrderAggregate:
         try:
@@ -365,7 +376,7 @@ class DataManager:
             logger.error(f"Error in get_order_aggregate for parent_order_id={parent_order_id}: {e}", exc_info=True)
             raise
 
-    async def get_broker_name_by_id(self, broker_id: int) -> Optional[str]:
+    async def get_broker_name_by_id(self, broker_id: int) -> str:
         try:
             from algosat.core.db import AsyncSessionLocal, get_broker_by_id
             async with AsyncSessionLocal() as session:
@@ -374,3 +385,4 @@ class DataManager:
         except Exception as e:
             logger.error(f"Error in get_broker_name_by_id for broker_id={broker_id}: {e}", exc_info=True)
             raise
+

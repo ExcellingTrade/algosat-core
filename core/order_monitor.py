@@ -37,6 +37,7 @@ class OrderMonitor:
 
     async def _fast_monitor(self) -> None:
         # Use OrderStatus from order_request.py
+        await self.data_manager.ensure_broker()
         while self._running:
             try:
                 agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
@@ -109,6 +110,7 @@ class OrderMonitor:
             await wait_for_next_candle(self.fast_interval_minutes)
 
     async def _slow_monitor(self) -> None:
+        await self.data_manager.ensure_broker()
         while self._running:
             try:
                 agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
