@@ -3,7 +3,7 @@
 OrderManager: Responsible for managing the lifecycle of orders across all brokers that are trade enabled and live/authenticated.
 """
 from typing import Optional, Dict, Any, List # Added typing imports
-from algosat.core.db import get_trade_enabled_brokers, AsyncSessionLocal, insert_order, get_broker_by_name
+from algosat.core.db import get_order_by_id, get_trade_enabled_brokers, AsyncSessionLocal, insert_order, get_broker_by_name
 from algosat.brokers.factory import get_broker
 from algosat.common.logger import get_logger
 from algosat.core.dbschema import trade_logs
@@ -25,12 +25,12 @@ logger = get_logger("OrderManager")
 
 # Fyers status code mapping (example, update as per Fyers API)
 FYERS_STATUS_MAP = {
-    1: OrderStatus.AWAITING_ENTRY,  # Example: 1 = pending
-    2: OrderStatus.OPEN,           # Example: 2 = open
-    3: OrderStatus.PARTIALLY_FILLED,
-    4: OrderStatus.FILLED,
-    5: OrderStatus.CANCELLED,
-    6: OrderStatus.REJECTED,
+    1: OrderStatus.CANCELLED,      # 1 = Cancelled
+    2: OrderStatus.FILLED,        # 2 = Traded / Filled
+    3: OrderStatus.PENDING,       # 3 = For future use (treat as Pending)
+    4: OrderStatus.PENDING,       # 4 = Transit (treat as Pending)
+    5: OrderStatus.REJECTED,      # 5 = Rejected
+    6: OrderStatus.PENDING,       # 6 = Pending
     # Add more mappings as per Fyers API
 }
 
@@ -116,6 +116,8 @@ class OrderManager:
                 "message": "Invalid order_payload type.",
                 "broker_responses": {}
             }
+        # Do NOT overwrite order_payload.side here; keep BUY/SELL for orders table and broker API
+        # Only use ENTRY/EXIT in broker_executions
         # Check for split
         max_nse_qty = None
         if hasattr(config, 'trade') and isinstance(config.trade, dict):
@@ -194,7 +196,8 @@ class OrderManager:
                 slice_update = {
                     'quantity': qty,
                     'price': current_price,
-                    'trigger_price': (current_price - trigger_price_diff) if order_payload.side == Side.BUY else (current_price + trigger_price_diff)
+                    'trigger_price': (current_price - trigger_price_diff) if order_payload.side == Side.BUY else (current_price + trigger_price_diff),
+                    'side': "ENTRY"
                 }
                 slice_payload = order_payload.copy(update=slice_update)
                 broker_manager = self.broker_manager
@@ -372,6 +375,9 @@ class OrderManager:
         # This is a migration helper - new code should use insert_granular_execution
         if broker_order_ids:
             first_order_id = broker_order_ids[0]
+            # Extract product_type and order_type from response if present
+            product_type = response.get("product_type")
+            order_type = response.get("order_type")
             broker_exec_data = dict(
                 parent_order_id=parent_order_id,
                 broker_id=broker_id,
@@ -386,6 +392,9 @@ class OrderManager:
                 broker_name=broker_name,
                 broker_order_ids=broker_order_ids,
                 raw_response=response,
+                # New fields
+                product_type=product_type,
+                order_type=order_type,
             )
             await session.execute(broker_executions.insert().values(**broker_exec_data))
 
@@ -651,14 +660,13 @@ class OrderManager:
             )
             logger.debug(f"Order {order_id} exit details updated: exit_price={exit_price}, pnl={pnl}, status={status}")
 
-    async def get_all_broker_order_details(self) -> list:
+    async def get_all_broker_order_details(self) -> dict:
         """
         Fetch and normalize order details from all trade-enabled brokers via BrokerManager.
-        Returns a list of dicts with common fields: broker_name, broker_id, order_id, status, symbol, raw.
+        Returns a dict: broker_name -> list of normalized order dicts (empty list if no orders).
         """
         broker_orders_raw = await self.broker_manager.get_all_broker_order_details()
-        normalized_orders = []
-        # You may want to cache broker_id lookups for efficiency
+        normalized_orders_by_broker = {}
         broker_name_to_id = {}
         async def get_broker_id_cached(broker_name):
             if broker_name in broker_name_to_id:
@@ -668,6 +676,7 @@ class OrderManager:
             return broker_id
         for broker_name, orders in broker_orders_raw.items():
             broker_id = await get_broker_id_cached(broker_name)
+            normalized_orders = []
             # Fyers: orders is a dict with 'orderBook' key
             if broker_name.lower() == "fyers" and isinstance(orders, dict) and "orderBook" in orders:
                 for o in orders["orderBook"]:
@@ -705,7 +714,8 @@ class OrderManager:
                             "symbol": o.get("symbol") or o.get("tradingsymbol"),
                             "raw": o
                         })
-        return normalized_orders
+            normalized_orders_by_broker[broker_name] = normalized_orders
+        return normalized_orders_by_broker
 
     async def process_broker_order_update(
         self,
@@ -850,12 +860,76 @@ class OrderManager:
             await session.commit()
             logger.info(f"Updated order {order_id} status to {new_status}")
 
-_order_manager_instance = None
+    async def update_broker_exec_status_in_db(self, broker_order_id, status):
+        """
+        Update the status of a broker execution in the broker_executions table by broker_order_id.
+        """
+        from algosat.core.db import update_broker_exec_status_in_db as db_update_broker_exec_status_in_db
+        await db_update_broker_exec_status_in_db(broker_order_id, status)
 
-def get_order_manager(broker_manager: BrokerManager) -> OrderManager:
-    global _order_manager_instance
-    # Ensure BrokerManager is passed for the first instantiation
-    # or if the existing instance was created with a different broker_manager (though this simple version doesn't check that)
-    if _order_manager_instance is None or _order_manager_instance.broker_manager != broker_manager:
-        _order_manager_instance = OrderManager(broker_manager)
-    return _order_manager_instance
+    async def exit_order(self, parent_order_id: int, exit_reason: str = None, ltp: float = None):
+        """
+        Standardized exit: For a logical order, fetch all broker_executions. For each FILLED/PARTIALLY_FILLED row,
+        call BrokerManager.exit_order with minimal identifiers. All broker-specific logic is handled in broker wrappers.
+        Optionally pass exit_reason for logging or broker-specific use.
+        After exit, insert a new broker_executions row with side=EXIT, exit price as LTP (passed in), and update exit_time.
+        ltp: If provided, use as exit price. If not, will be 0.0 in broker_executions row.
+        """
+        from algosat.core.db import AsyncSessionLocal, get_broker_executions_by_order_id, get_order_by_id
+        from algosat.core.dbschema import broker_executions
+        import datetime
+        async with AsyncSessionLocal() as session:
+            broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
+            # Fetch the symbol from the orders table (logical order)
+            order_row = await get_order_by_id(session, parent_order_id)
+            logical_symbol = order_row.get('strike_symbol') or order_row.get('symbol') if order_row else None
+            if not broker_execs:
+                logger.warning(f"OrderManager: No broker executions found for parent_order_id={parent_order_id} in exit_order.")
+                return
+            for be in broker_execs:
+                status = (be.get('status') or '').upper()
+                if status not in ('FILLED', 'PARTIALLY_FILLED', 'PARTIAL'):
+                    logger.info(f"OrderManager: Skipping broker_execution id={be.get('id')} with status={status}")
+                    # continue
+                broker_id = be.get('broker_id')
+                broker_order_id = be.get('broker_order_id')
+                # Use symbol from logical order if not present in broker_execution
+                symbol = be.get('symbol') or logical_symbol
+                product_type = be.get('product_type')
+                if broker_id is None or broker_order_id is None:
+                    logger.error(f"OrderManager: Missing broker_id or broker_order_id in broker_execution for parent_order_id={parent_order_id}")
+                    continue
+                try:
+                    logger.info(f"OrderManager: Initiating exit for broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
+                    await self.broker_manager.exit_order(
+                        broker_id,
+                        broker_order_id,
+                        symbol=symbol,
+                        product_type=product_type,
+                        exit_reason=exit_reason
+                    )
+                    logger.info(f"OrderManager: Exit order sent to broker_id={broker_id} for broker_order_id={broker_order_id}")
+
+                    # --- Insert broker_executions row for EXIT ---
+                    exit_time = datetime.datetime.now(datetime.timezone.utc)
+                    broker_exec_data = dict(
+                        parent_order_id=parent_order_id,
+                        broker_id=broker_id,
+                        broker_order_id=broker_order_id,
+                        side='EXIT',
+                        execution_price=ltp or 0.0,
+                        executed_quantity=be.get('executed_quantity', 0),
+                        status='FILLED',
+                        order_messages=f"Exit order placed. Reason: {exit_reason}",
+                        raw_execution_data=None,
+                        symbol=symbol,
+                        execution_time=exit_time,
+                        product_type=product_type,
+                        order_type='MARKET',
+                        notes=f"Auto exit via OrderManager. Reason: {exit_reason}"
+                    )
+                    await session.execute(broker_executions.insert().values(**broker_exec_data))
+                    await session.commit()
+                except Exception as e:
+                    logger.error(f"OrderManager: Error exiting order for broker_id={broker_id}, broker_order_id={broker_order_id}: {e}")
+

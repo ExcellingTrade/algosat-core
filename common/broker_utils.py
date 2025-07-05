@@ -20,6 +20,7 @@ import math
 import os
 import sys
 from datetime import datetime, time, timedelta
+import copy
 
 import pandas as pd
 import requests
@@ -1431,8 +1432,8 @@ async def upsert_broker_credentials(broker_name: str, config: dict) -> None:
         broker_name: The name of the broker (e.g., 'fyers', 'angel')
         config: Dictionary containing the full broker configuration including credentials
     """
-    # Make a copy to avoid modifying the input dict
-    config_copy = dict(config)
+    # Make a deep copy to avoid modifying the input dict or nested dicts
+    config_copy = copy.deepcopy(config)
     
     # Ensure broker_name is consistent
     config_copy["broker_name"] = broker_name
@@ -1452,6 +1453,10 @@ async def upsert_broker_credentials(broker_name: str, config: dict) -> None:
     async with AsyncSessionLocal() as session:
         await session.execute(stmt)
         await session.commit()
+    
+    # Log the updated credentials for debug
+    updated = await get_broker_credentials(broker_name)
+    logger.info(f"Updated broker credentials for {broker_name}: access_token={updated.get('credentials',{}).get('access_token')} generated_on={updated.get('credentials',{}).get('generated_on')}")
 
 
 async def fetch_table_data(table, *where_clauses) -> list[dict]:

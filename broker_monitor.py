@@ -81,68 +81,95 @@ async def serial_health_check(broker_name, broker):
 async def monitor_broker(broker_name, broker_manager):
     logger.info(f"[{broker_name}] Starting broker monitor loop...")
     while True:
-        async with AsyncSessionLocal() as session:
-            broker_row = await get_broker_by_name(session, broker_name)
-            status = broker_row["status"] if broker_row else None
-        broker = broker_manager.brokers.get(broker_name)
-        logger.debug(f"[{broker_name}] Broker status from DB: {status}")
-        now_ist = get_ist_now()
-        
-        if status == "CONNECTED" and broker is not None:
-            if is_market_hours(now_ist):
-                logger.info(f"[{broker_name}] Status CONNECTED and within market hours. Running serial_health_check.")
-                await serial_health_check(broker_name, broker)
+        try:
+            async with AsyncSessionLocal() as session:
+                broker_row = await get_broker_by_name(session, broker_name)
+                status = broker_row["status"] if broker_row else None
+            broker = broker_manager.brokers.get(broker_name)
+            logger.debug(f"[{broker_name}] Broker status from DB: {status}")
+            now_ist = get_ist_now()
+            if status == "CONNECTED" and broker is not None:
+                if is_market_hours(now_ist):
+                    logger.info(f"[{broker_name}] Status CONNECTED and within market hours. Running serial_health_check.")
+                    await serial_health_check(broker_name, broker)
+                    logger.debug(f"[{broker_name}] Sleeping for {PROFILE_CHECK_INTERVAL_MIN} minutes before next check.")
+                    await asyncio.sleep(PROFILE_CHECK_INTERVAL_MIN * 60)
+                else:
+                    logger.info(f"[{broker_name}] Status CONNECTED but outside market hours. Sleeping for {PROFILE_CHECK_INTERVAL_MIN} minutes.")
+                    await asyncio.sleep(PROFILE_CHECK_INTERVAL_MIN * 60)
+            elif status == "FAILED":
+                logger.info(f"[{broker_name}] Status FAILED. Attempting re-authentication...")
+                await broker_manager.reauthenticate_broker(broker_name)
                 logger.debug(f"[{broker_name}] Sleeping for {PROFILE_CHECK_INTERVAL_MIN} minutes before next check.")
                 await asyncio.sleep(PROFILE_CHECK_INTERVAL_MIN * 60)
             else:
-                logger.info(f"[{broker_name}] Status CONNECTED but outside market hours. Sleeping for {PROFILE_CHECK_INTERVAL_MIN} minutes.")
+                logger.debug(f"[{broker_name}] Status is '{status}'. No health check or re-auth needed right now.")
+                logger.debug(f"[{broker_name}] Sleeping for {PROFILE_CHECK_INTERVAL_MIN} minutes before next check.")
                 await asyncio.sleep(PROFILE_CHECK_INTERVAL_MIN * 60)
-        elif status == "FAILED":
-            logger.info(f"[{broker_name}] Status FAILED. Attempting re-authentication...")
-            await broker_manager.reauthenticate_broker(broker_name)
-            logger.debug(f"[{broker_name}] Sleeping for {PROFILE_CHECK_INTERVAL_MIN} minutes before next check.")
-            await asyncio.sleep(PROFILE_CHECK_INTERVAL_MIN * 60)
-        else:
-            logger.debug(f"[{broker_name}] Status is '{status}'. No health check or re-auth needed right now.")
-            logger.debug(f"[{broker_name}] Sleeping for {PROFILE_CHECK_INTERVAL_MIN} minutes before next check.")
+        except Exception as e:
+            logger.error(f"[{broker_name}] Exception in monitor_broker loop: {e}", exc_info=True)
             await asyncio.sleep(PROFILE_CHECK_INTERVAL_MIN * 60)
 
+def seconds_until_next_scheduled_time(now_ist):
+    """Calculate seconds until the next scheduled re-authentication time."""
+    scheduled_times = [
+        dt_time(0, 5),   # 12:05 AM IST
+        dt_time(6, 10),  # 6:10 AM IST
+        dt_time(8, 5)    # 8:00 AM IST
+    ]
+    now_time = now_ist.time()
+    today = now_ist.date()
+    next_times = []
+    for t in scheduled_times:
+        dt_scheduled = datetime.combine(today, t)
+        dt_scheduled = dt_scheduled.replace(tzinfo=now_ist.tzinfo)
+        if dt_scheduled <= now_ist:
+            dt_scheduled += timedelta(days=1)
+        next_times.append(dt_scheduled)
+    next_run = min(next_times)
+    return (next_run - now_ist).total_seconds()
+
 async def daily_reauth_scheduler(broker_manager):
-    """Separate task to handle daily 6:01am re-authentication"""
+    """Separate task to handle daily re-authentication at multiple times."""
     while True:
-        now_ist = get_ist_now()
-        seconds_to_601 = seconds_until_next_6_01am_ist()
-        logger.info(f"Daily scheduler: Time until next 6:01am IST: {seconds_to_601/3600:.2f} hours ({seconds_to_601/60:.1f} minutes)")
-        
-        # Sleep until 6:01am
-        await asyncio.sleep(seconds_to_601)
-        
-        # At 6:01am IST, re-run setup with force_auth and clean logs
-        logger.info("Running scheduled 6:01am IST re-authentication via setup() and log cleanup.")
-        await broker_manager.setup(force_auth=True)
-        cleanup_logs_and_cache()
-        clean_broker_monitor_logs()
+        try:
+            now_ist = get_ist_now()
+            seconds_to_next = seconds_until_next_scheduled_time(now_ist)
+            hours = seconds_to_next / 3600
+            minutes = seconds_to_next / 60
+            logger.info(f"Daily scheduler: Time until next scheduled re-auth: {hours:.2f} hours ({minutes:.1f} minutes)")
+            # Sleep until next scheduled time
+            await asyncio.sleep(seconds_to_next)
+            # At scheduled time, re-run setup with force_auth and clean logs
+            logger.info("Running scheduled re-authentication via setup() and log cleanup.")
+            await broker_manager.setup(force_auth=True)
+            cleanup_logs_and_cache()
+            clean_broker_monitor_logs()
+        except Exception as e:
+            logger.error(f"Exception in daily_reauth_scheduler: {e}", exc_info=True)
+            await asyncio.sleep(60)  # Wait 1 minute before retrying
 
 async def main():
     logger.info("Starting minimal serial broker monitor...")
-    cleanup_logs_and_cache()
-    clean_broker_monitor_logs()
-    broker_manager = BrokerManager()
-    await broker_manager.setup()
-    logger.info(f"Brokers to monitor: {list(broker_manager.brokers.keys())}")
-    
-    tasks = []
-    # Create monitoring tasks for each broker
-    for broker_name in broker_manager.brokers.keys():
-        logger.info(f"[{broker_name}] Creating monitor task.")
-        tasks.append(asyncio.create_task(monitor_broker(broker_name, broker_manager)))
-    
-    # Create daily re-authentication scheduler task
-    logger.info("Creating daily re-authentication scheduler task.")
-    tasks.append(asyncio.create_task(daily_reauth_scheduler(broker_manager)))
-    
-    logger.info(f"Started broker monitor for {len(broker_manager.brokers)} brokers plus scheduler.")
-    await asyncio.gather(*tasks, return_exceptions=True)
+    try:
+        cleanup_logs_and_cache()
+        clean_broker_monitor_logs()
+        broker_manager = BrokerManager()
+        await broker_manager.setup()
+        logger.info(f"Brokers to monitor: {list(broker_manager.brokers.keys())}")
+        tasks = []
+        # Create monitoring tasks for each broker
+        for broker_name in broker_manager.brokers.keys():
+            logger.info(f"[{broker_name}] Creating monitor task.")
+            tasks.append(asyncio.create_task(monitor_broker(broker_name, broker_manager)))
+        # Create daily re-authentication scheduler task
+        logger.info("Creating daily re-authentication scheduler task.")
+        tasks.append(asyncio.create_task(daily_reauth_scheduler(broker_manager)))
+        logger.info(f"Started broker monitor for {len(broker_manager.brokers)} brokers plus scheduler.")
+        await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as e:
+        logger.error(f"Exception in main broker monitor: {e}", exc_info=True)
+        sys.exit(1)
 
 if __name__ == "__main__":
     try:

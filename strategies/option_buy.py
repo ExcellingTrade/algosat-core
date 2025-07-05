@@ -133,7 +133,7 @@ class OptionBuyStrategy(StrategyBase):
         cleanup_old_strike_cache(cache, days=10)
         if cache_key in cache:
             self._strikes = cache[cache_key]
-            logger.debug(f"Loaded identified strikes from persistent cache: {self._strikes}")
+            logger.info(f"Loaded identified strikes from persistent cache: {self._strikes}")
             save_identified_strikes_cache(cache)
             return
         candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
@@ -231,7 +231,7 @@ class OptionBuyStrategy(StrategyBase):
                 if order_info:
                     # Immediately update in-memory _positions for this strike to prevent duplicate signals in next run
                     self._positions[strike] = [order_info]
-                    logger.info(f"Updated in-memory _positions for {strike} after order placement: {self._positions[strike]}")
+                    logger.debug(f"Updated in-memory _positions for {strike} after order placement: {self._positions[strike]}")
                     return order_info  # Return as soon as an order is placed
             except Exception as e:
                 logger.error(f"Error during signal evaluation or order for {strike}: {e}")
@@ -250,7 +250,7 @@ class OptionBuyStrategy(StrategyBase):
             start_date = localize_to_ist(datetime.combine(trade_day, time(9, 15)))
             current_end_date = localize_to_ist(datetime.combine(current_date, get_ist_datetime().time()))
             end_date = calculate_end_date(current_end_date, trade_config['interval_minutes'])
-            # end_date = end_date.replace(hour=15, minute=30, second=0, microsecond=0)
+            end_date = end_date.replace(hour=9, minute=45, second=0, microsecond=0)
             logger.debug(f"Fetching history for strike symbols {', '.join(str(strike) for strike in strike_symbols)}...")
             logger.debug(f"Start date: {start_date}, End date: {end_date}, Interval: {trade_config['interval_minutes']} minutes")
             history_data = await fetch_strikes_history(
@@ -381,52 +381,74 @@ class OptionBuyStrategy(StrategyBase):
             logger.error(f"Error in evaluate_signal for {strike}: {e}")
         return None
 
-    def evaluate_exit(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
+    def evaluate_exit(self, trade: dict, candle: dict, current_signal_direction: str) -> Optional[TradeSignal]:
         """
-        Exit logic: trigger on Supertrend flip down, stoploss, or target hit.
+        Evaluate exit conditions for an open trade, similar to evaluate_exit_conditions.
+        Updates the in-memory trade dict and returns a TradeSignal if an exit is triggered.
         """
-        # Only exit if there is an open position for this strike
-        if not self._positions.get(strike):
-            return None
-        try:
-            prev = data.iloc[-2]
-            curr = data.iloc[-1]
-            entry_price = self._positions[strike][0].get('entry_price', 0)
-            # 1) Supertrend reversal down
-            if prev.get('in_uptrend') and not curr.get('in_uptrend'):
-                exit_price = curr['close']
-                # When exit is triggered:
-                self._positions.pop(strike, None)
-                return TradeSignal(
-                    symbol=strike,
-                    side=Side.SELL,
-                    price=exit_price,
-                    signal_type=SignalType.STOPLOSS
-                )
-            # 2) Stoploss (percent-based)
-            max_loss_pct = config.get('max_loss_percentage', 25)
-            stoploss_price = entry_price * (1 - max_loss_pct / 100)
-            if curr['low'] <= stoploss_price:
-                self._positions.pop(strike, None)
-                return TradeSignal(
-                    symbol=strike,
-                    side=Side.SELL,
-                    price=stoploss_price,
-                    signal_type=SignalType.STOPLOSS
-                )
-            # 3) Target (ATR-based)
-            atr_multiplier = config.get('atr_target_multiplier', 3)
-            target_price = entry_price + curr.get('atr', 0) * atr_multiplier
-            if curr['high'] >= target_price:
-                self._positions.pop(strike, None)
-                return TradeSignal(
-                    symbol=strike,
-                    side=Side.SELL,
-                    price=target_price,
-                    signal_type=SignalType.TRAIL
-                )
-        except Exception as e:
-            logger.error(f"Error in evaluate_exit for {strike}: {e}")
+        strike_symbol = trade.get(constants.COLUMN_SYMBOL)
+        # 1. Reversal exit
+        if current_signal_direction == constants.TRADE_DIRECTION_SELL:
+            if trade.get(constants.TRADE_KEY_STATUS) in [
+                constants.TRADE_STATUS_EXIT_REVERSAL,
+                constants.TRADE_STATUS_EXIT_STOPLOSS,
+                constants.TRADE_STATUS_EXIT_TARGET,
+                constants.TRADE_STATUS_ORDER_FAILED
+            ]:
+                return None
+            logger.debug(f"{strike_symbol} | {constants.SIGNAL_REVERSED_MESSAGE}. Candle: {str(candle[constants.COLUMN_TIMESTAMP])}")
+            trade[constants.TRADE_KEY_EXIT_PRICE] = candle[constants.COLUMN_CLOSE]
+            trade[constants.TRADE_KEY_EXIT_TIME] = candle[constants.COLUMN_TIMESTAMP]
+            trade[constants.TRADE_KEY_STATUS] = constants.TRADE_STATUS_EXIT_REVERSAL
+            trade[constants.TRADE_KEY_REASON] = constants.TRADE_SIGNAL_REVERSED_EXIT
+            return TradeSignal(
+                symbol=strike_symbol,
+                side=Side.SELL,
+                price=candle[constants.COLUMN_CLOSE],
+                signal_type=SignalType.REVERSAL,
+                exit_time=candle[constants.COLUMN_TIMESTAMP],
+                reason=constants.TRADE_SIGNAL_REVERSED_EXIT
+            )
+        # 2. Stop-loss exit
+        if candle[constants.COLUMN_LOW] <= trade.get(constants.TRADE_KEY_STOP_LOSS, float('-inf')):
+            if trade.get(constants.TRADE_KEY_STATUS) == constants.TRADE_STATUS_AWAITING_ENTRY:
+                logger.debug(f"Ignore stoploss checking for {trade.get(constants.TRADE_KEY_SYMBOL, '')}")
+                return None
+            logger.debug(f"{strike_symbol} | {constants.STOPLOSS_HIT_MESSAGE}. Candle: {str(candle[constants.COLUMN_TIMESTAMP])}")
+            trade[constants.TRADE_KEY_EXIT_PRICE] = trade.get(constants.TRADE_KEY_STOP_LOSS)
+            trade[constants.TRADE_KEY_EXIT_TIME] = candle[constants.COLUMN_TIMESTAMP]
+            trade[constants.TRADE_KEY_STATUS] = constants.TRADE_STATUS_EXIT_STOPLOSS
+            trade[constants.TRADE_KEY_REASON] = constants.TRADE_REASON_STOPLOSS_HIT
+            return TradeSignal(
+                symbol=strike_symbol,
+                side=Side.SELL,
+                price=trade.get(constants.TRADE_KEY_STOP_LOSS),
+                signal_type=SignalType.STOPLOSS,
+                exit_time=candle[constants.COLUMN_TIMESTAMP],
+                reason=constants.TRADE_REASON_STOPLOSS_HIT
+            )
+        # 3. Target exit
+        if candle[constants.COLUMN_HIGH] >= trade.get(constants.TRADE_KEY_TARGET_PRICE, float('inf')):
+            if trade.get(constants.TRADE_KEY_STATUS) in [
+                constants.TRADE_STATUS_EXIT_REVERSAL,
+                constants.TRADE_STATUS_EXIT_STOPLOSS,
+                constants.TRADE_STATUS_EXIT_TARGET,
+                constants.TRADE_STATUS_ORDER_FAILED
+            ]:
+                return None
+            logger.debug(f"{strike_symbol} | {constants.TARGET_HIT_MESSAGE}. Candle: {str(candle[constants.COLUMN_TIMESTAMP])}")
+            trade[constants.TRADE_KEY_EXIT_PRICE] = trade.get(constants.TRADE_KEY_TARGET_PRICE)
+            trade[constants.TRADE_KEY_EXIT_TIME] = candle[constants.COLUMN_TIMESTAMP]
+            trade[constants.TRADE_KEY_STATUS] = constants.TRADE_STATUS_EXIT_TARGET
+            trade[constants.TRADE_KEY_REASON] = constants.TRADE_REASON_TARGET_HIT
+            return TradeSignal(
+                symbol=strike_symbol,
+                side=Side.SELL,
+                price=trade.get(constants.TRADE_KEY_TARGET_PRICE),
+                signal_type=SignalType.TRAIL,
+                exit_time=candle[constants.COLUMN_TIMESTAMP],
+                reason=constants.TRADE_REASON_TARGET_HIT
+            )
         return None
 
     def evaluate_trade_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
@@ -486,6 +508,7 @@ class OptionBuyStrategy(StrategyBase):
     def update_trailing_stop_loss(self, order_id: int, ltp: float, history: dict, order_manager=None):
         """
         ATR-based trailing stop loss logic. Updates stop_loss in DB if new stop is higher (for long positions).
+        Only updates if trailing_stoploss is enabled in the config.
         Args:
             order_id: The order ID to update.
             ltp: Latest traded price.
@@ -493,6 +516,9 @@ class OptionBuyStrategy(StrategyBase):
             order_manager: OrderManager instance (required for DB update).
         """
         try:
+            trade_config = self.trade
+            if not trade_config.get("trailing_stoploss", False):
+                return
             if not history:
                 return
             # Use the latest candle for trailing logic
@@ -510,9 +536,9 @@ class OptionBuyStrategy(StrategyBase):
             atr = last_candle.get('atr')
             if atr is None:
                 return
-            trail_atr_mult = self.trade.get('trail_atr_mult', 2)
+            trail_atr_mult = trade_config.get('trail_atr_mult', 2)
             new_trail_sl = last_candle['close'] - atr * trail_atr_mult
-            # Fetch current stop_loss from DB
+            new_trail_sl = round(round(new_trail_sl / 0.05) * 0.05, 2)
             import asyncio
             async def update_db():
                 async with AsyncSessionLocal() as session:
@@ -520,9 +546,9 @@ class OptionBuyStrategy(StrategyBase):
                     current_sl = order.get('stop_loss') if order else None
                     # Only update if new stop is higher (for long)
                     if current_sl is not None and new_trail_sl > current_sl and ltp > new_trail_sl:
-                        # Update in DB
                         if order_manager:
                             await order_manager.update_order_stop_loss_in_db(order_id, new_trail_sl)
+                        logger.debug(f"Trailing stop-loss updated in DB for order {order_id}. New SL: {new_trail_sl}")
             asyncio.create_task(update_db())
         except Exception as e:
             logger.error(f"Error in update_trailing_stop_loss for order_id={order_id}: {e}")

@@ -99,35 +99,97 @@ rate_limiter_map: Dict[str, _RateLimiter] = {
 #     rate_limiter_map=rate_limiter_map,
 # )
 
-def validate_broker_response(response: Any, expected_type: str = "option_chain", symbol: Optional[str] = None) -> None:
-    """Validate broker API response. Raise ValueError if invalid."""
-    if expected_type == "option_chain":
-        if not (isinstance(response, dict) and response.get("code", response.get("statuscode")) == 200 and response.get("data") and response["data"].get("optionsChain")):
-            logger.debug(f"Invalid option chain data received for '{symbol}': {response}")
-            raise ValueError(f"Invalid option chain data received for '{symbol}'")
-    elif expected_type == "history":
-        if response is None:
-            logger.debug(f"No history data received for '{symbol}' (None returned)")
-            # raise ValueError(f"No history data received for '{symbol}'")
-        if isinstance(response, pd.DataFrame):
-            required_cols = {"timestamp", "open", "high", "low", "close", "volume"}
-            if not required_cols.issubset(set(response.columns)) or response.empty:
-                logger.debug(f"Invalid DataFrame for history for '{symbol}': columns={response.columns}, empty={response.empty}")
-                raise ValueError(f"Invalid DataFrame for history for '{symbol}'")
+def validate_broker_response(response: Any, expected_type: str = "option_chain", symbol: Optional[str] = None) -> bool:
+    """Validate broker API response. Return True if valid, False if invalid."""
+    try:
+        if expected_type == "option_chain":
+            if not (isinstance(response, dict) and response.get("code", response.get("statuscode")) == 200 and response.get("data") and response["data"].get("optionsChain")):
+                logger.debug(f"Invalid option chain data received for '{symbol}': {response}")
+                return False
+        elif expected_type == "history":
+            if response is None:
+                logger.debug(f"No history data received for '{symbol}' (None returned)")
+                return False
+            if isinstance(response, pd.DataFrame):
+                required_cols = {"timestamp", "open", "high", "low", "close", "volume"}
+                if not required_cols.issubset(set(response.columns)) or response.empty:
+                    logger.debug(f"Invalid DataFrame for history for '{symbol}': columns={response.columns}, empty={response.empty}")
+                    return False
+            else:
+                logger.debug(f"Invalid history data type for '{symbol}': {type(response)}")
+                return False
+        elif expected_type == "ltp":
+            if response is None:
+                logger.debug(f"No LTP data received for '{symbol}' (None returned)")
+                return False
         else:
-            logger.debug(f"Invalid history data type for '{symbol}': {type(response)}")
-            raise ValueError(f"Invalid history data type for '{symbol}'")
-    elif expected_type == "ltp":
-        # LTP can be a number, dict with LTP field, or other broker-specific format
-        if response is None:
-            logger.debug(f"No LTP data received for '{symbol}' (None returned)")
-            raise ValueError(f"No LTP data received for '{symbol}'")
-        # Don't validate structure since LTP format varies by broker
-        # Just ensure it's not None
+            if not (isinstance(response, dict) and response.get("code", response.get("statuscode")) == 200 and response.get("data")):
+                logger.debug(f"Invalid data received for '{symbol}': {response}")
+                return False
+        return True
+    except Exception as e:
+        logger.error(f"Exception in validate_broker_response for {expected_type} {symbol}: {e}")
+        return False
+
+def standardize_order_status(broker_name, raw_status, raw_response=None):
+    """
+    Map broker-specific order status to standardized status.
+    Supported: FILLED, PARTIALLY_FILLED, REJECTED, CANCELLED, PENDING
+    """
+    zerodha_pending_statuses = {
+        "PUT ORDER REQ RECEIVED", "VALIDATION PENDING", "OPEN PENDING", "MODIFY VALIDATION PENDING",
+        "MODIFY PENDING", "TRIGGER PENDING", "CANCEL PENDING", "AMO REQ RECEIVED"
+    }
+    if broker_name == "fyers":
+        # Fyers status is usually int, but sometimes string (e.g., 'PARTIAL')
+        try:
+            status = int(raw_status) if raw_status is not None and str(raw_status).isdigit() else None
+        except Exception:
+            status = None
+        if status == 2:
+            remaining = raw_response.get("remainingQuantity") if raw_response else None
+            if remaining is not None and remaining > 0:
+                return "PARTIALLY_FILLED"
+            return "FILLED"
+        elif status == 5:
+            return "REJECTED"
+        elif status == 1:
+            return "CANCELLED"
+        elif status == 6:
+            return "PENDING"
+        # Handle string status like 'PARTIAL'
+        if isinstance(raw_status, str) and raw_status.upper() in ("PARTIAL", "PARTIALLY_FILLED"):
+            return "PARTIALLY_FILLED"
+        elif isinstance(raw_status, str) and raw_status.upper() == "FILLED":
+            return "FILLED"
+        elif isinstance(raw_status, str) and raw_status.upper() == "REJECTED":
+            return "REJECTED"
+        elif isinstance(raw_status, str) and raw_status.upper() == "CANCELLED":
+            return "CANCELLED"
+        elif isinstance(raw_status, str) and raw_status.upper() == "PENDING":
+            return "PENDING"
+        else:
+            return "PENDING"
+    elif broker_name == "zerodha":
+        # Zerodha status is string
+        status = str(raw_status).upper() if raw_status else ""
+        if status in zerodha_pending_statuses:
+            return "PENDING"
+        elif status == "COMPLETE" or status == "FILLED":
+            # Check for partial fill
+            pending = raw_response.get("pending_quantity") if raw_response else None
+            if pending is not None and pending > 0:
+                return "PARTIALLY_FILLED"
+            return "FILLED"
+        elif status == "REJECTED":
+            return "REJECTED"
+        elif status == "CANCELLED":
+            return "CANCELLED"
+        else:
+            return "PENDING"
     else:
-        if not (isinstance(response, dict) and response.get("code", response.get("statuscode")) == 200 and response.get("data")):
-            logger.debug(f"Invalid data received for '{symbol}': {response}")
-            raise ValueError(f"Invalid data received for '{symbol}'")
+        # Default fallback
+        return str(raw_status).upper() if raw_status else "PENDING"
 
 class DataManager:
     """
@@ -202,7 +264,9 @@ class DataManager:
                 async with self.get_active_rate_limiter():
                     result = self.broker.get_option_chain(symbol, expiry)
                     option_chain = await result if inspect.isawaitable(result) else result
-                    validate_broker_response(option_chain, expected_type="option_chain", symbol=symbol)
+                    if not validate_broker_response(option_chain, expected_type="option_chain", symbol=symbol):
+                        logger.error(f"Invalid option chain data received for '{symbol}' (after all retries)")
+                        raise RuntimeError(f"Invalid option chain data received for '{symbol}'")
                     self.cache.set(cache_key, option_chain, ttl=ttl)
                     return option_chain
             return await _async_retry(_fetch)
@@ -247,7 +311,9 @@ class DataManager:
                 async with self.get_active_rate_limiter():
                     result = self.broker.get_history(symbol, from_dt, to_dt, ohlc_interval, ins_type)
                     history = await result if inspect.isawaitable(result) else result
-                    validate_broker_response(history, expected_type="history", symbol=symbol)
+                    if not validate_broker_response(history, expected_type="history", symbol=symbol):
+                        logger.error(f"Invalid history data received for '{symbol}' (after all retries)")
+                        raise RuntimeError(f"Invalid history data received for '{symbol}'")
                     if cache:
                         self.cache.set(cache_key, history, ttl=ttl)
                     return history
@@ -259,23 +325,16 @@ class DataManager:
     async def get_ltp(self, symbol: str, ttl: int = 5) -> Any:
         """
         Get the last traded price (LTP) for the given symbol.
-        Uses short TTL cache since LTP data is frequently changing.
+        Always fetch fresh data from the broker, do not use cache.
         """
         try:
             if not self.broker:
                 raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
-            cache_key = f"ltp:{symbol}"
-            cached = self.cache.get(cache_key, ttl=ttl)
-            if cached is not None:
-                logger.debug(f"Cache hit for LTP: {cache_key}")
-                return cached
             async def _fetch():
                 async with self.get_active_rate_limiter():
                     result = self.broker.get_ltp(symbol)
                     ltp = await result if inspect.isawaitable(result) else result
                     validate_broker_response(ltp, expected_type="ltp", symbol=symbol)
-                    # Cache the LTP value for short duration
-                    self.cache.set(cache_key, ltp, ttl=ttl)
                     return ltp
             return await _async_retry(_fetch)
         except Exception as e:
@@ -352,16 +411,21 @@ class DataManager:
             async with AsyncSessionLocal() as session:
                 order_row = await get_order_by_id(session, parent_order_id)
                 broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
-                
-                # Get symbol directly from orders.strike_symbol (no need for additional query)
                 symbol = order_row.get("strike_symbol", "Unknown")
-                
                 broker_orders: List[BrokerOrder] = []
                 for be in broker_execs:
+                    broker_name = await self.get_broker_name_by_id(be.get("broker_id"))
+                    std_status = standardize_order_status(
+                        broker_name,
+                        be.get("status"),
+                        be.get("raw_response")
+                    )
                     broker_orders.append(BrokerOrder(
+                        id=be.get("id"),  # Pass the broker_executions table id
                         broker_id=be.get("broker_id"),
-                        order_id=be.get("broker_order_ids"),
-                        status=be.get("status"),
+                        order_id=be.get("broker_order_id"),
+                        status=std_status,
+                        side=be.get("side"),
                         raw_response=be.get("raw_response")
                     ))
                 return OrderAggregate(

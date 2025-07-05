@@ -197,8 +197,8 @@ class ZerodhaWrapper(BrokerInterface):
                     transaction_type=kite_payload["transaction_type"],
                     quantity=kite_payload["quantity"],
                     order_type=kite_payload["order_type"],
-                    price= 210.5, #kite_payload.get("price"),
-                    trigger_price= 210.3, #kite_payload.get("trigger_price"),
+                    price=  kite_payload.get("price"),
+                    trigger_price= kite_payload.get("trigger_price"),
                     product=kite_payload["product"],
                     variety=kite_payload.get("variety", "regular"),
                     validity=kite_payload.get("validity", "DAY"),
@@ -238,6 +238,7 @@ class ZerodhaWrapper(BrokerInterface):
             loop = asyncio.get_event_loop()
             try:
                 positions = await loop.run_in_executor(None, self.kite.positions)
+                return positions
             except kite_exceptions.PermissionException:
                 logger.warning("Zerodha: PermissionException in get_positions, attempting reauth...")
                 if await self.login(force_reauth=True):
@@ -245,12 +246,6 @@ class ZerodhaWrapper(BrokerInterface):
                 else:
                     logger.error("Zerodha: Reauth failed in get_positions.")
                     return [{"error": "Reauth failed"}]
-            all_positions = []
-            for segment in ("day", "net"):
-                segment_positions = positions.get(segment, [])
-                if isinstance(segment_positions, list):
-                    all_positions.extend(segment_positions)
-            return all_positions
         except Exception as e:
             logger.error(f"Failed to fetch Zerodha positions: {e}")
             return [{"error": str(e)}]
@@ -319,7 +314,7 @@ class ZerodhaWrapper(BrokerInterface):
             else:
                 logger.error("Zerodha: Reauth failed in get_history.")
                 return []
-        # print("ZERODHA RAW CANDLES:", candles, token, from_date_fmt, to_date_fmt, interval)
+       
         # Convert to DataFrame
         if candles and isinstance(candles, list):
             df = pd.DataFrame.from_dict(candles)
@@ -508,3 +503,64 @@ class ZerodhaWrapper(BrokerInterface):
         except Exception as e:
             logger.error(f"Failed to summarize Zerodha balance: {e}")
             return BalanceSummary()
+
+    async def get_trades(self, broker_order_id) -> int:
+        """
+        Fetch trades for a given broker_order_id and return the total filled quantity.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            trades = await loop.run_in_executor(None, self.kite.order_trades, broker_order_id)
+            filled_qty = sum([t.get('quantity', 0) for t in trades if t.get('quantity')])
+            return filled_qty
+        except Exception as e:
+            logger.error(f"Zerodha get_trades failed for order {broker_order_id}: {e}")
+            return 0
+
+    async def exit_order(self, broker_order_id, symbol=None, product_type=None, exit_reason=None):
+        """
+        Zerodha-specific exit logic: fetch filled qty from positions, compare to expected, and place opposite order if needed.
+        Assumes symbol is already sanitized by BrokerManager.
+        """
+        try:
+            # Symbol is already sanitized by BrokerManager; use as-is
+            sanitized_symbol = symbol
+            # Fetch current positions (net positions)
+            positions = await self.get_positions()
+            net_positions = [{'tradingsymbol': 'NIFTY2571025500PE', 'exchange': 'NFO', 'instrument_token': 10252802, 'product': 'MIS', 'quantity': 0, 'overnight_quantity': 0, 'multiplier': 1, 'average_price': 0, 'close_price': 0, 'last_price': 147.15, 'value': -4642.5, 'pnl': -4642.5, 'm2m': -4642.5, 'unrealised': -4642.5, 'realised': 0, 'buy_quantity': 75, 'buy_price': 210.45, 'buy_value': 15783.75, 'buy_m2m': 15783.75, 'sell_quantity': 75, 'sell_price': 148.55, 'sell_value': 11141.25, 'sell_m2m': 11141.25, 'day_buy_quantity': 75, 'day_buy_price': 210.45, 'day_buy_value': 15783.75, 'day_sell_quantity': 75, 'day_sell_price': 148.55, 'day_sell_value': 11141.25}]
+            # net_positions = positions if isinstance(positions, list) else positions.get('net', [])
+            filled_qty = 0
+            matched_position = None
+            # Match by tradingsymbol (case-insensitive)
+            for pos in net_positions:
+                if str(pos.get('tradingsymbol', '')).upper() == str(sanitized_symbol).upper():
+                    filled_qty = abs(pos.get('quantity', 0))  # Use abs in case of negative for shorts
+                    matched_position = pos
+                    break
+            if filled_qty == 0:
+                logger.warning(f"Zerodha exit_order: No filled quantity for symbol {sanitized_symbol} in positions, skipping exit.")
+                return {"status": False, "message": "No filled quantity, cannot exit."}
+            # Fetch original order details to get side, etc.
+            order_hist = await self.get_order_history(broker_order_id)
+            if not order_hist or not order_hist.get('raw'):
+                logger.error(f"Zerodha exit_order: Could not fetch order history for {broker_order_id}")
+                return {"status": False, "message": "Order history not found."}
+            orig_order = order_hist['raw'][-1] if isinstance(order_hist['raw'], list) else order_hist['raw']
+            orig_side = orig_order.get('transaction_type') or orig_order.get('side')
+            orig_product = orig_order.get('product') or product_type
+            # Determine exit side (opposite of original)
+            exit_side = 'SELL' if orig_side == 'BUY' else 'BUY'
+            # Build exit order request
+            exit_order_req = OrderRequest(
+                symbol=sanitized_symbol,
+                side=exit_side,
+                order_type=OrderType.MARKET,
+                product_type=orig_product,
+                quantity=filled_qty
+            )
+            logger.info(f"Zerodha exit_order: Placing exit order for {broker_order_id} with side={exit_side}, qty={filled_qty}, symbol={sanitized_symbol}, product_type={orig_product}, reason={exit_reason}")
+            result = await self.place_order(exit_order_req)
+            return result
+        except Exception as e:
+            logger.error(f"Zerodha exit_order failed for order {broker_order_id}: {e}")
+            return {"status": False, "message": str(e)}

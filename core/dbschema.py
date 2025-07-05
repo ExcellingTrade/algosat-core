@@ -182,16 +182,12 @@ broker_executions = Table(
     Column("execution_price", Numeric(15, 4), nullable=False),  # Actual traded price for this execution
     Column("executed_quantity", Integer, nullable=False),  # Actual executed quantity for this execution
     Column("execution_time", DateTime(timezone=True), nullable=True),  # When this execution happened
-    Column("execution_id", String(100), nullable=True, index=True),  # Broker's trade/execution ID (if available)
-    
-    # Execution metadata
-    Column("is_partial_fill", Boolean, nullable=False, server_default=text("false")),  # True if this was a partial fill
-    Column("sequence_number", Integer, nullable=True),  # For ordering multiple executions of same order
     Column("symbol", String(100), nullable=True),  # Symbol for this execution (useful for hedge orders)
     
     # Status and tracking
     Column("status", String(50), nullable=False, index=True),  # FILLED, PARTIAL, CANCELLED, etc.
     Column("order_type", String(20), nullable=True),  # MARKET, LIMIT, SL, etc.
+    Column("product_type", String(20), nullable=True),  # MARKET, LIMIT, SL, etc.
     Column("notes", String(500), nullable=True),  # Any additional notes (manual exit, BO leg, etc.)
     
     # Legacy and raw data
@@ -203,7 +199,9 @@ broker_executions = Table(
     Column("broker_order_ids", JSONB, nullable=True),  # Deprecated: now single broker_order_id
     Column("order_status_map", JSONB, nullable=True),  # Deprecated: status per execution
     Column("raw_response", JSONB, nullable=True),  # Deprecated: use raw_execution_data
-    
+
+    Column("quantity", Integer, nullable=True),  # NEW: quantity column
+
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 )

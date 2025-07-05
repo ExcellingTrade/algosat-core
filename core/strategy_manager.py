@@ -32,11 +32,9 @@ async def order_monitor_loop(order_queue, data_manager, order_manager):
             logger.info("Order monitor received shutdown sentinel, exiting loop")
             break
         order_id = order_info["order_id"]
-        strategy = order_info.get("strategy")
         if order_id not in order_monitors:
             monitor = OrderMonitor(
                 order_id=order_id,
-                strategy=strategy,
                 data_manager=data_manager,
                 order_manager=order_manager,
                 order_cache=order_cache
@@ -57,7 +55,7 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
         for order in open_orders:
             # You may need to fetch the strategy instance/config for this order
             # For now, pass None or fetch as needed
-            order_info = {"order_id": order["id"], "strategy": None}
+            order_info = {"order_id": order["id"]}
             await order_queue.put(order_info)
     # --- Existing: Start monitor loop for new orders ---
     asyncio.create_task(order_monitor_loop(order_queue, data_manager, order_manager))

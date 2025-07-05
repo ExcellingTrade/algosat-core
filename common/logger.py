@@ -28,7 +28,7 @@ os.environ['TZ'] = 'Asia/Kolkata'
 time.tzset()
 import traceback
 from datetime import datetime, timezone, timedelta
-from logging.handlers import RotatingFileHandler
+from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
 
 from rich.console import Console
@@ -208,7 +208,6 @@ def get_logger(module_name: str) -> logging.Logger:
     """
     logger = logging.getLogger(module_name)
     if not logger.handlers:
-        from logging.handlers import RotatingFileHandler
         from datetime import datetime
         import os
         today = get_ist_now().strftime('%Y-%m-%d')
@@ -220,7 +219,8 @@ def get_logger(module_name: str) -> logging.Logger:
             log_file = os.path.join(date_dir, f"broker_monitor-{today}.log")
         else:
             log_file = os.path.join(date_dir, f"algosat-{today}.log")
-        file_handler = RotatingFileHandler(log_file, maxBytes=2*1024*1024, backupCount=7, encoding="utf-8")
+        # Use TimedRotatingFileHandler for daily rotation, and update baseFilename at midnight
+        file_handler = TimedRotatingFileHandler(log_file, when="midnight", interval=1, backupCount=7, encoding="utf-8", utc=False)
         file_handler.setLevel(logging.DEBUG)
         file_formatter = ISTFormatter(
             "%(asctime)s - %(name)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",

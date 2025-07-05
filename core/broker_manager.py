@@ -323,8 +323,11 @@ class BrokerManager:
                 try:
                     # Resolve symbol for this broker
                     symbol_info = await self.get_symbol_info(broker_name, order_payload.symbol, instrument_type='NFO')
-                    # Create a new OrderRequest with the broker-specific symbol
-                    broker_order_payload = order_payload.copy(update={"symbol": symbol_info["symbol"]})
+                    # Ensure side is always the correct Enum, not a string
+                    broker_order_payload = order_payload.copy(update={
+                        "symbol": symbol_info["symbol"],
+                        "side": order_payload.side if isinstance(order_payload.side, Side) else Side(order_payload.side)
+                    })
                     result = await async_retry(broker.place_order, broker_order_payload, retries=retries, delay=delay)
                     broker_row = await get_broker_by_name(session, broker_name)
                     broker_id = broker_row["id"] if broker_row else None
@@ -571,7 +574,7 @@ class BrokerManager:
     async def get_all_broker_order_details(self) -> dict:
         """
         Fetch order details from all trade-enabled brokers.
-        Returns a dict: broker_name -> list of order dicts.
+        Returns a dict: broker_name -> list of order dicts (empty list if no orders).
         """
         enabled_brokers = await self.get_all_trade_enabled_brokers()
         broker_orders = {}
@@ -580,6 +583,8 @@ class BrokerManager:
                 orders = broker.get_order_details()
                 while asyncio.iscoroutine(orders):
                     orders = await orders
+                if not isinstance(orders, list):
+                    orders = []
                 broker_orders[broker_name] = orders
             except Exception as e:
                 from algosat.common.logger import get_logger
@@ -587,3 +592,39 @@ class BrokerManager:
                 logger.error(f"BrokerManager: Failed to fetch orders for {broker_name}: {e}")
                 broker_orders[broker_name] = []
         return broker_orders
+
+    async def get_broker_by_id(self, broker_id: int):
+        """
+        Fetch the broker object from self.brokers using broker_id.
+        """
+        from algosat.core.db import AsyncSessionLocal, get_broker_by_id as db_get_broker_by_id
+        async with AsyncSessionLocal() as session:
+            broker_row = await db_get_broker_by_id(session, broker_id)
+            if not broker_row:
+                logger.error(f"BrokerManager: No broker found in DB for broker_id={broker_id}")
+                return None
+            broker_name = broker_row.get("broker_name")
+            if broker_name in self.brokers:
+                return self.brokers[broker_name]
+            logger.error(f"BrokerManager: Broker name {broker_name} not found in self.brokers for broker_id={broker_id}")
+            return None
+
+    async def exit_order(self, broker_id, broker_order_id, symbol=None, product_type=None, exit_reason=None):
+        """
+        Route exit order to the correct broker by broker_id.
+        """
+        broker = await self.get_broker_by_id(broker_id)
+        if not broker:
+            raise RuntimeError(f"No broker found for broker_id={broker_id}")
+        # If symbol is provided, normalize it for the broker
+        normalized_symbol = symbol
+        if symbol:
+            # Need broker_name for get_symbol_info
+            from algosat.core.db import AsyncSessionLocal, get_broker_by_id as db_get_broker_by_id
+            async with AsyncSessionLocal() as session:
+                broker_row = await db_get_broker_by_id(session, broker_id)
+                broker_name = broker_row.get("broker_name") if broker_row else None
+            if broker_name:
+                symbol_info = await self.get_symbol_info(broker_name, symbol, instrument_type='NFO')
+                normalized_symbol = symbol_info.get('symbol', symbol)
+        return await broker.exit_order(broker_order_id, symbol=normalized_symbol, product_type=product_type, exit_reason=exit_reason)

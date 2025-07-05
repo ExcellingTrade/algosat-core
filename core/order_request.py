@@ -175,7 +175,10 @@ class OrderResponse(BaseModel):
     symbol: Optional[str] = None
     side: Optional[str] = None
     quantity: Optional[int] = None
-    order_type: Optional[str] = None
+    execQuantity: Optional[int] = None
+    execPrice: Optional[int] = None
+    order_type: Optional[str] = None  
+    product_type: Optional[str] = None  
     strategy_id: Optional[Any] = None
     signal_id: Optional[Any] = None
     # Add more fields as needed for DB
@@ -206,8 +209,10 @@ class OrderResponse(BaseModel):
                 raw_response=None,
                 symbol=getattr(order_request, 'symbol', None),
                 side=getattr(order_request, 'side', None),
-                quantity=getattr(order_request, 'quantity', None),
-                order_type=getattr(order_request, 'order_type', None),
+                quantity=getattr(order_request, 'qty', None),
+                execQuantity=getattr(order_request, 'filledQty', None),
+                execPrice=getattr(order_request, 'tradedPrice', None),
+                order_type=getattr(order_request, 'type', None),
                 strategy_id=strategy_id,
                 signal_id=signal_id
             )
@@ -227,8 +232,11 @@ class OrderResponse(BaseModel):
                 raw_response=response,
                 symbol=getattr(order_request, 'symbol', None),
                 side=getattr(order_request, 'side', None),
-                quantity=getattr(order_request, 'quantity', None),
-                order_type=getattr(order_request, 'order_type', None),
+                quantity=getattr(order_request, 'qty', None),
+                execQuantity=getattr(order_request, 'filledQty', None),
+                execPrice=getattr(order_request, 'tradedPrice', None),
+                order_type=getattr(order_request, 'type', None),
+                product_type=getattr(order_request, 'product_type', None),
                 strategy_id=strategy_id,
                 signal_id=signal_id
             )
@@ -252,8 +260,11 @@ class OrderResponse(BaseModel):
                 raw_response=response,
                 symbol=getattr(order_request, 'symbol', None),
                 side=getattr(order_request, 'side', None),
-                quantity=getattr(order_request, 'quantity', None),
+                quantity=getattr(order_request, 'qty', None),
+                execQuantity=getattr(order_request, 'filledQty', None),
+                execPrice=getattr(order_request, 'tradedPrice', None),
                 order_type=getattr(order_request, 'order_type', None),
+                product_type=getattr(order_request, 'product_type', None),
                 strategy_id=strategy_id,
                 signal_id=signal_id
             )
@@ -271,7 +282,10 @@ class OrderResponse(BaseModel):
             symbol=getattr(order_request, 'symbol', None),
             side=getattr(order_request, 'side', None),
             quantity=getattr(order_request, 'quantity', None),
+            execQuantity=getattr(order_request, 'filled_quantity', None),
+            execPrice=getattr(order_request, 'average_price', None),
             order_type=getattr(order_request, 'order_type', None),
+            product_type=getattr(order_request, 'product_type', None),
             strategy_id=strategy_id,
             signal_id=signal_id
         )

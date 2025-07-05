@@ -655,7 +655,7 @@ class FyersWrapper(BrokerInterface):
         """
         fyers_payload = order_request.to_fyers_dict()
         fyers_payload = {k: v for k, v in fyers_payload.items() if v is not None}
-        print(fyers_payload)
+        logger.info(fyers_payload)
         from algosat.core.order_request import OrderResponse, OrderStatus
         try:
             if self.is_async:
@@ -967,10 +967,8 @@ class FyersWrapper(BrokerInterface):
         ]
         return strike_symbols
 
-    # ...existing code...
 
-    @staticmethod
-    async def exit_positions_async(data: dict):
+    async def exit_positions_async(self, data: dict):
         """
         Exit positions using Fyers API in async mode.
 
@@ -978,13 +976,12 @@ class FyersWrapper(BrokerInterface):
         :return: Response from the Fyers API.
         """
         try:
-            response = await FyersWrapper.fyers.exit_positions(data=data)
+            response = await self.fyers.exit_positions(data=data)
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to exit positions (async): {e}")
 
-    @staticmethod
-    def exit_positions_sync(data: dict):
+    def exit_positions_sync(self, data: dict):
         """
         Exit positions using Fyers API in sync mode.
 
@@ -992,21 +989,20 @@ class FyersWrapper(BrokerInterface):
         :return: Response from the Fyers API.
         """
         try:
-            response = FyersWrapper.fyers.exit_positions(data=data)
+            response = self.fyers.exit_positions(data=data)
             return response
         except Exception as e:
             raise RuntimeError(f"Failed to exit positions (sync): {e}")
 
-    @staticmethod
-    async def exit_positions(data: dict):
+    async def exit_positions(self, data: dict):
         """
         Common method to exit positions dynamically based on the mode (sync/async).
 
         :param data: Parameters for exiting positions (segment, side, productType, etc.).
         :return: Response from the Fyers API.
         """
-        if FyersWrapper.is_async:
-            return await FyersWrapper.exit_positions_async(data)
+        if self.is_async:
+            return await self.exit_positions_async(data)
         else:
             return FyersWrapper.exit_positions_sync(data)
 
@@ -1209,6 +1205,20 @@ class FyersWrapper(BrokerInterface):
         logger.info("WebSocket Connected.")
         self.ws_connected = True
 
+    async def exit_order(self, broker_order_id, symbol=None, product_type=None, exit_reason=None):
+        """
+        Exit a Fyers order by calling exit_positions with correct id (symbol-BO).
+        """
+        if symbol:
+            exit_id = f"{symbol}-BO"
+        else:
+            logger.error("Symbol must be provided to exit order.")
+            return None
+        data = {"id": exit_id}
+        if exit_reason:
+            logger.info(f"Exiting Fyers order {broker_order_id} for symbol {symbol} with reason: {exit_reason}")
+        return await self.exit_positions(data)
+
 
 # Assuming from_date and to_date are in 'YYYY-MM-DD HH:MM:SS' format or datetime objects
 def convert_to_epoch(date_value):
@@ -1229,7 +1239,7 @@ import signal
 import sys
 
 def _handle_keyboard_interrupt(signum, frame):
-    print("\n[INFO] KeyboardInterrupt received. Shutting down gracefully...")
+    logger.info("KeyboardInterrupt received. Shutting down gracefully...")
     try:
         loop = asyncio.get_event_loop()
         loop.stop()
