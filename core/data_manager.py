@@ -396,6 +396,8 @@ class DataManager:
             raise
 
     async def get_broker_symbol(self, symbol, instrument_type=None):
+        # NOTE: All downstream order response handling expects order_id (string) and order_message (string).
+        # Legacy order_ids/order_messages (list/dict) are no longer supported.
         try:
             broker_name = self.get_current_broker_name()
             if not self.broker_manager or not broker_name:

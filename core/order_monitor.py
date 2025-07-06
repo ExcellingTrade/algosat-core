@@ -6,7 +6,7 @@ from algosat.common.logger import get_logger
 from algosat.models.order_aggregate import OrderAggregate
 
 from algosat.core.data_manager import DataManager
-from algosat.core.order_manager import OrderManager
+from algosat.core.order_manager import FYERS_STATUS_MAP, OrderManager
 from algosat.core.order_cache import OrderCache
 from algosat.core.order_request import OrderStatus
 from algosat.common.strategy_utils import wait_for_next_candle, fetch_strikes_history
@@ -36,7 +36,7 @@ class OrderMonitor:
         self._last_broker_statuses = {}
         # Unified cache: order_id -> (order, strategy_symbol, strategy)
         self._order_strategy_cache = {}
-        self._db_session = None  # Will be set when needed
+        # self._db_session = None  # Will be set when needed
 
     async def _get_order_and_strategy(self, order_id: int):
         """
@@ -49,34 +49,59 @@ class OrderMonitor:
             return self._order_strategy_cache[order_id]
         # Lazy-load session if not present
         from algosat.core.db import AsyncSessionLocal, get_order_by_id, get_strategy_symbol_by_id, get_strategy_by_id
-        if self._db_session is None:
-            self._db_session = AsyncSessionLocal()
-            self._db_session_obj = await self._db_session.__aenter__()
-        session = self._db_session_obj
-        order = await get_order_by_id(session, order_id)
-        if not order:
-            logger.error(f"OrderMonitor: No order found for order_id={order_id}")
-            self._order_strategy_cache[order_id] = (None, None, None)
-            self.stop()
-            return None, None, None
-        strategy_symbol_id = order.get('strategy_symbol_id')
-        if not strategy_symbol_id:
-            logger.error(f"OrderMonitor: No strategy_symbol_id for order_id={order_id}")
-            self._order_strategy_cache[order_id] = (order, None, None)
-            return order, None, None
-        strategy_symbol = await get_strategy_symbol_by_id(session, strategy_symbol_id)
-        if not strategy_symbol:
-            logger.error(f"OrderMonitor: No strategy_symbol found for id={strategy_symbol_id}")
-            self._order_strategy_cache[order_id] = (order, None, None)
-            return order, None, None
-        strategy_id = strategy_symbol.get('strategy_id')
-        if not strategy_id:
-            logger.error(f"OrderMonitor: No strategy_id in strategy_symbol for id={strategy_symbol_id}")
-            self._order_strategy_cache[order_id] = (order, strategy_symbol, None)
-            return order, strategy_symbol, None
-        strategy = await get_strategy_by_id(session, strategy_id)
-        self._order_strategy_cache[order_id] = (order, strategy_symbol, strategy)
-        return order, strategy_symbol, strategy
+        # if self._db_session is None:
+        #     self._db_session = AsyncSessionLocal()
+        #     self._db_session_obj = await self._db_session.__aenter__()
+        # session = self._db_session_obj
+        # order = await get_order_by_id(session, order_id)
+        # if not order:
+        #     logger.error(f"OrderMonitor: No order found for order_id={order_id}")
+        #     self._order_strategy_cache[order_id] = (None, None, None)
+        #     self.stop()
+        #     return None, None, None
+        # strategy_symbol_id = order.get('strategy_symbol_id')
+        # if not strategy_symbol_id:
+        #     logger.error(f"OrderMonitor: No strategy_symbol_id for order_id={order_id}")
+        #     self._order_strategy_cache[order_id] = (order, None, None)
+        #     return order, None, None
+        # strategy_symbol = await get_strategy_symbol_by_id(session, strategy_symbol_id)
+        # if not strategy_symbol:
+        #     logger.error(f"OrderMonitor: No strategy_symbol found for id={strategy_symbol_id}")
+        #     self._order_strategy_cache[order_id] = (order, None, None)
+        #     return order, None, None
+        # strategy_id = strategy_symbol.get('strategy_id')
+        # if not strategy_id:
+        #     logger.error(f"OrderMonitor: No strategy_id in strategy_symbol for id={strategy_symbol_id}")
+        #     self._order_strategy_cache[order_id] = (order, strategy_symbol, None)
+        #     return order, strategy_symbol, None
+        # strategy = await get_strategy_by_id(session, strategy_id)
+        # self._order_strategy_cache[order_id] = (order, strategy_symbol, strategy)
+        # return order, strategy_symbol, strategy
+        async with AsyncSessionLocal() as session:
+            order = await get_order_by_id(session, order_id)
+            if not order:
+                logger.error(f"OrderMonitor: No order found for order_id={order_id}")
+                self._order_strategy_cache[order_id] = (None, None, None)
+                self.stop()
+                return None, None, None
+            strategy_symbol_id = order.get('strategy_symbol_id')
+            if not strategy_symbol_id:
+                logger.error(f"OrderMonitor: No strategy_symbol_id for order_id={order_id}")
+                self._order_strategy_cache[order_id] = (order, None, None)
+                return order, None, None
+            strategy_symbol = await get_strategy_symbol_by_id(session, strategy_symbol_id)
+            if not strategy_symbol:
+                logger.error(f"OrderMonitor: No strategy_symbol found for id={strategy_symbol_id}")
+                self._order_strategy_cache[order_id] = (order, None, None)
+                return order, None, None
+            strategy_id = strategy_symbol.get('strategy_id')
+            if not strategy_id:
+                logger.error(f"OrderMonitor: No strategy_id in strategy_symbol for id={strategy_symbol_id}")
+                self._order_strategy_cache[order_id] = (order, strategy_symbol, None)
+                return order, strategy_symbol, None
+            strategy = await get_strategy_by_id(session, strategy_id)
+            self._order_strategy_cache[order_id] = (order, strategy_symbol, strategy)
+            return order, strategy_symbol, strategy
 
     async def _price_order_monitor(self) -> None:
         """
@@ -95,7 +120,6 @@ class OrderMonitor:
                 continue
             # Fetch order, strategy_symbol, and strategy in one go (cached)
             order_row, strategy_symbol, strategy = await self._get_order_and_strategy(self.order_id)
-            # If order not found, _get_order_and_strategy already logged and stopped monitor
             if order_row is None:
                 break
             # Initialize last_broker_statuses from agg.broker_orders if empty (first run or after restart)
@@ -105,50 +129,105 @@ class OrderMonitor:
                     status = getattr(bro, 'status', None)
                     if broker_exec_id is not None and status is not None:
                         last_broker_statuses[broker_exec_id] = str(status)
-            # Initialize last_main_status from DB if None (first run or after restart)
             if last_main_status is None and order_row and order_row.get('status') is not None:
                 last_main_status = str(order_row.get('status'))
                 self._last_main_status = last_main_status
-            # Filter broker orders to only ENTRY side
-            entry_broker_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
-            # Efficiently collect all broker order statuses for ENTRY side
-            all_statuses = []
-            status_set = set()
-            # Determine product_type from strategy (cached)
+            # --- Use live broker order data from order_cache for ENTRY side ---
             product_type = None
             if strategy:
                 product_type = strategy.get('product_type') or strategy.get('producttype')
-            for bro in entry_broker_orders:
+            entry_broker_db_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
+            all_statuses = []
+            status_set = set()
+            for bro in entry_broker_db_orders:
                 broker_exec_id = getattr(bro, 'id', None)
                 broker_order_id = getattr(bro, 'order_id', None)
                 broker_id = getattr(bro, 'broker_id', None)
-                # --- Helper: get broker_name from broker_id (cached) ---
                 broker_name = None
                 if broker_id is not None:
                     try:
                         broker_name = await self.data_manager.get_broker_name_by_id(broker_id)
                     except Exception as e:
                         logger.error(f"OrderMonitor: Could not get broker name for broker_id={broker_id}: {e}")
-                # --- Helper: get cache_lookup_order_id (Fyers intraday hack) ---
                 cache_lookup_order_id = self._get_cache_lookup_order_id(
                     broker_order_id, broker_name, product_type
                 )
-                # --- Helper: get latest broker status from cache or fallback ---
-                broker_status = await self._get_normalized_broker_status(
-                    bro, broker_name, cache_lookup_order_id
-                )
+                # Fetch live broker order from order_cache
+                cache_order = None
+                if broker_name and cache_lookup_order_id:
+                    cache_order = await self.order_cache.get_order_by_id(broker_name, cache_lookup_order_id)
+                # Use status from cache_order if available, else fallback to DB
+                broker_status = None
+                if cache_order and 'status' in cache_order:
+                    broker_status = cache_order['status']
+                else:
+                    broker_status = getattr(bro, 'status', None)
+                if broker_status and isinstance(broker_status, int) and broker_name == "fyers":
+                    broker_status = FYERS_STATUS_MAP.get(broker_status, broker_status)
+                # Normalize broker_status
+                if broker_status and isinstance(broker_status, str) and broker_status.startswith("OrderStatus."):
+                    broker_status = broker_status.split(".")[-1]
+                elif broker_status and isinstance(broker_status, OrderStatus):
+                    broker_status = broker_status.value
+            
+                
                 all_statuses.append(broker_status)
                 status_set.add(broker_status)
                 last_status = last_broker_statuses.get(broker_exec_id)
-                # Only update if status changed and not in terminal state
-                if broker_status not in ("FILLED", "CANCELLED", "REJECTED") and broker_status != last_status:
-                    await self.order_manager.update_broker_exec_status_in_db(broker_exec_id, broker_status)
+                # --- Enhancement: Also check executed_quantity for PARTIALLY_FILLED updates ---
+                # Get executed_quantity from broker (cache or bro)
+                broker_executed_quantity = None
+                if cache_order:
+                    broker_executed_quantity = cache_order.get("executed_quantity") or cache_order.get("filled_quantity") or cache_order.get("filledQty")
+                if broker_executed_quantity is None:
+                    broker_executed_quantity = getattr(bro, "executed_quantity", None) or getattr(bro, "filled_quantity", None) or getattr(bro, "filledQty", None)
+                # Get DB executed_quantity (from bro)
+                db_executed_quantity = getattr(bro, "executed_quantity", None) or getattr(bro, "filled_quantity", None) or getattr(bro, "filledQty", None)
+                # Only update if status changed, or for PARTIALLY_FILLED if executed_quantity increased
+                should_update = False
+                if broker_status != last_status:
+                    should_update = True
+                elif broker_status in ("PARTIALLY_FILLED", "PARTIAL"):
+                    try:
+                        if broker_executed_quantity is not None and db_executed_quantity is not None:
+                            if float(broker_executed_quantity) > float(db_executed_quantity):
+                                should_update = True
+                    except Exception as e:
+                        logger.error(f"OrderMonitor: Error comparing executed_quantity for broker_exec_id={broker_exec_id}: {e}")
+                if should_update:
+                    # If status transitions from PENDING/PARTIAL to FILLED/PARTIAL, update all fields
+                    transition_to_filled = (
+                        (last_status in ("PENDING", "PARTIAL", "PARTIALLY_FILLED")) and
+                        (broker_status in ("FILLED", "PARTIAL", "PARTIALLY_FILLED"))
+                    )
+                    if transition_to_filled:
+                        executed_quantity = broker_executed_quantity
+                        execution_price = None
+                        order_type = None
+                        product_type_val = None
+                        # Prefer cache_order for execution details, fallback to bro
+                        if cache_order:
+                            execution_price = cache_order.get("exec_price") or cache_order.get("execution_price") or cache_order.get("average_price") or cache_order.get("tradedPrice")
+                            order_type = cache_order.get("order_type")
+                            product_type_val = cache_order.get("product_type")
+                        if execution_price is None:
+                            execution_price = getattr(bro, "exec_price", None) or getattr(bro, "execution_price", None) or getattr(bro, "average_price", None) or getattr(bro, "tradedPrice", None)
+                        if order_type is None:
+                            order_type = getattr(bro, "order_type", None)
+                        if product_type_val is None:
+                            product_type_val = getattr(bro, "product_type", None)
+                        await self.order_manager.update_broker_exec_status_in_db(
+                            broker_exec_id,
+                            broker_status,
+                            executed_quantity=executed_quantity,
+                            execution_price=execution_price,
+                            order_type=order_type,
+                            product_type=product_type_val
+                        )
+                    else:
+                        await self.order_manager.update_broker_exec_status_in_db(broker_exec_id, broker_status)
                     last_broker_statuses[broker_exec_id] = broker_status
-                # If just transitioned to terminal, update once
-                elif broker_status in ("FILLED", "CANCELLED", "REJECTED") and broker_status != last_status:
-                    await self.order_manager.update_broker_exec_status_in_db(broker_exec_id, broker_status)
-                    last_broker_statuses[broker_exec_id] = broker_status
-            logger.info(f"OrderMonitor: Order {self.order_id} ENTRY broker statuses (from cache): {all_statuses}")
+            logger.info(f"OrderMonitor: Order {self.order_id} ENTRY broker statuses (live): {all_statuses}")
             # --- Decision logic for main order status ---
             main_status = None
             if any(s in ("FILLED", "PARTIALLY_FILLED", "OPEN") for s in status_set):
@@ -161,13 +240,11 @@ class OrderMonitor:
                 main_status = OrderStatus.REJECTED
             # Only update Orders table if status changed
             if main_status is not None and main_status != last_main_status:
-                # If opening due to FILLED or PARTIALLY_FILLED, update entry_time as well
                 if main_status == OrderStatus.OPEN and any(s in ("FILLED", "PARTIALLY_FILLED") for s in status_set):
                     from datetime import datetime, timezone
                     entry_time = datetime.now(timezone.utc)
                     await self.order_manager.update_order_status_in_db(self.order_id, main_status)
-                    await self.order_manager.update_order_stop_loss_in_db(self.order_id, order_row.get('stop_loss'))  # keep stop_loss up to date if needed
-                    # Directly update entry_time in Orders table
+                    await self.order_manager.update_order_stop_loss_in_db(self.order_id, order_row.get('stop_loss'))
                     from algosat.core.db import AsyncSessionLocal, update_rows_in_table
                     from algosat.core.dbschema import orders
                     async with AsyncSessionLocal() as session:
@@ -193,7 +270,6 @@ class OrderMonitor:
             except Exception as e:
                 logger.error(f"OrderMonitor: Error in get_ltp for symbol={symbol}, order_id={self.order_id}: {e}")
                 ltp = None
-            # --- Calculate and update PnL in Orders table ---
             if ltp is not None and isinstance(ltp, (int, float)):
                 try:
                     if order_row:
@@ -211,7 +287,6 @@ class OrderMonitor:
                             logger.debug(f"OrderMonitor: Updated PnL for order_id={self.order_id}: {pnl}")
                 except Exception as e:
                     logger.error(f"OrderMonitor: Error calculating/updating PnL for order_id={self.order_id}: {e}")
-                # --- Unified price exit logic (deduplicated) ---
                 try:
                     exit_reason = self._evaluate_price_exit_logic(order_row, ltp)
                 except Exception as e:
@@ -223,7 +298,7 @@ class OrderMonitor:
                     self.stop()
                     return
             await asyncio.sleep(self.price_order_monitor_seconds)
-        logger.info(f"OrderMonitor: Stopping price monitor for order_id={self.order_id} (last status: {last_main_status})") 
+        logger.info(f"OrderMonitor: Stopping price monitor for order_id={self.order_id} (last status: {last_main_status})")
     def _evaluate_price_exit_logic(self, order, ltp):
         """
         Deduplicated price-based exit logic for all strategies.
@@ -346,29 +421,29 @@ class OrderMonitor:
                 else:
                     self.signal_monitor_minutes = 5  # fallback default
         logger.debug(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_minutes}m)")
-        await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
+        await asyncio.gather(self._price_order_monitor())#, self._signal_monitor())
 
     def stop(self) -> None:
         self._running = False
         # Close DB session if open
-        if self._db_session is not None:
-            async def _close_session():
-                try:
-                    if hasattr(self._db_session, '__aexit__'):
-                        await self._db_session.__aexit__(None, None, None)
-                except Exception as e:
-                    logger.error(f"OrderMonitor: Error closing DB session: {e}")
-            try:
-                import asyncio
-                if asyncio.get_event_loop().is_running():
-                    asyncio.create_task(_close_session())
-                else:
-                    loop = asyncio.get_event_loop()
-                    loop.run_until_complete(_close_session())
-            except Exception:
-                pass
-            self._db_session = None
-            self._db_session_obj = None
+        # if self._db_session is not None:
+        #     async def _close_session():
+        #         try:
+        #             if hasattr(self._db_session, '__aexit__'):
+        #                 await self._db_session.__aexit__(None, None, None)
+        #         except Exception as e:
+        #             logger.error(f"OrderMonitor: Error closing DB session: {e}")
+        #     try:
+        #         import asyncio
+        #         if asyncio.get_event_loop().is_running():
+        #             asyncio.create_task(_close_session())
+        #         else:
+        #             loop = asyncio.get_event_loop()
+        #             loop.run_until_complete(_close_session())
+        #     except Exception:
+        #         pass
+        #     self._db_session = None
+        #     self._db_session_obj = None
 
     @property
     async def strategy(self):

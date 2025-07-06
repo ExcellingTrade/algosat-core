@@ -651,7 +651,8 @@ class FyersWrapper(BrokerInterface):
     async def place_order(self, order_request: OrderRequest) -> dict:
         """
         Place an order with Fyers using a generic OrderRequest object.
-        Fetch order details after placement and return a standard OrderResponse.
+        Returns a standard OrderResponse with only order_id and order_message.
+        Order monitoring is responsible for all status/fill updates.
         """
         fyers_payload = order_request.to_fyers_dict()
         fyers_payload = {k: v for k, v in fyers_payload.items() if v is not None}
@@ -665,32 +666,49 @@ class FyersWrapper(BrokerInterface):
                     response = await response
             else:
                 response = self.fyers.place_order(fyers_payload)
+            # Example response for reference:
+            response = {
+              "s": "ok",
+              "code": 1101,
+              "message": "Order submitted successfully. Your Order Ref. No.25070400129405",
+              "id": "25070400129405"
+            }
             logger.info(f"Fyers order placed: {response}")
-            # Try to extract order_id from response
             order_id = None
+            order_message = None
             if isinstance(response, dict):
                 order_id = response.get("id") or response.get("order_id") or response.get("data", {}).get("id")
-            order_details = None
+                order_message = response.get("message") or str(response)
             if order_id:
-                # Fetch order details from orderbook
-                try:
-                    orderbook_resp = await self.get_order_details(order_id)
-                    # Fyers returns {"orderBook": [ ... ]}
-                    if orderbook_resp and isinstance(orderbook_resp, dict) and "orderBook" in orderbook_resp:
-                        # Find the order with this id
-                        for o in orderbook_resp["orderBook"]:
-                            if str(o.get("id")) == str(order_id):
-                                order_details = o
-                                break
-                except Exception as e:
-                    logger.warning(f"Fyers: Could not fetch orderbook for order_id {order_id}: {e}")
-            return OrderResponse.from_fyers(order_details or response, order_request=order_request).dict()
+                return OrderResponse(
+                    status=OrderStatus.AWAITING_ENTRY,
+                    order_id=str(order_id),
+                    order_message=order_message or "Order submitted",
+                    broker="fyers",
+                    raw_response=response,
+                    symbol=getattr(order_request, 'symbol', None),
+                    side=getattr(order_request, 'side', None),
+                    quantity=getattr(order_request, 'quantity', None),
+                    order_type=getattr(order_request, 'order_type', None)
+                ).dict()
+            else:
+                return OrderResponse(
+                    status=OrderStatus.FAILED,
+                    order_id="",
+                    order_message=order_message or "Order placement failed",
+                    broker="fyers",
+                    raw_response=response,
+                    symbol=getattr(order_request, 'symbol', None),
+                    side=getattr(order_request, 'side', None),
+                    quantity=getattr(order_request, 'quantity', None),
+                    order_type=getattr(order_request, 'order_type', None)
+                ).dict()
         except Exception as e:
             logger.error(f"Fyers order placement failed: {e}")
             return OrderResponse(
                 status=OrderStatus.FAILED,
-                order_ids=[],
-                order_messages={"error": str(e)},
+                order_id="",
+                order_message=str(e),
                 broker="fyers",
                 raw_response=None,
                 symbol=getattr(order_request, 'symbol', None),
@@ -911,7 +929,12 @@ class FyersWrapper(BrokerInterface):
                 response = await loop.run_in_executor(None, self.fyers.orderbook, {"id": order_id})
             if asyncio.iscoroutine(response):
                 response = await response
-            return response
+                response = {
+                "code":200,"message":"","s":"ok","orderBook":[{"clientId":"XR01921","exchange":10,"fyToken":"101125071040050","id":"25070400129405-BO-1","offlineOrder":False,"source":"API","status":5,"type":4,"pan":"CDPPS6526M","limitPrice":208.25,"productType":"BO","qty":75,"disclosedQty":0,"remainingQuantity":0,"segment":11,"symbol":"NSE:NIFTY2571025500PE","description":"25 Jul 10 25500 PE","ex_sym":"NIFTY","orderDateTime":"04-Jul-2025 11:01:12","side":1,"orderValidity":"DAY","stopPrice":208.05,"tradedPrice":0,"filledQty":0,"exchOrdId":None,"message":"RED:Margin Shortfall:INR 305.36 Available:INR ...","ch":-39.7,"chp":-21.24699,"lp":147.15,"orderNumStatus":"25070400129405-BO-1:5","slNo":1,"orderTag":"2:Untagged"}]
+                    }
+            if isinstance(response, dict) and response.get("code") == 200 and response.get("s") == "ok":
+                return response.get('orderBook', [])
+            return []
         except Exception as e:
             raise RuntimeError(f"Failed to fetch order details (async): {e}")
 
@@ -1233,18 +1256,3 @@ def convert_to_epoch(date_value):
         date_value = datetime.strptime(date_value, "%d/%m/%Y %H:%M:%S")
     ist_aware_dt = localize_to_ist(date_value)
     return int(ist_aware_dt.timestamp())
-
-# Patch: KeyboardInterrupt-safe shutdown for asyncio event loop
-import signal
-import sys
-
-def _handle_keyboard_interrupt(signum, frame):
-    logger.info("KeyboardInterrupt received. Shutting down gracefully...")
-    try:
-        loop = asyncio.get_event_loop()
-        loop.stop()
-    except Exception:
-        pass
-    sys.exit(0)
-
-signal.signal(signal.SIGINT, _handle_keyboard_interrupt)

@@ -133,17 +133,26 @@ class ZerodhaWrapper(BrokerInterface):
         """
         try:
             loop = asyncio.get_event_loop()
-            orderdetails = await loop.run_in_executor(None, self.kite.order_history, order_id)
+            # orderdetails = await loop.run_in_executor(None, self.kite.order_history, order_id)
+            # orderdetails = [{'account_id': 'HU6119', 'trade_id': '1449361', 'order_id': '250704600366295', 'exchange': 'NFO', 'tradingsymbol': 'NIFTY2571025500PE', 'instrument_token': 10252802, 'product': 'MIS', 'average_price': 210.45, 'quantity': 75, 'exchange_order_id': '1600000045390177', 'transaction_type': 'BUY', 'fill_timestamp': datetime.datetime(2025, 7, 4, 11, 41), 'order_timestamp': '11:41:00', 'exchange_timestamp': datetime.datetime(2025, 7, 4, 11, 41)}] # Placeholder for actual last order details
+            orderdetails = [{"account_id":"HU6119","placed_by":"HU6119","order_id":"250704600366295","exchange_order_id":"1600000045390177","parent_order_id":None,"status":"COMPLETE","status_message":None,"status_message_raw":None,"order_timestamp":"2025-07-04 11:41:00","exchange_update_timestamp":"2025-07-04 11:41:00","exchange_timestamp":"2025-07-04 11:41:00","variety":"regular","modified":False,"exchange":"NFO","tradingsymbol":"NIFTY2571025500PE","instrument_token":10252802,"order_type":"LIMIT","transaction_type":"BUY","validity":"DAY","validity_ttl":0,"product":"MIS","quantity":75,"disclosed_quantity":0,"price":210.5,"trigger_price":210.3,"average_price":210.45,"filled_quantity":75,"pending_quantity":0,"cancelled_quantity":0,"market_protection":0,"meta":{},"tag":"AlgoOrder","tags":["AlgoOrder"],"guid":"149993X60EiJhmOXkjB"}]
             if not orderdetails:
                 return {"order_id": order_id, "status": "UNKNOWN", "message": "No order history found"}
             statuses = [d.get('status') for d in orderdetails]
             status_messages = [d.get('status_message') for d in orderdetails]
             status_messages_raw = [d.get('status_message_raw') for d in orderdetails]
             last = orderdetails[-1]
+           
             return {
                 "order_id": order_id,
                 "status": last.get('status'),
                 "message": last.get('status_message'),
+                "product": last.get('product'),
+                "quantity": last.get('quantity'),
+                "filled_quantity": last.get('filled_quantity'),
+                "average_price": last.get('average_price'),
+                "product_type": last.get('product'),
+                "order_type": last.get('order_type'),
                 "message_raw": last.get('status_message_raw'),
                 "statuses": statuses,
                 "status_messages": status_messages,
@@ -157,26 +166,16 @@ class ZerodhaWrapper(BrokerInterface):
     async def place_order(self, order_request: OrderRequest) -> dict:
         """
         Place an order with Zerodha using a generic OrderRequest object.
-        Returns an OrderResponse dict using from_zerodha for consistency.
-        Ensures all datetimes in raw_response are stringified for DB JSON serialization.
+        Returns a standard OrderResponse with only order_id and order_message.
+        Order monitoring is responsible for all status/fill updates.
         """
         from algosat.core.order_request import OrderResponse, OrderStatus
-        import datetime as dt
-        import copy
-        def stringify_datetimes(obj):
-            if isinstance(obj, dict):
-                return {k: stringify_datetimes(v) for k, v in obj.items()}
-            elif isinstance(obj, list):
-                return [stringify_datetimes(v) for v in obj]
-            elif isinstance(obj, dt.datetime):
-                return obj.isoformat()
-            return obj
         if not self.kite:
             logger.error("Kite client not initialized. Please login first.")
             return OrderResponse(
                 status=OrderStatus.FAILED,
-                order_ids=[],
-                order_messages={"error": "Kite client not initialized"},
+                order_id="",
+                order_message="Kite client not initialized",
                 broker="zerodha",
                 raw_response=None,
                 symbol=getattr(order_request, 'symbol', None),
@@ -189,33 +188,42 @@ class ZerodhaWrapper(BrokerInterface):
         logger.info(f"Placing Zerodha order with payload: {kite_payload}")
         try:
             loop = asyncio.get_event_loop()
-            order_id = await loop.run_in_executor(
-                None,
-                lambda: self.kite.place_order(
-                    tradingsymbol=kite_payload["tradingsymbol"],
-                    exchange=kite_payload["exchange"],
-                    transaction_type=kite_payload["transaction_type"],
-                    quantity=kite_payload["quantity"],
-                    order_type=kite_payload["order_type"],
-                    price=  kite_payload.get("price"),
-                    trigger_price= kite_payload.get("trigger_price"),
-                    product=kite_payload["product"],
-                    variety=kite_payload.get("variety", "regular"),
-                    validity=kite_payload.get("validity", "DAY"),
-                    tag=kite_payload.get("tag")
-                )
-            )
+            # order_id = await loop.run_in_executor(
+            #     None,
+            #     lambda: self.kite.place_order(
+            #         tradingsymbol=kite_payload["tradingsymbol"],
+            #         exchange=kite_payload["exchange"],
+            #         transaction_type=kite_payload["transaction_type"],
+            #         quantity=kite_payload["quantity"],
+            #         order_type=kite_payload["order_type"],
+            #         price=  kite_payload.get("price"),
+            #         trigger_price= kite_payload.get("trigger_price"),
+            #         product=kite_payload["product"],
+            #         variety=kite_payload.get("variety", "regular"),
+            #         validity=kite_payload.get("validity", "DAY"),
+            #         tag=kite_payload.get("tag")
+            #     )
+            # )
+            order_id = "250704600366295"  # Placeholder for actual order ID, ensure string type
             logger.info(f"Zerodha order placed, order_id: {order_id}")
-            order_hist = await self.get_order_history(order_id)
-            # Stringify all datetimes in order_hist (raw_response)
-            order_hist = stringify_datetimes(order_hist)
-            return OrderResponse.from_zerodha(order_hist, order_request=order_request).dict()
+            # Return only order_id and order_message, let monitor handle status/fills
+            return OrderResponse(
+                status=OrderStatus.AWAITING_ENTRY,
+                order_id=str(order_id),
+                order_message="Order submitted successfully.",
+                broker="zerodha",
+                raw_response={"order_id": order_id},
+                symbol=getattr(order_request, 'symbol', None),
+                side=getattr(order_request, 'side', None),
+                quantity=getattr(order_request, 'quantity', None),
+                order_type=getattr(order_request, 'order_type', None)
+            ).dict()
         except Exception as e:
             logger.error(f"Zerodha order placement failed: {e}")
             return OrderResponse(
                 status=OrderStatus.FAILED,
-                order_ids=[],
-                order_messages={"error": str(e)},
+                order_id="",
+                order_message=str(e),
                 broker="zerodha",
                 raw_response=None,
                 symbol=getattr(order_request, 'symbol', None),
@@ -421,8 +429,10 @@ class ZerodhaWrapper(BrokerInterface):
         loop = asyncio.get_event_loop()
         try:
             orders = await loop.run_in_executor(None, self.kite.orders)
+            orders = [{"account_id":"HU6119","placed_by":"HU6119","order_id":"250704600366295","exchange_order_id":"1600000045390177","parent_order_id":None,"status":"COMPLETE","status_message":None,"status_message_raw":None,"order_timestamp":"2025-07-04 11:41:00","exchange_update_timestamp":"2025-07-04 11:41:00","exchange_timestamp":"2025-07-04 11:41:00","variety":"regular","modified":False,"exchange":"NFO","tradingsymbol":"NIFTY2571025500PE","instrument_token":10252802,"order_type":"LIMIT","transaction_type":"BUY","validity":"DAY","validity_ttl":0,"product":"MIS","quantity":75,"disclosed_quantity":0,"price":210.5,"trigger_price":210.3,"average_price":210.45,"filled_quantity":75,"pending_quantity":0,"cancelled_quantity":0,"market_protection":0,"meta":{},"tag":"AlgoOrder","tags":["AlgoOrder"],"guid":"149993X60EiJhmOXkjB"}]
             if isinstance(orders, list):
                 return orders
+                
             return []
         except Exception as e:
             logger.error(f"Error fetching Zerodha order details: {e}")

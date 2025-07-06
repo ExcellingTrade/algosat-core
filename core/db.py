@@ -1784,14 +1784,4 @@ async def get_all_open_orders(session):
     )
     return [dict(row._mapping) for row in result.fetchall()]
 
-async def update_broker_exec_status_in_db(broker_order_id, status):
-    """
-    Update the status of a broker execution in the broker_executions table by broker_order_id.
-    """
-    from algosat.core.dbschema import broker_executions
-    from sqlalchemy import update
-    async with AsyncSessionLocal() as session:
-        # FIX: Use integer comparison for id, not string
-        stmt = update(broker_executions).where(broker_executions.c.id == broker_order_id).values(status=status)
-        await session.execute(stmt)
-        await session.commit()
+# Removed legacy update_broker_exec_status_in_db (now handled by OrderManager)

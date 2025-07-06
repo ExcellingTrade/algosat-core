@@ -167,95 +167,90 @@ PRODUCT_TYPE_MAP = {
 
 class OrderResponse(BaseModel):
     status: OrderStatus
-    order_ids: List[str] = Field(default_factory=list)
-    order_messages: Dict[str, str] = Field(default_factory=dict)
+    order_id: str = ""
+    order_message: str = ""
     broker: Optional[str] = None
     raw_response: Optional[Any] = None
     # Optionally, include extra info for DB
     symbol: Optional[str] = None
     side: Optional[str] = None
     quantity: Optional[int] = None
-    execQuantity: Optional[int] = None
-    execPrice: Optional[int] = None
+    execQuantity: int = 0
+    execPrice: float = 0.0
     order_type: Optional[str] = None  
     product_type: Optional[str] = None  
-    strategy_id: Optional[Any] = None
-    signal_id: Optional[Any] = None
+    # strategy_id: Optional[Any] = None
+    # signal_id: Optional[Any] = None
     # Add more fields as needed for DB
 
     @field_validator('status', mode='before')
     def ensure_enum_status(cls, v):
-        if isinstance(v, OrderStatus):
-            return v
-        if isinstance(v, str):
-            # Accept 'OrderStatus.FAILED' or 'FAILED'
-            if v.startswith('OrderStatus.'):
-                v = v.split('.')[-1]
-            try:
-                return OrderStatus(v)
-            except ValueError:
-                raise ValueError(f"Invalid status value: {v}")
-        raise ValueError(f"Invalid status type: {type(v)}")
+        try:
+            if isinstance(v, OrderStatus):
+                return v
+            if isinstance(v, str):
+                # Accept 'OrderStatus.FAILED' or 'FAILED'
+                if v.startswith('OrderStatus.'):
+                    v = v.split('.')[-1]
+                try:
+                    return OrderStatus(v)
+                except ValueError:
+                    raise ValueError(f"Invalid status value: {v}")
+            raise ValueError(f"Invalid status type: {type(v)}")
+        except Exception as e:
+            import logging
+            logging.error(f"OrderResponse.ensure_enum_status error: {e}")
+            raise ValueError(f"OrderResponse.ensure_enum_status error: {e}")
 
     @classmethod
     def from_fyers(cls, response: dict, order_request=None, strategy_id=None, signal_id=None) -> "OrderResponse":
-        # Handles both single and split order responses
-        if response is None:
-            return cls(
-                status=OrderStatus.FAILED,
-                order_ids=[],
-                order_messages={"error": "No response from Fyers broker"},
-                broker="fyers",
-                raw_response=None,
-                symbol=getattr(order_request, 'symbol', None),
-                side=getattr(order_request, 'side', None),
-                quantity=getattr(order_request, 'qty', None),
-                execQuantity=getattr(order_request, 'filledQty', None),
-                execPrice=getattr(order_request, 'tradedPrice', None),
-                order_type=getattr(order_request, 'type', None),
-                strategy_id=strategy_id,
-                signal_id=signal_id
-            )
-        if isinstance(response, list):
-            order_ids = [r.get("id") for r in response if r.get("s") == "ok"]
-            order_messages = {r.get("id"): r.get("message", "") for r in response if r.get("id")}
-            status = OrderStatus.FAILED
-            if all(r.get("s") == "ok" for r in response):
-                status = OrderStatus.AWAITING_ENTRY
-            elif any(r.get("s") == "ok" for r in response):
-                status = OrderStatus.PARTIALLY_FILLED
+        try:
+            if response is None:
+                return cls(
+                    status=OrderStatus.FAILED,
+                    order_id="",
+                    order_message="No response from Fyers broker",
+                    broker="fyers",
+                    raw_response=None,
+                    symbol=getattr(order_request, 'symbol', None),
+                    side=getattr(order_request, 'side', None),
+                    quantity=getattr(order_request, 'qty', None),
+                    execQuantity=getattr(order_request, 'filledQty', None),
+                    execPrice=getattr(order_request, 'tradedPrice', None),
+                    order_type=getattr(order_request, 'type', None),
+                    # strategy_id=strategy_id,
+                    # signal_id=signal_id
+                )
+            order_id = response.get("id") or response.get("order_id") or response.get("data", {}).get("id")
+            status = OrderStatus.AWAITING_ENTRY if response.get("s") == "ok" else OrderStatus.FAILED
+            message = response.get("message", "")
+            if not order_id:
+                order_id = ""
+            if not message:
+                message = "Order placed" if status == OrderStatus.AWAITING_ENTRY else "Fyers broker returned error with no message"
             return cls(
                 status=status,
-                order_ids=order_ids,
-                order_messages=order_messages,
+                order_id=str(order_id),
+                order_message=message,
                 broker="fyers",
                 raw_response=response,
                 symbol=getattr(order_request, 'symbol', None),
                 side=getattr(order_request, 'side', None),
                 quantity=getattr(order_request, 'qty', None),
-                execQuantity=getattr(order_request, 'filledQty', None),
-                execPrice=getattr(order_request, 'tradedPrice', None),
-                order_type=getattr(order_request, 'type', None),
+                execQuantity=response.get('filledQty', None),
+                execPrice=response.get('tradedPrice', 0.0),
+                order_type=getattr(order_request, 'order_type', None),
                 product_type=getattr(order_request, 'product_type', None),
-                strategy_id=strategy_id,
-                signal_id=signal_id
+                # strategy_id=strategy_id,
+                # signal_id=signal_id
             )
-        else:
-            order_id = response.get("id")
-            status = OrderStatus.AWAITING_ENTRY if response.get("s") == "ok" else OrderStatus.FAILED
-            # Always extract the error message from the response if present
-            message = response.get("message", "")
-            order_messages = {order_id: message} if order_id else {}
-            if status == OrderStatus.FAILED:
-                # If no order_id, or if message exists, put it under 'error' key for clarity
-                if message:
-                    order_messages = {"error": message}
-                elif not order_messages:
-                    order_messages = {"error": "Fyers broker returned error with no message"}
+        except Exception as e:
+            import logging
+            logging.error(f"OrderResponse.from_fyers error: {e}")
             return cls(
-                status=status,
-                order_ids=[order_id] if order_id else [],
-                order_messages=order_messages,
+                status=OrderStatus.FAILED,
+                order_id="",
+                order_message=f"OrderResponse.from_fyers error: {e}",
                 broker="fyers",
                 raw_response=response,
                 symbol=getattr(order_request, 'symbol', None),
@@ -265,27 +260,46 @@ class OrderResponse(BaseModel):
                 execPrice=getattr(order_request, 'tradedPrice', None),
                 order_type=getattr(order_request, 'order_type', None),
                 product_type=getattr(order_request, 'product_type', None),
-                strategy_id=strategy_id,
-                signal_id=signal_id
+                # strategy_id=strategy_id,
             )
 
     @classmethod
     def from_zerodha(cls, response: dict, order_request=None, strategy_id=None, signal_id=None) -> "OrderResponse":
-        order_id = response.get("order_id")
-        status = OrderStatus.AWAITING_ENTRY if response.get("status") == "TRIGGER PENDING" else response.get("status")  
-        return cls(
-            status=status,
-            order_ids=[order_id] if order_id else [],
-            order_messages={order_id: "Order placed"} if order_id else {},
-            broker="zerodha",
-            raw_response=response,
-            symbol=getattr(order_request, 'symbol', None),
-            side=getattr(order_request, 'side', None),
-            quantity=getattr(order_request, 'quantity', None),
-            execQuantity=getattr(order_request, 'filled_quantity', None),
-            execPrice=getattr(order_request, 'average_price', None),
-            order_type=getattr(order_request, 'order_type', None),
-            product_type=getattr(order_request, 'product_type', None),
-            strategy_id=strategy_id,
-            signal_id=signal_id
-        )
+        try:
+            order_id = response.get("order_id")
+            status = OrderStatus.AWAITING_ENTRY if response.get("status") == "TRIGGER PENDING" else response.get("status")  
+            message = "Order placed" if order_id else "Zerodha broker returned error with no message"
+            return cls(
+                status=status,
+                order_id=str(order_id) if order_id else "",
+                order_message=message,
+                broker="zerodha",
+                raw_response=response,
+                symbol=getattr(order_request, 'symbol', None),
+                side=getattr(order_request, 'side', None),
+                quantity=getattr(order_request, 'quantity', None),
+                execQuantity=response.get('filled_quantity', None),
+                execPrice=response.get('average_price', None),
+                order_type=response.get('order_type', None),
+                product_type=response.get('product_type', None),
+                # strategy_id=strategy_id,
+                # signal_id=signal_id
+            )
+        except Exception as e:
+            import logging
+            logging.error(f"OrderResponse.from_zerodha error: {e}")
+            return cls(
+                status=OrderStatus.FAILED,
+                order_id="",
+                order_message=f"OrderResponse.from_zerodha error: {e}",
+                broker="zerodha",
+                raw_response=response,
+                symbol=getattr(order_request, 'symbol', None),
+                side=getattr(order_request, 'side', None),
+                quantity=getattr(order_request, 'quantity', None),
+                execQuantity=None,
+                execPrice=None,
+                order_type=None,
+                product_type=None,
+                # strategy_id=strategy_id,
+            )
