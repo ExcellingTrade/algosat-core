@@ -628,3 +628,17 @@ class BrokerManager:
                 symbol_info = await self.get_symbol_info(broker_name, symbol, instrument_type='NFO')
                 normalized_symbol = symbol_info.get('symbol', symbol)
         return await broker.exit_order(broker_order_id, symbol=normalized_symbol, product_type=product_type, exit_reason=exit_reason)
+
+    async def cancel_order(self, broker_id, broker_order_id, symbol=None, product_type=None, variety=None, cancel_reason=None, **kwargs):
+        """
+        Cancel an order for the given broker. Routes to the correct broker's cancel_order implementation.
+        For Fyers: pass broker_order_id (with -BO-1 if needed).
+        For Zerodha: pass variety and order_id.
+        """
+
+        broker = await self.get_broker_by_id(broker_id)
+        if broker is None:
+            logger.error(f"BrokerManager: Could not find broker for id: {broker_id}")
+            return None
+        # Route to broker's cancel_order
+        return await broker.cancel_order(broker_order_id, symbol=symbol, product_type=product_type, variety=variety, cancel_reason=cancel_reason, **kwargs)

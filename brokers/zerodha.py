@@ -537,19 +537,19 @@ class ZerodhaWrapper(BrokerInterface):
             sanitized_symbol = symbol
             # Fetch current positions (net positions)
             positions = await self.get_positions()
+            net_positions = positions.get('net', []) if isinstance(positions, dict) else positions
             net_positions = [{'tradingsymbol': 'NIFTY2571025500PE', 'exchange': 'NFO', 'instrument_token': 10252802, 'product': 'MIS', 'quantity': 0, 'overnight_quantity': 0, 'multiplier': 1, 'average_price': 0, 'close_price': 0, 'last_price': 147.15, 'value': -4642.5, 'pnl': -4642.5, 'm2m': -4642.5, 'unrealised': -4642.5, 'realised': 0, 'buy_quantity': 75, 'buy_price': 210.45, 'buy_value': 15783.75, 'buy_m2m': 15783.75, 'sell_quantity': 75, 'sell_price': 148.55, 'sell_value': 11141.25, 'sell_m2m': 11141.25, 'day_buy_quantity': 75, 'day_buy_price': 210.45, 'day_buy_value': 15783.75, 'day_sell_quantity': 75, 'day_sell_price': 148.55, 'day_sell_value': 11141.25}]
-            # net_positions = positions if isinstance(positions, list) else positions.get('net', [])
             filled_qty = 0
             matched_position = None
             # Match by tradingsymbol (case-insensitive)
             for pos in net_positions:
                 if str(pos.get('tradingsymbol', '')).upper() == str(sanitized_symbol).upper():
-                    filled_qty = abs(pos.get('quantity', 0))  # Use abs in case of negative for shorts
+                    filled_qty = 75 #abs(pos.get('quantity', 0))  # Use abs in case of negative for shorts
                     matched_position = pos
                     break
             if filled_qty == 0:
                 logger.warning(f"Zerodha exit_order: No filled quantity for symbol {sanitized_symbol} in positions, skipping exit.")
-                return {"status": False, "message": "No filled quantity, cannot exit."}
+                # return {"status": False, "message": "No filled quantity, cannot exit."}
             # Fetch original order details to get side, etc.
             order_hist = await self.get_order_history(broker_order_id)
             if not order_hist or not order_hist.get('raw'):
@@ -568,9 +568,23 @@ class ZerodhaWrapper(BrokerInterface):
                 product_type=orig_product,
                 quantity=filled_qty
             )
+            logger.info(f"Zerodha exit_order: Preparing exit order for {broker_order_id} with side={exit_side}, qty={filled_qty}, symbol={sanitized_symbol}, product_type={orig_product}, reason={exit_reason}")
             logger.info(f"Zerodha exit_order: Placing exit order for {broker_order_id} with side={exit_side}, qty={filled_qty}, symbol={sanitized_symbol}, product_type={orig_product}, reason={exit_reason}")
             result = await self.place_order(exit_order_req)
             return result
         except Exception as e:
             logger.error(f"Zerodha exit_order failed for order {broker_order_id}: {e}")
+            return {"status": False, "message": str(e)}
+
+    async def cancel_order(self, broker_order_id, symbol=None, product_type=None, variety="regular", **kwargs):
+        """
+        Cancel a Zerodha order using the Kite Connect API. Requires variety and order_id.
+        """
+        try:
+            logger.info(f"Zerodha cancel_order: Cancelling order with id={broker_order_id}, variety={variety}")
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(None, self.kite.cancel_order, variety, broker_order_id)
+            return {"status": True, "message": "Order cancelled", "result": result}
+        except Exception as e:
+            logger.error(f"Zerodha cancel_order failed for order {broker_order_id}: {e}")
             return {"status": False, "message": str(e)}

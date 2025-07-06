@@ -611,7 +611,7 @@ class FyersWrapper(BrokerInterface):
 
     async def get_history(self, symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
         """
-        Fetch historical OHLC data dynamically based on "is_async" flag.
+        Fetch historical OHLC data dynamically based on the "is_async" flag.
 
         :param symbol: Trading symbol.
         :param from_date: Start timestamp (epoch seconds or date).
@@ -1028,6 +1028,21 @@ class FyersWrapper(BrokerInterface):
             return await self.exit_positions_async(data)
         else:
             return FyersWrapper.exit_positions_sync(data)
+
+    async def cancel_order(self, broker_order_id, symbol=None, product_type=None, **kwargs):
+        """
+        Cancel a Fyers order using the Fyers API. The order ID must be in the format f"{order_id}-BO-1".
+        """
+        cancel_id = f"{broker_order_id}"
+        data = {"id": cancel_id}
+        try:
+            logger.info(f"Fyers cancel_order: Cancelling order with id={cancel_id}")
+            response = await self.fyers.cancel_order(data)
+            logger.info(f"Fyers cancel_order response: {response}")
+            return response
+        except Exception as e:
+            logger.error(f"Fyers cancel_order failed for order {broker_order_id}: {e}")
+            return {"status": False, "message": str(e)}
 
     async def get_positions_async(self):
         """

@@ -101,3 +101,10 @@ class BrokerInterface(ABC):
         Return summary: total_balance, available, utilized (standardized output).
         """
         ...
+
+    @abstractmethod
+    async def cancel_order(self, *args, **kwargs):
+        """
+        Cancel an order. Arguments depend on broker implementation.
+        """
+        pass

@@ -384,3 +384,6 @@ class AngelWrapper(BrokerInterface):
         Fetch account balance (raw API response). Not implemented for Angel, returns empty dict.
         """
         return {}
+    
+    async def cancel_order(self, *args, **kwargs):
+        return {}
