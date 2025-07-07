@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Optional
 # algosat/core/db.py
 
 try:
@@ -1183,20 +1184,68 @@ async def get_strategy_trade_stats(session: AsyncSession, strategy_id: int):
         'symbol_stats': symbol_stats
     }
 
-async def get_trades_for_symbol(session: AsyncSession, strategy_symbol_id: int, limit: int = 100):
+async def get_trades_for_symbol(session: AsyncSession, strategy_symbol_id: int, limit: int = 100, offset: int = 0, date_filter: Optional[str] = None):
     """
-    Get detailed trade history for a specific strategy symbol.
+    Get detailed trade history for a specific strategy symbol with broker execution details.
     """
-    from algosat.core.dbschema import orders
+    from algosat.core.dbschema import orders, broker_executions, broker_credentials
+    from datetime import datetime
     
+    # Build the base query
     stmt = select(orders).where(
         orders.c.strategy_symbol_id == strategy_symbol_id
-    ).order_by(
+    )
+    
+    # Apply date filter if provided
+    if date_filter:
+        try:
+            filter_date = datetime.strptime(date_filter, "%Y-%m-%d").date()
+            stmt = stmt.where(orders.c.created_at >= filter_date)
+        except ValueError:
+            # Invalid date format, ignore filter
+            pass
+    
+    stmt = stmt.order_by(
         orders.c.created_at.desc()
-    ).limit(limit)
+    ).offset(offset).limit(limit)
     
     result = await session.execute(stmt)
-    return [dict(row._mapping) for row in result.fetchall()]
+    orders_data = [dict(row._mapping) for row in result.fetchall()]
+    
+    # For each order, get broker execution details
+    for order in orders_data:
+        order_id = order['id']
+        
+        # Get broker executions for this order
+        executions_stmt = select(
+            broker_executions.c.id,
+            broker_executions.c.broker_order_id,
+            broker_executions.c.side,
+            broker_executions.c.execution_price,
+            broker_executions.c.executed_quantity,
+            broker_executions.c.execution_time,
+            broker_executions.c.order_type,
+            broker_executions.c.product_type,
+            broker_executions.c.status,
+            broker_credentials.c.broker_name
+        ).select_from(
+            broker_executions.join(
+                broker_credentials,
+                broker_executions.c.broker_id == broker_credentials.c.id
+            )
+        ).where(
+            broker_executions.c.parent_order_id == order_id
+        ).order_by(
+            broker_executions.c.execution_time.desc()
+        )
+        
+        executions_result = await session.execute(executions_stmt)
+        executions_data = [dict(row._mapping) for row in executions_result.fetchall()]
+        
+        # Add broker execution details to the order
+        order['broker_executions'] = executions_data
+    
+    return orders_data
 
 async def insert_broker_balance_summary(session, broker_id: int, summary: dict):
     """

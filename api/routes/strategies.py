@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, HTTPException
-from typing import Dict, Any, List
+from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Dict, Any, List, Optional
 
 from algosat.core.db import (
     get_all_strategies,
@@ -445,21 +445,33 @@ async def get_symbol_trade_stats(symbol_id: int, db=Depends(get_db)):
         raise
 
 @router.get("/symbols/{symbol_id}/trades")
-async def get_symbol_trades(symbol_id: int, limit: int = 100, db=Depends(get_db)):
+async def get_symbol_trades(
+    symbol_id: int, 
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    date: Optional[str] = Query(None, description="Date filter in YYYY-MM-DD format"),
+    db=Depends(get_db)
+):
     """
-    Get detailed trade history for a specific strategy symbol.
+    Get detailed trade history for a specific strategy symbol with broker execution details.
     """
     try:
         validated_symbol_id = input_validator.validate_integer(symbol_id, "symbol_id", min_value=1)
         validated_limit = input_validator.validate_integer(limit, "limit", min_value=1, max_value=1000)
+        validated_offset = input_validator.validate_integer(offset, "offset", min_value=0)
+        
+        # Validate date if provided
+        parsed_date = None
+        if date:
+            parsed_date = input_validator.validate_date(date)
         
         # Check if symbol exists
         symbol = await get_strategy_symbol_by_id(db, validated_symbol_id)
         if not symbol:
             raise HTTPException(status_code=404, detail="Strategy symbol not found")
         
-        # Get trades
-        trades = await get_trades_for_symbol(db, validated_symbol_id, validated_limit)
+        # Get trades with broker execution details
+        trades = await get_trades_for_symbol(db, validated_symbol_id, validated_limit, validated_offset, parsed_date)
         
         return {
             "symbol_id": validated_symbol_id,
