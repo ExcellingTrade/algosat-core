@@ -94,6 +94,12 @@ class EnhancedInputValidator:
             raise InvalidInputError("Username can only contain letters, numbers, and underscores")
         return username
     
+    def validate_date(self, date_str: str) -> datetime.date:
+        try:
+            return datetime.strptime(date_str, "%Y-%m-%d").date()
+        except Exception:
+            raise ValueError("Invalid date format, expected YYYY-MM-DD")
+    
     def validate_password(self, password: str) -> str:
         """Validate password strength."""
         if not isinstance(password, str):

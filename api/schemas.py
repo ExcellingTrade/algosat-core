@@ -204,10 +204,12 @@ class OrderListResponse(BaseModel):
     entry_price: Optional[float] = None
     lot_qty: Optional[int] = None
     qty: Optional[int] = None
+    executed_quantity: Optional[int] = None  # <-- Add this field
     signal_time: Optional[datetime] = None
     entry_time: Optional[datetime] = None
     created_at: Optional[datetime] = None
     traded_price: Optional[float] = Field(default=0.0, description="Actual traded price")
+    broker_executions: Optional[List[Dict[str, Any]]] = Field(default=[], description="List of broker executions for this order")
 
     @field_serializer("signal_time", "entry_time", "created_at")
     def serialize_dt(self, v):
@@ -239,6 +241,7 @@ class OrderDetailResponse(BaseModel):
     lot_qty: Optional[int] = None
     side: Optional[str] = None
     qty: Optional[int] = None
+    executed_quantity: Optional[int] = None  # <-- Add this field
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     traded_price: Optional[float] = Field(default=0.0, description="Actual traded price")
