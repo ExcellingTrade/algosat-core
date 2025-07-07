@@ -188,23 +188,23 @@ class ZerodhaWrapper(BrokerInterface):
         logger.info(f"Placing Zerodha order with payload: {kite_payload}")
         try:
             loop = asyncio.get_event_loop()
-            # order_id = await loop.run_in_executor(
-            #     None,
-            #     lambda: self.kite.place_order(
-            #         tradingsymbol=kite_payload["tradingsymbol"],
-            #         exchange=kite_payload["exchange"],
-            #         transaction_type=kite_payload["transaction_type"],
-            #         quantity=kite_payload["quantity"],
-            #         order_type=kite_payload["order_type"],
-            #         price=  kite_payload.get("price"),
-            #         trigger_price= kite_payload.get("trigger_price"),
-            #         product=kite_payload["product"],
-            #         variety=kite_payload.get("variety", "regular"),
-            #         validity=kite_payload.get("validity", "DAY"),
-            #         tag=kite_payload.get("tag")
-            #     )
-            # )
-            order_id = "250704600366295"  # Placeholder for actual order ID, ensure string type
+            order_id = await loop.run_in_executor(
+                None,
+                lambda: self.kite.place_order(
+                    tradingsymbol=kite_payload["tradingsymbol"],
+                    exchange=kite_payload["exchange"],
+                    transaction_type=kite_payload["transaction_type"],
+                    quantity=kite_payload["quantity"],
+                    order_type=kite_payload["order_type"],
+                    price=  kite_payload.get("price"),
+                    trigger_price= kite_payload.get("trigger_price"),
+                    product=kite_payload["product"],
+                    variety=kite_payload.get("variety", "regular"),
+                    validity=kite_payload.get("validity", "DAY"),
+                    tag=kite_payload.get("tag")
+                )
+            )
+            # order_id = "250704600366295"  # Placeholder for actual order ID, ensure string type
             logger.info(f"Zerodha order placed, order_id: {order_id}")
             # Return only order_id and order_message, let monitor handle status/fills
             return OrderResponse(
@@ -429,7 +429,7 @@ class ZerodhaWrapper(BrokerInterface):
         loop = asyncio.get_event_loop()
         try:
             orders = await loop.run_in_executor(None, self.kite.orders)
-            orders = [{"account_id":"HU6119","placed_by":"HU6119","order_id":"250704600366295","exchange_order_id":"1600000045390177","parent_order_id":None,"status":"COMPLETE","status_message":None,"status_message_raw":None,"order_timestamp":"2025-07-04 11:41:00","exchange_update_timestamp":"2025-07-04 11:41:00","exchange_timestamp":"2025-07-04 11:41:00","variety":"regular","modified":False,"exchange":"NFO","tradingsymbol":"NIFTY2571025500PE","instrument_token":10252802,"order_type":"LIMIT","transaction_type":"BUY","validity":"DAY","validity_ttl":0,"product":"MIS","quantity":75,"disclosed_quantity":0,"price":210.5,"trigger_price":210.3,"average_price":210.45,"filled_quantity":75,"pending_quantity":0,"cancelled_quantity":0,"market_protection":0,"meta":{},"tag":"AlgoOrder","tags":["AlgoOrder"],"guid":"149993X60EiJhmOXkjB"}]
+            # orders = [{"account_id":"HU6119","placed_by":"HU6119","order_id":"250704600366295","exchange_order_id":"1600000045390177","parent_order_id":None,"status":"COMPLETE","status_message":None,"status_message_raw":None,"order_timestamp":"2025-07-04 11:41:00","exchange_update_timestamp":"2025-07-04 11:41:00","exchange_timestamp":"2025-07-04 11:41:00","variety":"regular","modified":False,"exchange":"NFO","tradingsymbol":"NIFTY2571025500PE","instrument_token":10252802,"order_type":"LIMIT","transaction_type":"BUY","validity":"DAY","validity_ttl":0,"product":"MIS","quantity":75,"disclosed_quantity":0,"price":210.5,"trigger_price":210.3,"average_price":210.45,"filled_quantity":75,"pending_quantity":0,"cancelled_quantity":0,"market_protection":0,"meta":{},"tag":"AlgoOrder","tags":["AlgoOrder"],"guid":"149993X60EiJhmOXkjB"}]
             if isinstance(orders, list):
                 return orders
                 

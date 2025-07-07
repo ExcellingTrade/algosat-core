@@ -312,15 +312,15 @@ class DataManager:
                     result = self.broker.get_history(symbol, from_dt, to_dt, ohlc_interval, ins_type)
                     history = await result if inspect.isawaitable(result) else result
                     if not validate_broker_response(history, expected_type="history", symbol=symbol):
-                        logger.error(f"Invalid history data received for '{symbol}' (after all retries)")
-                        raise RuntimeError(f"Invalid history data received for '{symbol}'")
+                        logger.debug(f"Invalid history data received for '{symbol}' (after all retries). Response: {history}")
+                        # raise RuntimeError(f"Invalid history data received for '{symbol}'")
                     if cache:
                         self.cache.set(cache_key, history, ttl=ttl)
                     return history
             return await _async_retry(_fetch)
         except Exception as e:
-            logger.error(f"Error in get_history for symbol={symbol}: {e}", exc_info=True)
-            raise
+            logger.debug(f"Error in get_history for symbol={symbol}: {e}", exc_info=True)
+            # raise
 
     async def get_ltp(self, symbol: str, ttl: int = 5) -> Any:
         """

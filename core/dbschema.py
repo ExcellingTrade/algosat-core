@@ -164,6 +164,7 @@ orders = Table(
     Column("lot_qty", Integer, nullable=True),
     Column("side", String, nullable=True),
     Column("qty", Integer, nullable=True),
+    Column("executed_quantity", Integer, nullable=False), 
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 )
@@ -196,9 +197,9 @@ broker_executions = Table(
     
     # Deprecated fields - keep for migration compatibility
     Column("broker_name", String, nullable=True),  # Deprecated: use broker_id
-    Column("broker_order_ids", JSONB, nullable=True),  # Deprecated: now single broker_order_id
-    Column("order_status_map", JSONB, nullable=True),  # Deprecated: status per execution
-    Column("raw_response", JSONB, nullable=True),  # Deprecated: use raw_execution_data
+    # Column("broker_order_ids", JSONB, nullable=True),  # Deprecated: now single broker_order_id
+    # Column("order_status_map", JSONB, nullable=True),  # Deprecated: status per execution
+    # Column("raw_response", JSONB, nullable=True),  # Deprecated: use raw_execution_data
 
     Column("quantity", Integer, nullable=True),  # NEW: quantity column
 

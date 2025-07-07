@@ -667,12 +667,12 @@ class FyersWrapper(BrokerInterface):
             else:
                 response = self.fyers.place_order(fyers_payload)
             # Example response for reference:
-            response = {
-              "s": "ok",
-              "code": 1101,
-              "message": "Order submitted successfully. Your Order Ref. No.25070400129405",
-              "id": "25070400129405"
-            }
+            # response = {
+            #   "s": "ok",
+            #   "code": 1101,
+            #   "message": "Order submitted successfully. Your Order Ref. No.25070400129405",
+            #   "id": "25070400129405"
+            # }
             logger.info(f"Fyers order placed: {response}")
             order_id = None
             order_message = None
@@ -929,9 +929,9 @@ class FyersWrapper(BrokerInterface):
                 response = await loop.run_in_executor(None, self.fyers.orderbook, {"id": order_id})
             if asyncio.iscoroutine(response):
                 response = await response
-                response = {
-                "code":200,"message":"","s":"ok","orderBook":[{"clientId":"XR01921","exchange":10,"fyToken":"101125071040050","id":"25070400129405-BO-1","offlineOrder":False,"source":"API","status":5,"type":4,"pan":"CDPPS6526M","limitPrice":208.25,"productType":"BO","qty":75,"disclosedQty":0,"remainingQuantity":0,"segment":11,"symbol":"NSE:NIFTY2571025500PE","description":"25 Jul 10 25500 PE","ex_sym":"NIFTY","orderDateTime":"04-Jul-2025 11:01:12","side":1,"orderValidity":"DAY","stopPrice":208.05,"tradedPrice":0,"filledQty":0,"exchOrdId":None,"message":"RED:Margin Shortfall:INR 305.36 Available:INR ...","ch":-39.7,"chp":-21.24699,"lp":147.15,"orderNumStatus":"25070400129405-BO-1:5","slNo":1,"orderTag":"2:Untagged"}]
-                    }
+                # response = {
+                # "code":200,"message":"","s":"ok","orderBook":[{"clientId":"XR01921","exchange":10,"fyToken":"101125071040050","id":"25070400129405-BO-1","offlineOrder":False,"source":"API","status":5,"type":4,"pan":"CDPPS6526M","limitPrice":208.25,"productType":"BO","qty":75,"disclosedQty":0,"remainingQuantity":0,"segment":11,"symbol":"NSE:NIFTY2571025500PE","description":"25 Jul 10 25500 PE","ex_sym":"NIFTY","orderDateTime":"04-Jul-2025 11:01:12","side":1,"orderValidity":"DAY","stopPrice":208.05,"tradedPrice":0,"filledQty":0,"exchOrdId":None,"message":"RED:Margin Shortfall:INR 305.36 Available:INR ...","ch":-39.7,"chp":-21.24699,"lp":147.15,"orderNumStatus":"25070400129405-BO-1:5","slNo":1,"orderTag":"2:Untagged"}]
+                #     }
             if isinstance(response, dict) and response.get("code") == 200 and response.get("s") == "ok":
                 return response.get('orderBook', [])
             return []

@@ -244,17 +244,13 @@ async def update_strategy_config_for_strategy(strategy_id: int, config_id: int, 
     if update.instrument is not None:
         update_data["instrument"] = update.instrument
     
-    # Handle trade configuration updates
+    # Handle trade configuration updates (replace fully)
     if update.trade is not None:
-        current_trade = row.get("trade", {})
-        new_trade = {**current_trade, **update.trade}
-        update_data["trade"] = new_trade
+        update_data["trade"] = update.trade  # Full replace
     
-    # Handle indicators configuration updates
+    # Handle indicators configuration updates (replace fully)
     if update.indicators is not None:
-        current_indicators = row.get("indicators", {})
-        new_indicators = {**current_indicators, **update.indicators}
-        update_data["indicators"] = new_indicators
+        update_data["indicators"] = update.indicators  # Full replace
     
     updated = await update_strategy_config(db, validated_config_id, update_data)
     if hasattr(updated, "_mapping"):

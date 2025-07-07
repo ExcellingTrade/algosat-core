@@ -520,7 +520,7 @@ class OrderManager:
                             broker_order_id,
                             symbol=symbol,
                             product_type=product_type,
-                            cancel_reason=f"Exit requested for PARTIALLY_FILLED order"
+                            exit_reason=f"Exit requested for PARTIALLY_FILLED order"
                         )
                         await self._insert_exit_broker_execution(
                             session,
@@ -854,6 +854,7 @@ class OrderManager:
                         "order_id": o.get("id"),
                         "status": status,
                         "symbol": o.get("symbol"),
+                        "qty": o.get("qty", 0),
                         "executed_quantity": o.get("filledQty", 0),
                         "exec_price": o.get("tradedPrice", 0),
                         "product_type": o.get("productType"),
@@ -870,6 +871,7 @@ class OrderManager:
                         "order_id": o.get("order_id"),
                         "status": status,
                         "symbol": o.get("tradingsymbol"),
+                        "quantity": o.get("quantity", 0),
                         "executed_quantity": o.get("filled_quantity", 0),
                         "exec_price": o.get("average_price", 0),
                         "product_type": o.get("product"),
@@ -991,21 +993,31 @@ class OrderManager:
             await session.commit()
         logger.info(f"[OrderManager] Batch broker_exec status update: success={success_count}, failed={fail_count}")
 
-    async def update_broker_exec_status_in_db(self, broker_exec_id, status, executed_quantity=None, execution_price=None, order_type=None, product_type=None):
+    async def update_broker_exec_status_in_db(self, broker_exec_id, status, executed_quantity=None, quantity=None, execution_price=None, order_type=None, product_type=None, execution_time=None, symbol=None):
         """
         Update the status and optionally execution details of a broker execution in the broker_executions table by broker_exec_id.
+        Handles additional fields: execution_time, symbol.
         """
         from algosat.core.db import AsyncSessionLocal, update_rows_in_table
         from algosat.core.dbschema import broker_executions
         update_fields = {"status": status.value if hasattr(status, 'value') else str(status)}
         if executed_quantity is not None:
             update_fields["executed_quantity"] = executed_quantity
+            
+        if quantity is not None:
+            update_fields["quantity"] = quantity
+
         if execution_price is not None:
             update_fields["execution_price"] = execution_price
         if order_type is not None:
             update_fields["order_type"] = order_type
         if product_type is not None:
             update_fields["product_type"] = product_type
+        if execution_time is not None:
+            update_fields["execution_time"] = execution_time
+        if symbol is not None:
+            update_fields["symbol"] = symbol
+        logger.info(f"Updating broker execution {broker_exec_id} with fields: {update_fields}")
         async with AsyncSessionLocal() as session:
             await update_rows_in_table(
                 target_table=broker_executions,

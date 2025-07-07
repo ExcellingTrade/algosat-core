@@ -169,18 +169,19 @@ class OrderMonitor:
                     broker_status = broker_status.split(".")[-1]
                 elif broker_status and isinstance(broker_status, OrderStatus):
                     broker_status = broker_status.value
-            
-                
+
                 all_statuses.append(broker_status)
                 status_set.add(broker_status)
                 last_status = last_broker_statuses.get(broker_exec_id)
                 # --- Enhancement: Also check executed_quantity for PARTIALLY_FILLED updates ---
                 # Get executed_quantity from broker (cache or bro)
                 broker_executed_quantity = None
+                broker_placed_quantity = None
                 if cache_order:
                     broker_executed_quantity = cache_order.get("executed_quantity") or cache_order.get("filled_quantity") or cache_order.get("filledQty")
-                if broker_executed_quantity is None:
-                    broker_executed_quantity = getattr(bro, "executed_quantity", None) or getattr(bro, "filled_quantity", None) or getattr(bro, "filledQty", None)
+                    broker_placed_quantity = cache_order.get("quantity") or cache_order.get("qty") or cache_order.get("filledQty")
+                # if broker_executed_quantity is None:
+                    # broker_executed_quantity = getattr(bro, "executed_quantity", None) or getattr(bro, "filled_quantity", None) or getattr(bro, "filledQty", None)
                 # Get DB executed_quantity (from bro)
                 db_executed_quantity = getattr(bro, "executed_quantity", None) or getattr(bro, "filled_quantity", None) or getattr(bro, "filledQty", None)
                 # Only update if status changed, or for PARTIALLY_FILLED if executed_quantity increased
@@ -201,32 +202,79 @@ class OrderMonitor:
                         (broker_status in ("FILLED", "PARTIAL", "PARTIALLY_FILLED"))
                     )
                     if transition_to_filled:
+                        from datetime import datetime, timezone
                         executed_quantity = broker_executed_quantity
-                        execution_price = None
-                        order_type = None
-                        product_type_val = None
+                        quantity = broker_placed_quantity
+                        symbol_val = None
                         # Prefer cache_order for execution details, fallback to bro
                         if cache_order:
                             execution_price = cache_order.get("exec_price") or cache_order.get("execution_price") or cache_order.get("average_price") or cache_order.get("tradedPrice")
                             order_type = cache_order.get("order_type")
                             product_type_val = cache_order.get("product_type")
+                            # Get quantity from cache_order (qty or quantity)
+                            quantity = cache_order.get("qty") or cache_order.get("quantity")
+                            # Get symbol from cache_order (symbol or tradingsymbol)
+                            symbol_val = cache_order.get("symbol") or cache_order.get("tradingsymbol")
                         if execution_price is None:
                             execution_price = getattr(bro, "exec_price", None) or getattr(bro, "execution_price", None) or getattr(bro, "average_price", None) or getattr(bro, "tradedPrice", None)
                         if order_type is None:
                             order_type = getattr(bro, "order_type", None)
                         if product_type_val is None:
                             product_type_val = getattr(bro, "product_type", None)
+                        # if quantity is None:
+                        #     quantity = getattr(bro, "qty", None) or getattr(bro, "quantity", None)
+                        if symbol_val is None:
+                            symbol_val = getattr(bro, "symbol", None) or getattr(bro, "tradingsymbol", None)
+                        execution_time = datetime.now(timezone.utc)
                         await self.order_manager.update_broker_exec_status_in_db(
                             broker_exec_id,
                             broker_status,
                             executed_quantity=executed_quantity,
+                            quantity = quantity,
                             execution_price=execution_price,
                             order_type=order_type,
-                            product_type=product_type_val
+                            product_type=product_type_val,
+                            execution_time=execution_time,
+                            symbol=symbol_val
                         )
                     else:
                         await self.order_manager.update_broker_exec_status_in_db(broker_exec_id, broker_status)
                     last_broker_statuses[broker_exec_id] = broker_status
+
+            # --- Aggregate and update Orders table with sum of broker_execs quantities ---
+            try:
+                from algosat.core.db import AsyncSessionLocal, update_rows_in_table
+                from algosat.core.dbschema import orders, broker_executions
+                async with AsyncSessionLocal() as session:
+                    # Fetch all broker_executions for this order (fresh from DB for latest values)
+                    result = await session.execute(
+                        broker_executions.select().where(broker_executions.c.parent_order_id == self.order_id)
+                    )
+                    broker_exec_rows = result.fetchall()
+                    total_quantity = 0
+                    total_executed_quantity = 0
+                    for row in broker_exec_rows:
+                        be = dict(row._mapping)
+                        q = be.get('quantity') or 0
+                        eq = be.get('executed_quantity') or 0
+                        try:
+                            q = float(q) if q is not None else 0
+                        except Exception:
+                            q = 0
+                        try:
+                            eq = float(eq) if eq is not None else 0
+                        except Exception:
+                            eq = 0
+                        total_quantity += q
+                        total_executed_quantity += eq
+                    await update_rows_in_table(
+                        target_table=orders,
+                        condition=orders.c.id == self.order_id,
+                        new_values={"qty": total_quantity, "executed_quantity": total_executed_quantity}
+                    )
+                    logger.info(f"OrderMonitor: Updated Orders table for order_id={self.order_id} with qty={total_quantity}, executed_quantity={total_executed_quantity}")
+            except Exception as e:
+                logger.error(f"OrderMonitor: Error updating aggregated quantity/executed_quantity for order_id={self.order_id}: {e}")
             logger.info(f"OrderMonitor: Order {self.order_id} ENTRY broker statuses (live): {all_statuses}")
             # --- Decision logic for main order status ---
             main_status = None
