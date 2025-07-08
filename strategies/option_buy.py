@@ -126,7 +126,7 @@ class OptionBuyStrategy(StrategyBase):
         # 1. Wait for first candle completion
         # await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
         # 2. Calculate first candle data using the correct trade day
-        trade_day = get_trade_day(get_ist_datetime())  #- timedelta(days=5)
+        trade_day = get_trade_day(get_ist_datetime())  - timedelta(days=4)
         # 3. Fetch option chain and identify strikes
         cache = load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
@@ -203,7 +203,7 @@ class OptionBuyStrategy(StrategyBase):
             return None
         trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
-        trade_day = get_trade_day(get_ist_datetime()) # - timedelta(days=5)
+        trade_day = get_trade_day(get_ist_datetime())  - timedelta(days=4)
         # 1. Fetch history for all strikes
         history_data = await self.fetch_history_data(
             self.dp, self._strikes, trade_day, trade_config
@@ -250,7 +250,7 @@ class OptionBuyStrategy(StrategyBase):
             start_date = localize_to_ist(datetime.combine(trade_day, time(9, 15)))
             current_end_date = localize_to_ist(datetime.combine(current_date, get_ist_datetime().time()))
             end_date = calculate_end_date(current_end_date, trade_config['interval_minutes'])
-            # end_date = end_date.replace(hour=9, minute=45, second=0, microsecond=0)
+            end_date = end_date.replace(hour=9, minute=45, second=0, microsecond=0)
             logger.debug(f"Fetching history for strike symbols {', '.join(str(strike) for strike in strike_symbols)}...")
             logger.debug(f"Start date: {start_date}, End date: {end_date}, Interval: {trade_config['interval_minutes']} minutes")
             history_data = await fetch_strikes_history(

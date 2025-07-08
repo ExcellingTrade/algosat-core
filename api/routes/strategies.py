@@ -230,10 +230,10 @@ async def update_strategy_config_for_strategy(strategy_id: int, config_id: int, 
         row = dict(row._mapping)
     if row.get("strategy_id") != validated_strategy_id:
         raise HTTPException(status_code=404, detail="Config does not belong to this strategy")
-    
+
     # Prepare update data
     update_data = {}
-    
+
     # Handle basic field updates
     if update.name is not None:
         update_data["name"] = update.name
@@ -243,15 +243,19 @@ async def update_strategy_config_for_strategy(strategy_id: int, config_id: int, 
         update_data["exchange"] = update.exchange
     if update.instrument is not None:
         update_data["instrument"] = update.instrument
-    
+
     # Handle trade configuration updates (replace fully)
     if update.trade is not None:
         update_data["trade"] = update.trade  # Full replace
-    
+
     # Handle indicators configuration updates (replace fully)
     if update.indicators is not None:
         update_data["indicators"] = update.indicators  # Full replace
-    
+
+    # Add updated_at timestamp
+    from algosat.core.time_utils import get_ist_now
+    update_data["updated_at"] = get_ist_now()
+
     updated = await update_strategy_config(db, validated_config_id, update_data)
     if hasattr(updated, "_mapping"):
         updated = dict(updated._mapping)

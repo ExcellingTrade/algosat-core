@@ -1600,7 +1600,7 @@ async def get_orders_pnl_stats(session, symbol: str = None, date: datetime.date 
     Args:
         session: Async SQLAlchemy session
         symbol (str, optional): Filter by strike_symbol (supports partial match)
-        date (datetime.date, optional): Defaults to today's date in UTC
+        date (datetime.date, optional): Defaults to today's date in IST
 
     Returns:
         dict: {
@@ -1611,6 +1611,7 @@ async def get_orders_pnl_stats(session, symbol: str = None, date: datetime.date 
         }
     """
     from algosat.core.dbschema import orders
+    from algosat.core.time_utils import get_ist_today, to_ist
     from sqlalchemy import and_, func
 
     # Prepare filters
@@ -1632,10 +1633,9 @@ async def get_orders_pnl_stats(session, symbol: str = None, date: datetime.date 
     result = await session.execute(stmt)
     rows = result.fetchall()
 
-    # Get today's date (UTC, or adjust to IST if needed)
+    # Get today's date in IST (not UTC) to correctly handle timezone
     if not date:
-        now = datetime.now(timezone.utc)
-        date = now.date()
+        date = get_ist_today()
 
     overall_pnl = 0.0
     overall_trade_count = 0
@@ -1653,10 +1653,13 @@ async def get_orders_pnl_stats(session, symbol: str = None, date: datetime.date 
         overall_pnl += pnl
         overall_trade_count += 1
 
-        # Check if exit_time is today
-        if exit_time and exit_time.date() == date:
-            today_pnl += pnl
-            today_trade_count += 1
+        # Check if exit_time is today (in IST timezone)
+        if exit_time:
+            # Convert exit_time to IST if needed and compare dates
+            exit_time_ist = to_ist(exit_time)
+            if exit_time_ist and exit_time_ist.date() == date:
+                today_pnl += pnl
+                today_trade_count += 1
 
     return {
         "overall_pnl": round(overall_pnl, 2),
@@ -1672,7 +1675,7 @@ async def get_orders_pnl_stats_by_symbol_id(session, strategy_symbol_id: int = N
     Args:
         session: Async SQLAlchemy session
         strategy_symbol_id (int, optional): Filter by strategy_symbol_id
-        date (datetime.date, optional): Defaults to today's date in UTC
+        date (datetime.date, optional): Defaults to today's date in IST
 
     Returns:
         dict: {
@@ -1683,6 +1686,7 @@ async def get_orders_pnl_stats_by_symbol_id(session, strategy_symbol_id: int = N
         }
     """
     from algosat.core.dbschema import orders
+    from algosat.core.time_utils import get_ist_today, to_ist
     from sqlalchemy import and_, func
 
     # Prepare filters
@@ -1704,10 +1708,9 @@ async def get_orders_pnl_stats_by_symbol_id(session, strategy_symbol_id: int = N
     result = await session.execute(stmt)
     rows = result.fetchall()
 
-    # Get today's date (UTC, or adjust to IST if needed)
+    # Get today's date in IST (not UTC) to correctly handle timezone
     if not date:
-        now = datetime.now(timezone.utc)
-        date = now.date()
+        date = get_ist_today()
 
     overall_pnl = 0.0
     overall_trade_count = 0
@@ -1725,10 +1728,13 @@ async def get_orders_pnl_stats_by_symbol_id(session, strategy_symbol_id: int = N
         overall_pnl += pnl
         overall_trade_count += 1
 
-        # Check if exit_time is today
-        # if exit_time and exit_time.date() == date:
-        today_pnl += pnl
-        today_trade_count += 1
+        # Check if exit_time is today (in IST timezone)
+        if exit_time:
+            # Convert exit_time to IST if needed and compare dates
+            exit_time_ist = to_ist(exit_time)
+            if exit_time_ist and exit_time_ist.date() == date:
+                today_pnl += pnl
+                today_trade_count += 1
 
     return {
         "overall_pnl": round(overall_pnl, 2),

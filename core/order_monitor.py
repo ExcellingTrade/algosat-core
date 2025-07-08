@@ -322,7 +322,7 @@ class OrderMonitor:
                 try:
                     if order_row:
                         entry_price = order_row.get('entry_price')
-                        qty = order_row.get('qty')
+                        qty = order_row.get('executed_quantity')
                         side = order_row.get('side')
                         if None not in (entry_price, qty, side):
                             if side == 'BUY':
