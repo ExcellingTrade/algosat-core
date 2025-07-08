@@ -126,6 +126,8 @@ class BrokerBase(BaseModel):
     status: str = "DISCONNECTED"
     last_auth_check: Optional[datetime] = None  # Accept datetime for DB compatibility
     notes: Optional[str] = None
+    max_loss: Optional[float] = 10000.0
+    max_profit: Optional[float] = 50000.0
 
     @field_serializer("last_auth_check")
     def serialize_last_auth_check(self, v):
@@ -137,12 +139,14 @@ class BrokerCreate(BrokerBase):
     pass
 
 class BrokerUpdate(BaseModel):
-    credentials: Optional[Dict[str, Any]]
-    is_enabled: Optional[bool]
-    is_data_provider: Optional[bool]
-    trade_execution_enabled: Optional[bool]
-    status: Optional[str]
+    credentials: Optional[Dict[str, Any]] = None
+    is_enabled: Optional[bool] = None
+    is_data_provider: Optional[bool] = None
+    trade_execution_enabled: Optional[bool] = None
+    status: Optional[str] = None
     last_auth_check: Optional[datetime] = None
+    max_loss: Optional[float] = None
+    max_profit: Optional[float] = None
 
 class BrokerResponse(BrokerBase):
     id: int
@@ -158,6 +162,8 @@ class BrokerListResponse(BaseModel):
     status: str = "DISCONNECTED"
     last_auth_check: Optional[datetime] = None
     notes: Optional[str] = None
+    max_loss: Optional[float] = 10000.0
+    max_profit: Optional[float] = 50000.0
 
     @field_serializer("last_auth_check")
     def serialize_last_auth_check(self, v):

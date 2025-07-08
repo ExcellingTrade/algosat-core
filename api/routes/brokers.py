@@ -146,6 +146,12 @@ async def update_broker_api(
             if not isinstance(value, bool):
                 raise InvalidInputError(f"Invalid type for {key}, expected boolean.")
             validated_update_data[key] = value
+        elif key in ["max_loss", "max_profit"]:
+            if not isinstance(value, (int, float)):
+                raise InvalidInputError(f"Invalid type for {key}, expected number.")
+            if value < 0:
+                raise InvalidInputError(f"{key} must be greater than or equal to 0.")
+            validated_update_data[key] = float(value)
         elif key == "status":
             allowed_statuses = ["CONNECTED", "DISCONNECTED", "AUTHENTICATING", "ERROR"]
             if value not in allowed_statuses:

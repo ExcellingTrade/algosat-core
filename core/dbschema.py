@@ -121,6 +121,18 @@ broker_credentials = Table(
         server_default=text("''")
     ),
     Column(
+        "max_loss",
+        Numeric(15, 2),
+        nullable=False,
+        server_default=text("10000.0")
+    ),
+    Column(
+        "max_profit",
+        Numeric(15, 2),
+        nullable=False,
+        server_default=text("50000.0")
+    ),
+    Column(
         "created_at",
         DateTime(timezone=True),
         nullable=False,
