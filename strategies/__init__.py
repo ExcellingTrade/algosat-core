@@ -1,2 +1,1 @@
 from .swing_highlow_buy import SwingHighLowBuyStrategy
-from .swing_highlow_sell import SwingHighLowSellStrategy

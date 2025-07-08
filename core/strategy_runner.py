@@ -7,6 +7,7 @@ from algosat.core.db import AsyncSessionLocal #, get_strategy_name_by_id
 from algosat.common.logger import get_logger
 from algosat.core.execution_manager import get_execution_manager
 from algosat.strategies.option_buy import OptionBuyStrategy
+from algosat.strategies.swing_highlow_buy import SwingHighLowBuyStrategy
 # from strategies.option_sell import OptionSellStrategy
 # from strategies.swing_highlow import SwingHighLowStrategy
 from algosat.core.data_manager import DataManager
@@ -23,7 +24,7 @@ logger = get_logger("strategy_runner")
 STRATEGY_MAP = {
     "OptionBuy": OptionBuyStrategy,
     # "'OptionSell'": OptionSellStrategy,
-    # "swing_highlow": SwingHighLowStrategy,
+    "SwingHighLow": SwingHighLowBuyStrategy,  # Now from swing_highlow_buy.py
 }
 
 async def run_strategy_config(config_row, data_manager: DataManager, order_manager: OrderManager, order_queue):
