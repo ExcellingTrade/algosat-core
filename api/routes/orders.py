@@ -33,7 +33,7 @@ from algosat.api.schemas import (
     PerStrategyStatsResponse,
     PerStrategyStatsData
 )
-from algosat.api.dependencies import get_db
+from algosat.api.dependencies import get_db, get_order_manager
 from algosat.api.auth_dependencies import get_current_user
 from algosat.core.security import EnhancedInputValidator, InvalidInputError
 from algosat.common.logger import get_logger
@@ -533,3 +533,103 @@ async def get_orders_summary_endpoint(
     except Exception as e:
         logger.error(f"Error in get_orders_summary_endpoint: {e}")
         raise HTTPException(status_code=500, detail="Internal Server Error")
+
+# === Order Exit Endpoints ===
+
+@router.post("/{order_id}/exit")
+async def exit_order(
+    order_id: int,
+    exit_reason: Optional[str] = Query(None, description="Reason for exiting the order"),
+    ltp: Optional[float] = Query(None, description="Last traded price to use as exit price"),
+    order_manager = Depends(get_order_manager),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Exit a single order by order ID.
+    
+    This endpoint will:
+    - For FILLED orders: Place exit orders with brokers
+    - For PARTIALLY_FILLED orders: Place exit orders and cancel remaining quantity
+    - For AWAITING_ENTRY/PENDING orders: Cancel the orders
+    - For REJECTED/FAILED orders: No action needed
+    
+    Args:
+        order_id: The order ID to exit
+        exit_reason: Optional reason for the exit
+        ltp: Optional last traded price to use as exit price
+        
+    Returns:
+        Success message with order ID
+    """
+    try:
+        # Validate order_id
+        if order_id <= 0:
+            raise HTTPException(status_code=400, detail="Invalid order_id")
+        
+        # Validate ltp if provided
+        if ltp is not None and ltp <= 0:
+            raise HTTPException(status_code=400, detail="LTP must be a positive number")
+        
+        # Call OrderManager to exit the order
+        await order_manager.exit_order(
+            parent_order_id=order_id,
+            exit_reason=exit_reason,
+            ltp=ltp
+        )
+        
+        logger.info(f"Order {order_id} exit initiated successfully. Reason: {exit_reason}")
+        
+        return {
+            "success": True,
+            "message": f"Order {order_id} exit initiated successfully",
+            "order_id": order_id,
+            "exit_reason": exit_reason
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in exit_order endpoint for order_id {order_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to exit order: {str(e)}")
+
+@router.post("/exit-all")
+async def exit_all_orders(
+    exit_reason: Optional[str] = Query(None, description="Reason for exiting all orders"),
+    strategy_id: Optional[int] = Query(None, description="Optional strategy ID to filter orders by"),
+    order_manager = Depends(get_order_manager),
+    current_user: Dict[str, Any] = Depends(get_current_user)
+):
+    """
+    Exit all open orders, optionally filtered by strategy.
+    
+    This endpoint will:
+    - Query all open orders from the database (optionally filtered by strategy_id)
+    - For each open order, call the exit_order logic:
+      - FILLED orders: Place exit orders with brokers
+      - PARTIALLY_FILLED orders: Place exit orders and cancel remaining quantity
+      - AWAITING_ENTRY/PENDING orders: Cancel the orders
+      - REJECTED/FAILED orders: No action needed
+    
+    Args:
+        exit_reason: Optional reason for exiting all orders
+        strategy_id: Optional strategy ID to filter orders by. If provided, only orders 
+                    belonging to this strategy will be exited.
+        
+    Returns:
+        Success message with count of orders processed
+    """
+    try:
+        # Call OrderManager to exit all orders
+        await order_manager.exit_all_orders(exit_reason=exit_reason, strategy_id=strategy_id)
+        
+        filter_desc = f" for strategy {strategy_id}" if strategy_id else ""
+        logger.info(f"Exit all orders initiated successfully{filter_desc}. Reason: {exit_reason}")
+        
+        return {
+            "success": True,
+            "message": f"Exit all orders initiated successfully{filter_desc}",
+            "exit_reason": exit_reason,
+            "strategy_id": strategy_id
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in exit_all_orders endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to exit all orders: {str(e)}")

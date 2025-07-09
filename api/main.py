@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from .routes import strategies, brokers, positions, trades, livefeed_ws, dashboard
+from .routes import strategies, brokers, positions, trades, livefeed_ws, dashboard, orders
 import uvicorn
 from .config import API_PORT
 
@@ -12,6 +12,7 @@ app.include_router(positions.router, prefix="/positions", tags=["Positions"])
 app.include_router(trades.router, prefix="/trades", tags=["Trades"])
 app.include_router(livefeed_ws.router, tags=["WebSocket"])
 app.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
+app.include_router(orders.router, prefix="/orders", tags=["Orders"])
 
 @app.get("/")
 def root():

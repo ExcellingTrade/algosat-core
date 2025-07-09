@@ -452,13 +452,39 @@ class OrderManager:
         """
         Standardized exit: For a logical order, fetch all broker_executions. For each FILLED row, call exit_order. For PARTIALLY_FILLED/PARTIAL, call exit_order then cancel_order. For AWAITING_ENTRY/PENDING, call cancel_order. For REJECTED/FAILED, do nothing.
         After exit/cancel, insert a new broker_executions row with side=EXIT, exit price as LTP (passed in), and update exit_time.
-        ltp: If provided, use as exit price. If not, will be 0.0 in broker_executions row.
+        ltp: If provided, use as exit price. If not provided, will fetch current LTP from the market.
         """
         from algosat.core.db import AsyncSessionLocal, get_broker_executions_by_order_id, get_order_by_id
         async with AsyncSessionLocal() as session:
             broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
             order_row = await get_order_by_id(session, parent_order_id)
             logical_symbol = order_row.get('strike_symbol') or order_row.get('symbol') if order_row else None
+            
+            # If LTP is not provided, fetch it from the market
+            if ltp is None and logical_symbol:
+                try:
+                    from algosat.core.data_manager import DataManager
+                    data_manager = DataManager(broker_manager=self.broker_manager)
+                    await data_manager.ensure_broker()
+                    
+                    ltp_response = await data_manager.get_ltp(logical_symbol)
+                    if isinstance(ltp_response, dict):
+                        ltp = ltp_response.get(logical_symbol)
+                    else:
+                        ltp = ltp_response
+                    
+                    if ltp is not None:
+                        logger.info(f"OrderManager: Fetched LTP for symbol {logical_symbol}: {ltp}")
+                    else:
+                        logger.warning(f"OrderManager: Could not fetch LTP for symbol {logical_symbol}")
+                        ltp = 0.0
+                except Exception as e:
+                    logger.error(f"OrderManager: Error fetching LTP for symbol {logical_symbol}: {e}")
+                    ltp = 0.0
+            elif ltp is None:
+                logger.warning(f"OrderManager: No LTP provided and no symbol available for order {parent_order_id}")
+                ltp = 0.0
+            
             if not broker_execs:
                 logger.warning(f"OrderManager: No broker executions found for parent_order_id={parent_order_id} in exit_order.")
                 return
@@ -566,7 +592,110 @@ class OrderManager:
                         )
                 except Exception as e:
                     logger.error(f"OrderManager: Error exiting/cancelling order for broker_id={broker_id}, broker_order_id={broker_order_id}: {e}")
+            
+            # After processing all broker executions, update the main order status to CLOSED
+            # and set exit_price and exit_time
+            try:
+                import datetime
+                exit_time = datetime.datetime.now(datetime.timezone.utc)
+                exit_price = ltp or 0.0
+                
+                # Calculate PnL if we have the necessary data
+                pnl = 0.0
+                if order_row:
+                    entry_price = order_row.get('entry_price')
+                    executed_quantity = order_row.get('executed_quantity')
+                    side = order_row.get('side')
+                    
+                    if all(x is not None for x in [entry_price, executed_quantity, side, exit_price]):
+                        if side == 'BUY':
+                            pnl = (exit_price - entry_price) * executed_quantity
+                        elif side == 'SELL':
+                            pnl = (entry_price - exit_price) * executed_quantity
+                        logger.info(f"OrderManager: Calculated PnL for order {parent_order_id}: {pnl}")
+                    else:
+                        logger.warning(f"OrderManager: Cannot calculate PnL for order {parent_order_id} - missing data")
+                
+                # Update the main order with exit details
+                await self.update_order_exit_details_in_db(
+                    order_id=parent_order_id,
+                    exit_price=exit_price,
+                    exit_time=exit_time,
+                    pnl=pnl,
+                    status="CLOSED"
+                )
+                
+                logger.info(f"OrderManager: Updated main order {parent_order_id} status to CLOSED with exit_price={exit_price}, exit_time={exit_time}, pnl={pnl}")
+                
+            except Exception as e:
+                logger.error(f"OrderManager: Error updating main order exit details for order {parent_order_id}: {e}")
+            
             await session.commit()
+
+    async def exit_all_orders(self, exit_reason: str = None, strategy_id: int = None):
+        """
+        Exit all open orders by querying the orders table for orders with open statuses
+        and calling exit_order for each of them.
+        
+        Args:
+            exit_reason: Optional reason for exiting all orders
+            strategy_id: Optional strategy ID to filter orders by. If provided, only orders 
+                        belonging to this strategy will be exited.
+        """
+        from algosat.core.db import AsyncSessionLocal, get_orders_by_strategy_id
+        from algosat.core.dbschema import orders
+        from sqlalchemy import select
+        
+        # Define open order statuses
+        open_statuses = [
+            "OPEN",
+            'AWAITING_ENTRY',
+            'PENDING', 
+            # 'PARTIALLY_FILLED',
+            # 'PARTIAL',
+            # 'FILLED'  # Include FILLED as they may need to be exited
+        ]
+        
+        async with AsyncSessionLocal() as session:
+            if strategy_id:
+                # Query for open orders filtered by strategy_id
+                open_orders = await get_orders_by_strategy_id(
+                    session=session,
+                    strategy_id=strategy_id,
+                    status_filter=open_statuses
+                )
+                filter_desc = f" for strategy {strategy_id}"
+            else:
+                # Query for all open orders
+                stmt = select(orders).where(orders.c.status.in_(open_statuses))
+                result = await session.execute(stmt)
+                open_orders = [dict(row._mapping) for row in result.fetchall()]
+                filter_desc = ""
+            
+            if not open_orders:
+                logger.info(f"OrderManager: No open orders found to exit{filter_desc}.")
+                return
+            
+            logger.info(f"OrderManager: Found {len(open_orders)} open orders to exit{filter_desc}. Reason: {exit_reason}")
+            
+            # Exit each order
+            for order in open_orders:
+                order_id = order['id']
+                order_status = order['status']
+                symbol = order.get('strike_symbol') or order.get('symbol', 'Unknown')
+                
+                try:
+                    logger.info(f"OrderManager: Exiting order {order_id} (symbol={symbol}, status={order_status})")
+                    await self.exit_order(
+                        parent_order_id=order_id,
+                        exit_reason=exit_reason or "Exit all orders requested"
+                    )
+                    logger.info(f"OrderManager: Successfully initiated exit for order {order_id}")
+                except Exception as e:
+                    logger.error(f"OrderManager: Failed to exit order {order_id}: {e}", exc_info=True)
+                    continue
+            
+            logger.info(f"OrderManager: Completed exit_all_orders for {len(open_orders)} orders{filter_desc}")
 
     async def insert_granular_execution(
         self,
@@ -1045,13 +1174,39 @@ class OrderManager:
         """
         Standardized exit: For a logical order, fetch all broker_executions. For each FILLED row, call exit_order. For PARTIALLY_FILLED/PARTIAL, call exit_order then cancel_order. For AWAITING_ENTRY/PENDING, call cancel_order. For REJECTED/FAILED, do nothing.
         After exit/cancel, insert a new broker_executions row with side=EXIT, exit price as LTP (passed in), and update exit_time.
-        ltp: If provided, use as exit price. If not, will be 0.0 in broker_executions row.
+        ltp: If provided, use as exit price. If not provided, will fetch current LTP from the market.
         """
         from algosat.core.db import AsyncSessionLocal, get_broker_executions_by_order_id, get_order_by_id
         async with AsyncSessionLocal() as session:
             broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
             order_row = await get_order_by_id(session, parent_order_id)
-            logical_symbol = order_row.get('strike_symbol') or order_row.get('symbol') if order_row else None
+            logical_symbol = order_row.get('strike_symbol') # or order_row.get('symbol') if order_row else None
+            
+            # If LTP is not provided, fetch it from the market
+            if ltp is None and logical_symbol:
+                try:
+                    from algosat.core.data_manager import DataManager
+                    data_manager = DataManager(broker_manager=self.broker_manager)
+                    await data_manager.ensure_broker()
+                    
+                    ltp_response = await data_manager.get_ltp(logical_symbol)
+                    if isinstance(ltp_response, dict):
+                        ltp = ltp_response.get(logical_symbol)
+                    else:
+                        ltp = ltp_response
+                    
+                    if ltp is not None:
+                        logger.info(f"OrderManager: Fetched LTP for symbol {logical_symbol}: {ltp}")
+                    else:
+                        logger.warning(f"OrderManager: Could not fetch LTP for symbol {logical_symbol}")
+                        ltp = 0.0
+                except Exception as e:
+                    logger.error(f"OrderManager: Error fetching LTP for symbol {logical_symbol}: {e}")
+                    ltp = 0.0
+            elif ltp is None:
+                logger.warning(f"OrderManager: No LTP provided and no symbol available for order {parent_order_id}")
+                ltp = 0.0
+            
             if not broker_execs:
                 logger.warning(f"OrderManager: No broker executions found for parent_order_id={parent_order_id} in exit_order.")
                 return
@@ -1163,5 +1318,43 @@ class OrderManager:
                         )
                 except Exception as e:
                     logger.error(f"OrderManager: Error exiting/cancelling order for broker_id={broker_id}, broker_order_id={broker_order_id}: {e}")
+            
+            # After processing all broker executions, update the main order status to CLOSED
+            # and set exit_price and exit_time
+            try:
+                import datetime
+                exit_time = datetime.datetime.now(datetime.timezone.utc)
+                exit_price = ltp or 0.0
+                
+                # Calculate PnL if we have the necessary data
+                pnl = 0.0
+                if order_row:
+                    entry_price = order_row.get('entry_price')
+                    executed_quantity = order_row.get('executed_quantity')
+                    side = order_row.get('side')
+                    
+                    if all(x is not None for x in [entry_price, executed_quantity, side, exit_price]):
+                        if side == 'BUY':
+                            pnl = (exit_price - entry_price) * executed_quantity
+                        elif side == 'SELL':
+                            pnl = (entry_price - exit_price) * executed_quantity
+                        logger.info(f"OrderManager: Calculated PnL for order {parent_order_id}: {pnl}")
+                    else:
+                        logger.warning(f"OrderManager: Cannot calculate PnL for order {parent_order_id} - missing data")
+                
+                # Update the main order with exit details
+                await self.update_order_exit_details_in_db(
+                    order_id=parent_order_id,
+                    exit_price=exit_price,
+                    exit_time=exit_time,
+                    pnl=pnl,
+                    status="CLOSED"
+                )
+                
+                logger.info(f"OrderManager: Updated main order {parent_order_id} status to CLOSED with exit_price={exit_price}, exit_time={exit_time}, pnl={pnl}")
+                
+            except Exception as e:
+                logger.error(f"OrderManager: Error updating main order exit details for order {parent_order_id}: {e}")
+            
             await session.commit()
 

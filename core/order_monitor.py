@@ -342,7 +342,6 @@ class OrderMonitor:
                     exit_reason = None
                 if exit_reason:
                     await self.order_manager.exit_order(self.order_id, exit_reason=exit_reason, ltp=ltp)
-                    await self.order_manager.update_order_status_in_db(self.order_id, "CLOSED")
                     self.stop()
                     return
             await asyncio.sleep(self.price_order_monitor_seconds)

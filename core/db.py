@@ -2013,4 +2013,62 @@ async def get_all_open_orders(session):
     )
     return [dict(row._mapping) for row in result.fetchall()]
 
-# Removed legacy update_broker_exec_status_in_db (now handled by OrderManager)
+async def get_orders_by_strategy_id(session: AsyncSession, strategy_id: int, status_filter: list = None):
+    """
+    Retrieve orders filtered by strategy_id.
+    
+    Args:
+        session: Database session
+        strategy_id: The strategy ID to filter by
+        status_filter: Optional list of statuses to filter by (e.g., ['AWAITING_ENTRY', 'FILLED'])
+    
+    Returns:
+        List of orders belonging to the specified strategy
+    """
+    # First get all strategy_symbol_ids for this strategy
+    strategy_symbols_stmt = select(strategy_symbols.c.id).where(
+        strategy_symbols.c.strategy_id == strategy_id
+    )
+    strategy_symbols_result = await session.execute(strategy_symbols_stmt)
+    strategy_symbol_ids = [row.id for row in strategy_symbols_result.fetchall()]
+    
+    if not strategy_symbol_ids:
+        return []
+    
+    # Build the main query
+    stmt = (
+        select(
+            orders.c.id,
+            orders.c.strategy_symbol_id,
+            orders.c.strike_symbol,
+            orders.c.pnl,
+            orders.c.candle_range,
+            orders.c.entry_price,
+            orders.c.stop_loss,
+            orders.c.target_price,
+            orders.c.signal_time,
+            orders.c.entry_time,
+            orders.c.exit_time,
+            orders.c.exit_price,
+            orders.c.status,
+            orders.c.reason,
+            orders.c.atr,
+            orders.c.supertrend_signal,
+            orders.c.lot_qty,
+            orders.c.side,
+            orders.c.qty,
+            orders.c.executed_quantity,
+            orders.c.created_at,
+            orders.c.updated_at
+        )
+        .where(orders.c.strategy_symbol_id.in_(strategy_symbol_ids))
+    )
+    
+    # Apply status filter if provided
+    if status_filter:
+        stmt = stmt.where(orders.c.status.in_(status_filter))
+    
+    stmt = stmt.order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
+    
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
