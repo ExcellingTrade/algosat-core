@@ -133,9 +133,9 @@ class ZerodhaWrapper(BrokerInterface):
         """
         try:
             loop = asyncio.get_event_loop()
-            # orderdetails = await loop.run_in_executor(None, self.kite.order_history, order_id)
+            orderdetails = await loop.run_in_executor(None, self.kite.order_history, order_id)
             # orderdetails = [{'account_id': 'HU6119', 'trade_id': '1449361', 'order_id': '250704600366295', 'exchange': 'NFO', 'tradingsymbol': 'NIFTY2571025500PE', 'instrument_token': 10252802, 'product': 'MIS', 'average_price': 210.45, 'quantity': 75, 'exchange_order_id': '1600000045390177', 'transaction_type': 'BUY', 'fill_timestamp': datetime.datetime(2025, 7, 4, 11, 41), 'order_timestamp': '11:41:00', 'exchange_timestamp': datetime.datetime(2025, 7, 4, 11, 41)}] # Placeholder for actual last order details
-            orderdetails = [{"account_id":"HU6119","placed_by":"HU6119","order_id":"250704600366295","exchange_order_id":"1600000045390177","parent_order_id":None,"status":"COMPLETE","status_message":None,"status_message_raw":None,"order_timestamp":"2025-07-04 11:41:00","exchange_update_timestamp":"2025-07-04 11:41:00","exchange_timestamp":"2025-07-04 11:41:00","variety":"regular","modified":False,"exchange":"NFO","tradingsymbol":"NIFTY2571025500PE","instrument_token":10252802,"order_type":"LIMIT","transaction_type":"BUY","validity":"DAY","validity_ttl":0,"product":"MIS","quantity":75,"disclosed_quantity":0,"price":210.5,"trigger_price":210.3,"average_price":210.45,"filled_quantity":75,"pending_quantity":0,"cancelled_quantity":0,"market_protection":0,"meta":{},"tag":"AlgoOrder","tags":["AlgoOrder"],"guid":"149993X60EiJhmOXkjB"}]
+            # orderdetails = [{"account_id":"HU6119","placed_by":"HU6119","order_id":"250704600366295","exchange_order_id":"1600000045390177","parent_order_id":None,"status":"COMPLETE","status_message":None,"status_message_raw":None,"order_timestamp":"2025-07-04 11:41:00","exchange_update_timestamp":"2025-07-04 11:41:00","exchange_timestamp":"2025-07-04 11:41:00","variety":"regular","modified":False,"exchange":"NFO","tradingsymbol":"NIFTY2571025500PE","instrument_token":10252802,"order_type":"LIMIT","transaction_type":"BUY","validity":"DAY","validity_ttl":0,"product":"MIS","quantity":75,"disclosed_quantity":0,"price":210.5,"trigger_price":210.3,"average_price":210.45,"filled_quantity":75,"pending_quantity":0,"cancelled_quantity":0,"market_protection":0,"meta":{},"tag":"AlgoOrder","tags":["AlgoOrder"],"guid":"149993X60EiJhmOXkjB"}]
             if not orderdetails:
                 return {"order_id": order_id, "status": "UNKNOWN", "message": "No order history found"}
             statuses = [d.get('status') for d in orderdetails]
@@ -538,18 +538,18 @@ class ZerodhaWrapper(BrokerInterface):
             # Fetch current positions (net positions)
             positions = await self.get_positions()
             net_positions = positions.get('net', []) if isinstance(positions, dict) else positions
-            net_positions = [{'tradingsymbol': 'NIFTY2571025500PE', 'exchange': 'NFO', 'instrument_token': 10252802, 'product': 'MIS', 'quantity': 0, 'overnight_quantity': 0, 'multiplier': 1, 'average_price': 0, 'close_price': 0, 'last_price': 147.15, 'value': -4642.5, 'pnl': -4642.5, 'm2m': -4642.5, 'unrealised': -4642.5, 'realised': 0, 'buy_quantity': 75, 'buy_price': 210.45, 'buy_value': 15783.75, 'buy_m2m': 15783.75, 'sell_quantity': 75, 'sell_price': 148.55, 'sell_value': 11141.25, 'sell_m2m': 11141.25, 'day_buy_quantity': 75, 'day_buy_price': 210.45, 'day_buy_value': 15783.75, 'day_sell_quantity': 75, 'day_sell_price': 148.55, 'day_sell_value': 11141.25}]
+            # net_positions = [{'tradingsymbol': 'NIFTY2571025500PE', 'exchange': 'NFO', 'instrument_token': 10252802, 'product': 'MIS', 'quantity': 0, 'overnight_quantity': 0, 'multiplier': 1, 'average_price': 0, 'close_price': 0, 'last_price': 147.15, 'value': -4642.5, 'pnl': -4642.5, 'm2m': -4642.5, 'unrealised': -4642.5, 'realised': 0, 'buy_quantity': 75, 'buy_price': 210.45, 'buy_value': 15783.75, 'buy_m2m': 15783.75, 'sell_quantity': 75, 'sell_price': 148.55, 'sell_value': 11141.25, 'sell_m2m': 11141.25, 'day_buy_quantity': 75, 'day_buy_price': 210.45, 'day_buy_value': 15783.75, 'day_sell_quantity': 75, 'day_sell_price': 148.55, 'day_sell_value': 11141.25}]
             filled_qty = 0
             matched_position = None
             # Match by tradingsymbol (case-insensitive)
             for pos in net_positions:
                 if str(pos.get('tradingsymbol', '')).upper() == str(sanitized_symbol).upper():
-                    filled_qty = 75 #abs(pos.get('quantity', 0))  # Use abs in case of negative for shorts
+                    filled_qty = abs(pos.get('quantity', 0))  # Use abs in case of negative for shorts
                     matched_position = pos
                     break
             if filled_qty == 0:
                 logger.warning(f"Zerodha exit_order: No filled quantity for symbol {sanitized_symbol} in positions, skipping exit.")
-                # return {"status": False, "message": "No filled quantity, cannot exit."}
+                return {"status": False, "message": "No filled quantity, cannot exit."}
             # Fetch original order details to get side, etc.
             order_hist = await self.get_order_history(broker_order_id)
             if not order_hist or not order_hist.get('raw'):

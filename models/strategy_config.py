@@ -22,6 +22,8 @@ class StrategyConfig(BaseModel):
     # Strategy-level fields
     strategy_key: Optional[str] = None
     strategy_name: Optional[str] = None
+    order_type: Optional[str] = "MARKET"
+    product_type: Optional[str] = "INTRADAY"
     
     # Legacy fields for backward compatibility
     is_default: bool = False

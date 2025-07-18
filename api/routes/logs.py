@@ -1,18 +1,5 @@
 """
-Log management API rou# Constants
-LOGS_BASE_DIR = Path("/opt/algosat/logs")
-MAX_LOG_RETENTION_DAYS = 30  # Extended from 7 to 30 days
-LOG_PATTERNS = {
-    "rollover": r"(api|algosat|broker_monitor)\.log\.(\d{4}-\d{2}-\d{2})",  # Rotated files
-    "api": r"api\.log",
-    "algosat": r"algosat\.log", 
-    "broker-monitor": r"broker_monitor\.log",
-    # Legacy patterns for backward compatibility
-    "legacy-rollover": r"(api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)",
-    "legacy-api": r"api-(\d{4}-\d{2}-\d{2})\.log",
-    "legacy-algosat": r"algosat-(\d{4}-\d{2}-\d{2})\.log",
-    "legacy-broker": r"broker_monitor-(\d{4}-\d{2}-\d{2})\.log",
-}lgoSat trading system.
+Log management API routes for AlgoSat trading system.
 Provides endpoints for viewing, filtering, and streaming logs.
 """
 import asyncio
@@ -44,7 +31,7 @@ LOG_PATTERNS = {
     "rollover": r"(api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)",  # Check rollover first
     "api": r"api-(\d{4}-\d{2}-\d{2})\.log",
     "algosat": r"algosat-(\d{4}-\d{2}-\d{2})\.log",
-    "broker-monitor": r"broker_monitor-(\d{4}-\d{2}-\d{2})\.log",  # Note: underscore in filename, hyphen in type
+    "broker-monitor": r"broker_monitor-(\d{4}-\d{2}-\d{2})\.log",
 }
 
 # In-memory store for streaming sessions (in production, use Redis or similar)
@@ -121,20 +108,11 @@ def get_log_files_for_date(date: str) -> List[LogFile]:
                     try:
                         stat = log_file.stat()
                         # Determine log type from filename - only include application logs for UI
-                        if log_file.name == "api.log":
-                            log_type = "api"
-                        elif log_file.name == "algosat.log":
-                            log_type = "algosat"
-                        elif log_file.name == "broker_monitor.log":
-                            log_type = "broker-monitor"
-                        elif log_file.name.startswith("api-") and log_file.name.endswith(".log"):
-                            # Legacy format: api-2025-07-18.log
+                        if log_file.name.startswith("api-") and log_file.name.endswith(".log"):
                             log_type = "api"
                         elif log_file.name.startswith("algosat-") and log_file.name.endswith(".log"):
-                            # Legacy format: algosat-2025-07-18.log
                             log_type = "algosat"
                         elif log_file.name.startswith("broker_monitor-") and log_file.name.endswith(".log"):
-                            # Legacy format: broker_monitor-2025-07-18.log
                             log_type = "broker-monitor"
                         else:
                             # Skip PM2 logs and other files - don't show in UI
@@ -553,19 +531,17 @@ async def stream_live_logs(
                 log_files_to_monitor = [date_dir / f"api-{today}.log"]
             else:
                 log_files_to_monitor = [LOGS_BASE_DIR / f"api-{today}.log"]
-        elif log_type == "algosat":
-            if date_dir.exists():
-                log_files_to_monitor = [date_dir / f"algosat-{today}.log"]
-            else:
-                log_files_to_monitor = [LOGS_BASE_DIR / f"algosat-{today}.log"]
         elif log_type == "broker-monitor":
             if date_dir.exists():
                 log_files_to_monitor = [date_dir / f"broker_monitor-{today}.log"]
             else:
                 log_files_to_monitor = [LOGS_BASE_DIR / f"broker_monitor-{today}.log"]
         else:
-            # Default case - should not normally reach here
-            log_files_to_monitor = []
+            # Default to algosat logs
+            if date_dir.exists():
+                log_files_to_monitor = [date_dir / f"algosat-{today}.log"]
+            else:
+                log_files_to_monitor = [LOGS_BASE_DIR / f"algosat-{today}.log"]
         
         # Keep track of file positions
         file_positions = {str(log_file): 0 for log_file in log_files_to_monitor}

@@ -38,68 +38,6 @@ from algosat.common import constants
 from algosat.core.time_utils import get_ist_now 
 
 
-class DailyDirectoryRotatingFileHandler(logging.Handler):
-    """
-    Custom handler that creates new date-based directories and files each day.
-    
-    This handler creates:
-    - logs/2025-07-18/api.log (for api modules)
-    - logs/2025-07-18/broker_monitor.log (for broker_monitor)
-    - logs/2025-07-18/algosat.log (for other modules)
-    
-    At midnight, it automatically switches to new files in new date directories.
-    """
-    
-    def __init__(self, base_dir, filename_pattern, module_type, encoding='utf-8'):
-        super().__init__()
-        self.base_dir = Path(base_dir)
-        self.filename_pattern = filename_pattern
-        self.module_type = module_type
-        self.encoding = encoding
-        self.current_date = None
-        self.current_stream = None
-        self._setup_current_file()
-    
-    def _setup_current_file(self):
-        """Set up the current log file based on today's date."""
-        today = get_ist_now().strftime('%Y-%m-%d')
-        
-        # If date changed, close current stream
-        if self.current_date != today:
-            if self.current_stream:
-                self.current_stream.close()
-            
-            # Create new date directory
-            date_dir = self.base_dir / today
-            date_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create new log file
-            log_file = date_dir / f"{self.module_type}.log"
-            self.current_stream = open(log_file, 'a', encoding=self.encoding)
-            self.current_date = today
-    
-    def emit(self, record):
-        """Emit a log record, creating new file if date changed."""
-        try:
-            # Check if we need to rotate to new date
-            today = get_ist_now().strftime('%Y-%m-%d')
-            if self.current_date != today:
-                self._setup_current_file()
-            
-            # Format and write the record
-            msg = self.format(record)
-            self.current_stream.write(msg + '\n')
-            self.current_stream.flush()
-        except Exception:
-            self.handleError(record)
-    
-    def close(self):
-        """Close the current stream."""
-        if self.current_stream:
-            self.current_stream.close()
-        super().close()
-
-
 class SafeTimedRotatingFileHandler(TimedRotatingFileHandler):
     """
     Custom TimedRotatingFileHandler that handles missing directories gracefully.
@@ -303,26 +241,46 @@ def configure_root_logger():
 def get_logger(module_name: str) -> logging.Logger:
     """
     Get or configure a logger for the specified module.
-    - All loggers whose name starts with 'api.' will log to logs/YYYY-MM-DD/api.log (rotated daily)
-    - Broker monitor logs to logs/YYYY-MM-DD/broker_monitor.log (rotated daily)
-    - All others log to the main daily log file logs/YYYY-MM-DD/algosat.log
+    - All loggers whose name starts with 'api.' will log to logs/api-YYYY-MM-DD.log (rotated daily)
+    - All others log to the main daily log file
     """
     logger = logging.getLogger(module_name)
-    if not logger.handlers:
-        # Determine module type for file naming
-        if module_name.startswith("api."):
-            module_type = "api"
-        elif module_name == "broker_monitor":
-            module_type = "broker_monitor"
-        else:
-            module_type = "algosat"
-        
-        # Use our custom daily directory rotating handler
-        file_handler = DailyDirectoryRotatingFileHandler(
-            base_dir=log_dir,
-            filename_pattern=f"{module_type}.log",
-            module_type=module_type,
-            encoding="utf-8"
+    
+    # Always check if we need to update the log file for today's date
+    # This handles cases where the process runs across midnight
+    today = get_ist_now().strftime('%Y-%m-%d')
+    date_dir = os.path.join(log_dir, today)
+    os.makedirs(date_dir, exist_ok=True)
+    
+    if module_name.startswith("api."):
+        expected_log_file = os.path.join(date_dir, f"api-{today}.log")
+    elif module_name == "broker_monitor":
+        expected_log_file = os.path.join(date_dir, f"broker_monitor-{today}.log")
+    else:
+        expected_log_file = os.path.join(date_dir, f"algosat-{today}.log")
+    
+    # Check if logger needs new handler for today's date
+    needs_new_handler = True
+    if logger.handlers:
+        for handler in logger.handlers:
+            if isinstance(handler, SafeTimedRotatingFileHandler):
+                if handler.baseFilename == expected_log_file:
+                    needs_new_handler = False
+                    break
+                else:
+                    # Remove old handler with wrong date
+                    logger.removeHandler(handler)
+                    handler.close()
+    
+    if needs_new_handler:
+        # Use our custom SafeTimedRotatingFileHandler
+        file_handler = SafeTimedRotatingFileHandler(
+            expected_log_file, 
+            when="midnight", 
+            interval=1, 
+            backupCount=7, 
+            encoding="utf-8", 
+            utc=False
         )
         file_handler.setLevel(logging.DEBUG)
         file_formatter = ISTFormatter(
@@ -332,6 +290,7 @@ def get_logger(module_name: str) -> logging.Logger:
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
         logger.setLevel(logging.DEBUG)
+    
     return logger
 
 
