@@ -1,5 +1,18 @@
 """
-Log management API routes for AlgoSat trading system.
+Log management API rou# Constants
+LOGS_BASE_DIR = Path("/opt/algosat/logs")
+MAX_LOG_RETENTION_DAYS = 30  # Extended from 7 to 30 days
+LOG_PATTERNS = {
+    "rollover": r"(api|algosat|broker_monitor)\.log\.(\d{4}-\d{2}-\d{2})",  # Rotated files
+    "api": r"api\.log",
+    "algosat": r"algosat\.log", 
+    "broker-monitor": r"broker_monitor\.log",
+    # Legacy patterns for backward compatibility
+    "legacy-rollover": r"(api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)",
+    "legacy-api": r"api-(\d{4}-\d{2}-\d{2})\.log",
+    "legacy-algosat": r"algosat-(\d{4}-\d{2}-\d{2})\.log",
+    "legacy-broker": r"broker_monitor-(\d{4}-\d{2}-\d{2})\.log",
+}lgoSat trading system.
 Provides endpoints for viewing, filtering, and streaming logs.
 """
 import asyncio
@@ -28,9 +41,10 @@ router = APIRouter()
 LOGS_BASE_DIR = Path("/opt/algosat/logs")
 MAX_LOG_RETENTION_DAYS = 30  # Extended from 7 to 30 days
 LOG_PATTERNS = {
-    "rollover": r"(api|algosat)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)",  # Check rollover first
+    "rollover": r"(api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)",  # Check rollover first
     "api": r"api-(\d{4}-\d{2}-\d{2})\.log",
     "algosat": r"algosat-(\d{4}-\d{2}-\d{2})\.log",
+    "broker-monitor": r"broker_monitor-(\d{4}-\d{2}-\d{2})\.log",  # Note: underscore in filename, hyphen in type
 }
 
 # In-memory store for streaming sessions (in production, use Redis or similar)
@@ -98,7 +112,55 @@ def get_log_files_for_date(date: str) -> List[LogFile]:
     log_files = []
     
     try:
+        # Check if date directory exists first
+        date_dir = LOGS_BASE_DIR / date
+        if date_dir.exists() and date_dir.is_dir():
+            # Search in date-specific directory
+            for log_file in date_dir.glob("*.log*"):
+                if log_file.is_file():
+                    try:
+                        stat = log_file.stat()
+                        # Determine log type from filename - only include application logs for UI
+                        if log_file.name == "api.log":
+                            log_type = "api"
+                        elif log_file.name == "algosat.log":
+                            log_type = "algosat"
+                        elif log_file.name == "broker_monitor.log":
+                            log_type = "broker-monitor"
+                        elif log_file.name.startswith("api-") and log_file.name.endswith(".log"):
+                            # Legacy format: api-2025-07-18.log
+                            log_type = "api"
+                        elif log_file.name.startswith("algosat-") and log_file.name.endswith(".log"):
+                            # Legacy format: algosat-2025-07-18.log
+                            log_type = "algosat"
+                        elif log_file.name.startswith("broker_monitor-") and log_file.name.endswith(".log"):
+                            # Legacy format: broker_monitor-2025-07-18.log
+                            log_type = "broker-monitor"
+                        else:
+                            # Skip PM2 logs and other files - don't show in UI
+                            continue
+                        
+                        log_files.append(LogFile(
+                            name=log_file.name,
+                            path=str(log_file),
+                            size=stat.st_size,
+                            modified=datetime.fromtimestamp(stat.st_mtime),
+                            type=log_type,
+                            date=date
+                        ))
+                    except (OSError, IOError) as e:
+                        logger.warning(f"Cannot access log file {log_file}: {e}")
+                        continue
+        
+        # Also search for files with date in filename in base directory
         for log_file in LOGS_BASE_DIR.rglob("*.log*"):
+            if not log_file.is_file():
+                continue
+                
+            # Skip files already found in date directory
+            if log_file.parent == date_dir:
+                continue
+                
             file_matched = False
             for pattern_name, pattern in LOG_PATTERNS.items():
                 match = re.match(pattern, log_file.name)
@@ -109,30 +171,38 @@ def get_log_files_for_date(date: str) -> List[LogFile]:
                         file_date = match.group(2)  # date
                         rollover_num = match.group(3)  # rollover number
                         if file_date == date:
-                            stat = log_file.stat()
-                            log_files.append(LogFile(
-                                name=log_file.name,
-                                path=str(log_file),
-                                size=stat.st_size,
-                                modified=datetime.fromtimestamp(stat.st_mtime),
-                                type="rollover",
-                                date=file_date
-                            ))
-                            file_matched = True
+                            try:
+                                stat = log_file.stat()
+                                log_files.append(LogFile(
+                                    name=log_file.name,
+                                    path=str(log_file),
+                                    size=stat.st_size,
+                                    modified=datetime.fromtimestamp(stat.st_mtime),
+                                    type="rollover",
+                                    date=file_date
+                                ))
+                                file_matched = True
+                            except (OSError, IOError) as e:
+                                logger.warning(f"Cannot access log file {log_file}: {e}")
+                                continue
                     else:
                         # For regular files: (api|algosat)-(\d{4}-\d{2}-\d{2})\.log
                         file_date = match.group(1)
                         if file_date == date:
-                            stat = log_file.stat()
-                            log_files.append(LogFile(
-                                name=log_file.name,
-                                path=str(log_file),
-                                size=stat.st_size,
-                                modified=datetime.fromtimestamp(stat.st_mtime),
-                                type=pattern_name,
-                                date=file_date
-                            ))
-                            file_matched = True
+                            try:
+                                stat = log_file.stat()
+                                log_files.append(LogFile(
+                                    name=log_file.name,
+                                    path=str(log_file),
+                                    size=stat.st_size,
+                                    modified=datetime.fromtimestamp(stat.st_mtime),
+                                    type=pattern_name,
+                                    date=file_date
+                                ))
+                                file_matched = True
+                            except (OSError, IOError) as e:
+                                logger.warning(f"Cannot access log file {log_file}: {e}")
+                                continue
                     
                     # Break out of pattern loop once we find a match
                     if file_matched:
@@ -143,11 +213,26 @@ def get_log_files_for_date(date: str) -> List[LogFile]:
     return sorted(log_files, key=lambda x: x.modified)
 
 def get_available_log_dates() -> List[str]:
-    """Get list of available log dates within retention period"""
+    """Get list of available log dates based on existing date directories"""
     dates = set()
     cutoff_date = datetime.now() - timedelta(days=MAX_LOG_RETENTION_DAYS)
     
     try:
+        # First, check for date directories (YYYY-MM-DD format)
+        if LOGS_BASE_DIR.exists():
+            for item in LOGS_BASE_DIR.iterdir():
+                if item.is_dir():
+                    try:
+                        # Check if directory name matches YYYY-MM-DD format
+                        log_date = datetime.strptime(item.name, "%Y-%m-%d")
+                        if log_date >= cutoff_date:
+                            # Only add if directory contains log files
+                            if any(item.glob("*.log*")):
+                                dates.add(item.name)
+                    except ValueError:
+                        continue
+        
+        # Also check for log files in root directory (legacy support)
         for log_file in LOGS_BASE_DIR.rglob("*.log*"):
             for pattern_name, pattern in LOG_PATTERNS.items():
                 match = re.match(pattern, log_file.name)
@@ -276,11 +361,23 @@ async def get_log_files(
     """Get log files for a specific date"""
     try:
         # Validate date format
-        datetime.strptime(date, "%Y-%m-%d")
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        
+        # Check if the date has any available logs
+        available_dates = get_available_log_dates()
+        if date not in available_dates:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No log files found for date {date}. Available dates: {', '.join(available_dates[:5])}"
+            )
+        
         files = get_log_files_for_date(date)
         return {"files": files}
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error getting log files for date {date}: {e}")
         raise HTTPException(status_code=500, detail="Failed to get log files")
@@ -298,7 +395,18 @@ async def get_log_content(
     """Get log content for a specific date and type"""
     try:
         # Validate date format
-        datetime.strptime(date, "%Y-%m-%d")
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        
+        # Check if the date has any available logs
+        available_dates = get_available_log_dates()
+        if date not in available_dates:
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No log files found for date {date}. Available dates: {', '.join(available_dates[:5])}"
+            )
         
         # Default to "all" if no log_type specified
         if log_type is None:
@@ -316,22 +424,44 @@ async def get_log_content(
             target_files = [f for f in log_files if f.type == log_type or (f.type == "rollover" and log_type in f.name)]
         
         if not target_files:
-            raise HTTPException(status_code=404, detail=f"No {log_type} log files found for {date}")
+            available_types = list(set(f.type for f in log_files))
+            raise HTTPException(
+                status_code=404, 
+                detail=f"No {log_type} log files found for {date}. Available types: {', '.join(available_types)}"
+            )
         
         # Read from the main log file (and rollover files if needed)
         all_entries = []
         
         for log_file in sorted(target_files, key=lambda x: x.name):
-            async with aiofiles.open(log_file.path, 'r') as f:
-                async for line in f:
-                    entry = parse_log_line(line)
-                    if entry:
-                        # Apply filters
-                        if level and entry.level != level.upper():
-                            continue
-                        if search and search.lower() not in entry.message.lower():
-                            continue
-                        all_entries.append(entry)
+            try:
+                # Verify file still exists before trying to open
+                log_path = Path(log_file.path)
+                if not log_path.exists():
+                    logger.warning(f"Log file {log_file.path} no longer exists, skipping")
+                    continue
+                    
+                async with aiofiles.open(log_file.path, 'r') as f:
+                    async for line in f:
+                        entry = parse_log_line(line)
+                        if entry:
+                            # Apply filters
+                            if level and entry.level != level.upper():
+                                continue
+                            if search and search.lower() not in entry.message.lower():
+                                continue
+                            all_entries.append(entry)
+            except (IOError, OSError) as file_error:
+                logger.error(f"Error reading log file {log_file.path}: {file_error}")
+                # Continue with other files instead of failing completely
+                continue
+        
+        # If no entries were read from any file, return appropriate error
+        if not all_entries and target_files:
+            raise HTTPException(
+                status_code=500, 
+                detail=f"Unable to read any log files for {date}. Files may be corrupted or inaccessible."
+            )
         
         # Sort by timestamp (newest first)
         all_entries.sort(key=lambda x: x.timestamp, reverse=True)
@@ -401,19 +531,56 @@ async def stream_live_logs(
         # Get the current log files to monitor
         today = datetime.now().strftime("%Y-%m-%d")
         
+        # Check both new date-based directory structure and legacy flat structure
+        date_dir = LOGS_BASE_DIR / today
+        
         log_files_to_monitor = []
         if log_type == "all":
-            # Monitor both api and algosat logs
-            api_log = LOGS_BASE_DIR / f"api-{today}.log"
-            algosat_log = LOGS_BASE_DIR / f"algosat-{today}.log"
-            log_files_to_monitor = [api_log, algosat_log]
+            # Monitor all main application logs only
+            if date_dir.exists():
+                api_log = date_dir / f"api-{today}.log"
+                algosat_log = date_dir / f"algosat-{today}.log"
+                broker_log = date_dir / f"broker_monitor-{today}.log"
+                log_files_to_monitor = [api_log, algosat_log, broker_log]
+            else:
+                # Fallback to legacy flat structure
+                api_log = LOGS_BASE_DIR / f"api-{today}.log"
+                algosat_log = LOGS_BASE_DIR / f"algosat-{today}.log"
+                broker_log = LOGS_BASE_DIR / f"broker_monitor-{today}.log"
+                log_files_to_monitor = [api_log, algosat_log, broker_log]
         elif log_type == "api":
-            log_files_to_monitor = [LOGS_BASE_DIR / f"api-{today}.log"]
+            if date_dir.exists():
+                log_files_to_monitor = [date_dir / f"api-{today}.log"]
+            else:
+                log_files_to_monitor = [LOGS_BASE_DIR / f"api-{today}.log"]
+        elif log_type == "algosat":
+            if date_dir.exists():
+                log_files_to_monitor = [date_dir / f"algosat-{today}.log"]
+            else:
+                log_files_to_monitor = [LOGS_BASE_DIR / f"algosat-{today}.log"]
+        elif log_type == "broker-monitor":
+            if date_dir.exists():
+                log_files_to_monitor = [date_dir / f"broker_monitor-{today}.log"]
+            else:
+                log_files_to_monitor = [LOGS_BASE_DIR / f"broker_monitor-{today}.log"]
         else:
-            log_files_to_monitor = [LOGS_BASE_DIR / f"algosat-{today}.log"]
+            # Default case - should not normally reach here
+            log_files_to_monitor = []
         
         # Keep track of file positions
         file_positions = {str(log_file): 0 for log_file in log_files_to_monitor}
+        
+        # Debug logging
+        logger.info(f"Live stream monitoring files: {[str(f) for f in log_files_to_monitor]}")
+        for log_file in log_files_to_monitor:
+            exists = log_file.exists()
+            logger.info(f"File {log_file}: exists={exists}")
+            if exists:
+                try:
+                    size = log_file.stat().st_size
+                    logger.info(f"File {log_file}: size={size} bytes")
+                except Exception as e:
+                    logger.error(f"Error getting size for {log_file}: {e}")
         
         try:
             while True:

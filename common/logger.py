@@ -37,6 +37,106 @@ from rich.logging import RichHandler
 from algosat.common import constants
 from algosat.core.time_utils import get_ist_now 
 
+
+class DailyDirectoryRotatingFileHandler(logging.Handler):
+    """
+    Custom handler that creates new date-based directories and files each day.
+    
+    This handler creates:
+    - logs/2025-07-18/api.log (for api modules)
+    - logs/2025-07-18/broker_monitor.log (for broker_monitor)
+    - logs/2025-07-18/algosat.log (for other modules)
+    
+    At midnight, it automatically switches to new files in new date directories.
+    """
+    
+    def __init__(self, base_dir, filename_pattern, module_type, encoding='utf-8'):
+        super().__init__()
+        self.base_dir = Path(base_dir)
+        self.filename_pattern = filename_pattern
+        self.module_type = module_type
+        self.encoding = encoding
+        self.current_date = None
+        self.current_stream = None
+        self._setup_current_file()
+    
+    def _setup_current_file(self):
+        """Set up the current log file based on today's date."""
+        today = get_ist_now().strftime('%Y-%m-%d')
+        
+        # If date changed, close current stream
+        if self.current_date != today:
+            if self.current_stream:
+                self.current_stream.close()
+            
+            # Create new date directory
+            date_dir = self.base_dir / today
+            date_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Create new log file
+            log_file = date_dir / f"{self.module_type}.log"
+            self.current_stream = open(log_file, 'a', encoding=self.encoding)
+            self.current_date = today
+    
+    def emit(self, record):
+        """Emit a log record, creating new file if date changed."""
+        try:
+            # Check if we need to rotate to new date
+            today = get_ist_now().strftime('%Y-%m-%d')
+            if self.current_date != today:
+                self._setup_current_file()
+            
+            # Format and write the record
+            msg = self.format(record)
+            self.current_stream.write(msg + '\n')
+            self.current_stream.flush()
+        except Exception:
+            self.handleError(record)
+    
+    def close(self):
+        """Close the current stream."""
+        if self.current_stream:
+            self.current_stream.close()
+        super().close()
+
+
+class SafeTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """
+    Custom TimedRotatingFileHandler that handles missing directories gracefully.
+    
+    This prevents FileNotFoundError when the log cleanup process removes
+    date directories that the handler is trying to access during rollover.
+    """
+    
+    def getFilesToDelete(self):
+        """
+        Override to handle missing directories gracefully.
+        """
+        try:
+            return super().getFilesToDelete()
+        except (FileNotFoundError, OSError) as e:
+            # If the directory doesn't exist, just return empty list
+            # This happens when cleanup removes date directories
+            return []
+    
+    def doRollover(self):
+        """
+        Override to handle missing directories during rollover.
+        """
+        try:
+            super().doRollover()
+        except (FileNotFoundError, OSError) as e:
+            # If rollover fails due to missing directory, recreate the current log file
+            # directory and continue logging
+            try:
+                log_dir = os.path.dirname(self.baseFilename)
+                os.makedirs(log_dir, exist_ok=True)
+                # Reset the handler to use the current log file
+                self.stream = self._open()
+            except Exception as inner_e:
+                # If we still can't create the directory, fall back to console logging
+                print(f"Critical logging error: {inner_e}", file=sys.stderr) 
+
 # Constants for logging configuration
 MAX_LOG_FILE_SIZE = int(2.3 * 1024 * 1024)  # 2.3 MB
 BACKUP_COUNT = 7
@@ -203,24 +303,27 @@ def configure_root_logger():
 def get_logger(module_name: str) -> logging.Logger:
     """
     Get or configure a logger for the specified module.
-    - All loggers whose name starts with 'api.' will log to logs/api-YYYY-MM-DD.log (rotated daily)
-    - All others log to the main daily log file
+    - All loggers whose name starts with 'api.' will log to logs/YYYY-MM-DD/api.log (rotated daily)
+    - Broker monitor logs to logs/YYYY-MM-DD/broker_monitor.log (rotated daily)
+    - All others log to the main daily log file logs/YYYY-MM-DD/algosat.log
     """
     logger = logging.getLogger(module_name)
     if not logger.handlers:
-        from datetime import datetime
-        import os
-        today = get_ist_now().strftime('%Y-%m-%d')
-        date_dir = os.path.join(log_dir, today)
-        os.makedirs(date_dir, exist_ok=True)
+        # Determine module type for file naming
         if module_name.startswith("api."):
-            log_file = os.path.join(date_dir, f"api-{today}.log")
+            module_type = "api"
         elif module_name == "broker_monitor":
-            log_file = os.path.join(date_dir, f"broker_monitor-{today}.log")
+            module_type = "broker_monitor"
         else:
-            log_file = os.path.join(date_dir, f"algosat-{today}.log")
-        # Use TimedRotatingFileHandler for daily rotation, and update baseFilename at midnight
-        file_handler = TimedRotatingFileHandler(log_file, when="midnight", interval=1, backupCount=7, encoding="utf-8", utc=False)
+            module_type = "algosat"
+        
+        # Use our custom daily directory rotating handler
+        file_handler = DailyDirectoryRotatingFileHandler(
+            base_dir=log_dir,
+            filename_pattern=f"{module_type}.log",
+            module_type=module_type,
+            encoding="utf-8"
+        )
         file_handler.setLevel(logging.DEBUG)
         file_formatter = ISTFormatter(
             "%(asctime)s - %(name)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",

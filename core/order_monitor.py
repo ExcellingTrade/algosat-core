@@ -276,10 +276,13 @@ class OrderMonitor:
                     broker_exec_rows = result.fetchall()
                     total_quantity = 0
                     total_executed_quantity = 0
+                    vwap_total_value = 0.0
+                    vwap_total_qty = 0.0
                     for row in broker_exec_rows:
                         be = dict(row._mapping)
                         q = be.get('quantity') or 0
                         eq = be.get('executed_quantity') or 0
+                        exec_price = be.get('execution_price') or 0
                         try:
                             q = float(q) if q is not None else 0
                         except Exception:
@@ -288,14 +291,26 @@ class OrderMonitor:
                             eq = float(eq) if eq is not None else 0
                         except Exception:
                             eq = 0
+                        try:
+                            exec_price = float(exec_price) if exec_price is not None else 0
+                        except Exception:
+                            exec_price = 0
                         total_quantity += q
                         total_executed_quantity += eq
+                        # For VWAP, use executed_quantity * execution_price
+                        vwap_total_value += eq * exec_price
+                        vwap_total_qty += eq
+                    # Calculate VWAP entry price if any executed quantity
+                    entry_price = round(vwap_total_value / vwap_total_qty, 2) if vwap_total_qty > 0 else None
+                    update_fields = {"qty": total_quantity, "executed_quantity": total_executed_quantity}
+                    if entry_price is not None:
+                        update_fields["entry_price"] = entry_price
                     await update_rows_in_table(
                         target_table=orders,
                         condition=orders.c.id == self.order_id,
-                        new_values={"qty": total_quantity, "executed_quantity": total_executed_quantity}
+                        new_values=update_fields
                     )
-                    logger.info(f"OrderMonitor: Updated Orders table for order_id={self.order_id} with qty={total_quantity}, executed_quantity={total_executed_quantity}")
+                    logger.info(f"OrderMonitor: Updated Orders table for order_id={self.order_id} with qty={total_quantity}, executed_quantity={total_executed_quantity}, entry_price={entry_price}")
             except Exception as e:
                 logger.error(f"OrderMonitor: Error updating aggregated quantity/executed_quantity for order_id={self.order_id}: {e}")
             logger.info(f"OrderMonitor: Order {self.order_id} ENTRY broker statuses (live): {all_statuses}")
