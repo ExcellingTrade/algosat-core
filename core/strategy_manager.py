@@ -68,7 +68,7 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                     if active_symbols:
                         # Only print found symbols the first time
                         if not running_tasks:
-                            logger.info(f"🟢 Found active symbols: {[row.symbol for row in active_symbols]}")
+                            logger.info(f"🟢 Found active symbols: {[f"{row.symbol}-{row.strategy_name}" for row in active_symbols]}")
                         current_symbol_ids = {row.symbol_id for row in active_symbols}
                         
 

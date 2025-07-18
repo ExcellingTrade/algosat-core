@@ -24,7 +24,7 @@ logger = get_logger("strategy_runner")
 STRATEGY_MAP = {
     "OptionBuy": OptionBuyStrategy,
     # "'OptionSell'": OptionSellStrategy,
-    "SwingHighLow": SwingHighLowBuyStrategy,  # Now from swing_highlow_buy.py
+    "SwingHighLowBuy": SwingHighLowBuyStrategy,  # Now from swing_highlow_buy.py
 }
 
 async def run_strategy_config(config_row, data_manager: DataManager, order_manager: OrderManager, order_queue):
@@ -112,10 +112,6 @@ async def run_strategy_config(config_row, data_manager: DataManager, order_manag
         interval_minutes = interval_minutes.get("interval_minutes", 5)
     else:
         interval_minutes = getattr(config_row, "trade", {}) and getattr(config_row, "trade", {}).get("interval_minutes", 5)
-
-    # Only show progress bar for the first strategy instance (e.g., first symbol)
-    # For others, just log the wait time
-    # Use shared wait_for_next_candle from time_utils
 
     while True:
         try:

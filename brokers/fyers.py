@@ -508,10 +508,10 @@ class FyersWrapper(BrokerInterface):
 
             from_date_epoch = convert_to_epoch(from_date)
             to_date_epoch = convert_to_epoch(to_date)
-            formatted_symbol = f"{symbol}-{ins_type}" if ins_type else symbol
-
+            # formatted_symbol = f"{symbol}-{ins_type}" if ins_type else symbol
+            formatted_symbol =  symbol
             params = {
-                "symbol": formatted_symbol,
+                "symbol": symbol,
                 "resolution": ohlc_interval,
                 "range_from": from_date_epoch,
                 "range_to": to_date_epoch,
@@ -520,7 +520,7 @@ class FyersWrapper(BrokerInterface):
             }
 
             logger.debug(
-                f"Fetching async history for {formatted_symbol} from {from_date} to {to_date}... ")
+                f"Fetching async history for {symbol} from {from_date} to {to_date}... ")
 
             result = self.fyers.history(params)
             if asyncio.iscoroutine(result):

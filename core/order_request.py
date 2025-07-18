@@ -25,7 +25,9 @@ class OrderType(str, Enum):
 
 class ProductType(str, Enum):
     INTRADAY = "INTRADAY"
+    DELIVERY = "DELIVERY"
     NRML = "NRML"
+    MARGIN = "MARGIN"
     MIS = "MIS"
     CNC = "CNC"
     OPTION_STRATEGY = "OPTION_STRATEGY"  # Accept logical value for validation
@@ -94,13 +96,11 @@ class OrderRequest(BaseModel):
         strategy_name = self.extra.get('strategy_name')
         if order_type == OrderType.OPTION_STRATEGY:
             order_type = "SL_LIMIT"
+        # Map DELIVERY to MARGIN for Fyers
         if product_type == ProductType.OPTION_STRATEGY:
             product_type = "BO"
-        # Extract lot_qty, lot_size, stoploss, takeprofit from extra if present
-        # lot_qty = self.extra.get("lot_qty")
-        # lot_size = self.extra.get("lot_size")
-        # stoploss = self.extra.get("stoploss") or self.extra.get("stopLoss")
-        # takeprofit = self.extra.get("takeprofit") or self.extra.get("takeProfit")
+        elif product_type == ProductType.DELIVERY or (isinstance(product_type, str) and product_type.upper() == "DELIVERY"):
+            product_type = "MARGIN"
         fyers_dict = {
             "symbol": self.symbol,
             "qty": self.quantity,
@@ -134,8 +134,11 @@ class OrderRequest(BaseModel):
         strategy_name = self.extra.get('strategy_name')
         if order_type == OrderType.OPTION_STRATEGY:
             order_type = "SL"
+        # Map DELIVERY to NRML for Zerodha
         if product_type == ProductType.OPTION_STRATEGY:
             product_type = "MIS"
+        elif product_type == ProductType.DELIVERY or (isinstance(product_type, str) and product_type.upper() == "DELIVERY"):
+            product_type = "NRML"
         return {
             "tradingsymbol": self.symbol,
             "exchange": self.exchange or "NFO",
@@ -159,6 +162,7 @@ ORDER_TYPE_MAP = {
 PRODUCT_TYPE_MAP = {
     "INTRADAY": "INTRADAY",
     "NRML": "NRML",
+    "MARGIN": "MARGIN",
     "MIS": "INTRADAY",
     "CNC": "CNC",
     "BO": "BO",  # Accept broker-specific value for validation

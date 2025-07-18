@@ -1,406 +1,492 @@
+from datetime import datetime, time, timedelta
 from typing import Any, Optional
+from algosat.core.signal import TradeSignal
+import pandas as pd
+from algosat.common import constants, strategy_utils
+from algosat.common.broker_utils import calculate_backdate_days, get_trade_day
+from algosat.common.strategy_utils import calculate_end_date
+from algosat.core.data_manager import DataManager
+from algosat.core.order_manager import OrderManager
+from algosat.core.time_utils import localize_to_ist, get_ist_datetime
 from algosat.strategies.base import StrategyBase
 from algosat.common.logger import get_logger
 from algosat.common import swing_utils
-import pandas as pd
 import asyncio
 
 logger = get_logger(__name__)
 
 class SwingHighLowBuyStrategy(StrategyBase):
+
+    async def sync_open_positions(self):
+        """
+        Synchronize self._positions with open orders in the database for this strategy for the current trade day.
+        Uses the strategy_id from config to find related open orders.
+        """
+        self._positions = {}
+        from algosat.core.db import get_open_orders_for_strategy_and_tradeday
+        from algosat.core.db import AsyncSessionLocal
+        trade_day = get_trade_day(get_ist_datetime())
+        strategy_id = getattr(self.cfg, 'strategy_id', None)
+        if not strategy_id:
+            logger.warning("No strategy_id found in config, cannot sync open positions")
+            return
+        async with AsyncSessionLocal() as session:
+            open_orders = await get_open_orders_for_strategy_and_tradeday(session, strategy_id, trade_day)
+            for order in open_orders:
+                symbol = order.get("strike_symbol")
+                if symbol:
+                    if symbol not in self._positions:
+                        self._positions[symbol] = []
+                    self._positions[symbol].append(order)
+            logger.debug(f"Synced positions for strategy {strategy_id}: {list(self._positions.keys())}")
     """
-    Swing High/Low Breakout Options Buy Strategy.
-    Implements swing high/low entry, trailing stoploss, ATR/RSI/fixed target, and advanced exit logic.
-    Config is expected in the trade and indicators fields of the config dataclass.
+    Concrete implementation of a Swing High/Low breakout buy strategy.
+    Modularized and standardized to match option_buy.py structure.
     """
-    def __init__(self, config, data_manager, execution_manager):
+    def __init__(self, config, data_manager: DataManager, execution_manager: OrderManager):
         super().__init__(config, data_manager, execution_manager)
+        # Standardized config/state
         self.symbol = self.cfg.symbol
         self.exchange = self.cfg.exchange
         self.instrument = self.cfg.instrument
-        self.trade = self.cfg.trade  # Main config dict for strategy logic
-        self.indicators = self.cfg.indicators  # Indicator config dict
-        # Entry config
-        self.entry_cfg = self.trade.get("entry", {})
-        self.entry_timeframe = self.entry_cfg.get("timeframe", "5m")
-        self.entry_swing_left_bars = self.entry_cfg.get("swing_left_bars", 3)
-        self.entry_swing_right_bars = self.entry_cfg.get("swing_right_bars", 3)
-        self.entry_buffer = self.entry_cfg.get("entry_buffer", 0)
-        self.entry_confirmation_tf = self.entry_cfg.get("confirmation_candle_timeframe", "1m")
-        self.atm_strike_offset = self.entry_cfg.get("atm_strike_offset", 0)
-        # Stoploss config
-        self.stoploss_cfg = self.trade.get("stoploss", {})
-        self.stoploss_timeframe = self.stoploss_cfg.get("timeframe", "3m")
-        self.stoploss_swing_left_bars = self.stoploss_cfg.get("swing_left_bars", 3)
-        self.stoploss_swing_right_bars = self.stoploss_cfg.get("swing_right_bars", 3)
-        self.stoploss_trailing = self.stoploss_cfg.get("trailing", True)
-        self.stoploss_sl_buffer = self.stoploss_cfg.get("sl_buffer", 0)
-        self.stoploss_confirmation_tf = self.stoploss_cfg.get("confirmation_candle_timeframe", "1m")
-        # Other config fields
-        self.target_cfg = self.trade.get("target", {})
-        self.carry_forward_cfg = self.trade.get("carry_forward", {})
-        self.expiry_exit_cfg = self.trade.get("expiry_exit", {})
-        self.holiday_exit = self.trade.get("holiday_exit", False)
-        self.square_off_time = self.trade.get("square_off_time", "15:10")
-        self.max_nse_qty = self.trade.get("max_nse_qty", 900)
-        self.lot_size = self.trade.get("lot_size", 75)
-        self.ce_lot_qty = self.trade.get("ce_lot_qty", 2)
-        self.pe_lot_qty = self.trade.get("pe_lot_qty", 1)
-        self.max_trades_per_day = self.trade.get("max_trades_per_day", 3)
-        self.max_loss_trades_per_day = self.trade.get("max_loss_trades_per_day", 2)
-        self.max_loss_per_lot = self.trade.get("max_loss_per_lot", 2000)
-        self.premium_selection = self.trade.get("premium_selection", {})
-        # Indicator config
-        self.atr_period = self.indicators.get("atr_period", 10)
-        self.rsi_period = self.indicators.get("rsi_period", 14)
-        self.sma_period = self.indicators.get("sma_period", 14)
+        self.trade = self.cfg.trade
+        self.indicators = self.cfg.indicators
+        self.order_manager = execution_manager
         # Internal state
-        self._strikes = []
-        self._positions = {}
+        self._strikes = []  # Not used for spot, but kept for interface parity
+        self._positions = {}  # open positions by strike
         self._setup_failed = False
         self._hh_levels = []
         self._ll_levels = []
-        # Document config usage
-        logger.info(f"Entry config: timeframe={self.entry_timeframe}, swing_left_bars={self.entry_swing_left_bars}, swing_right_bars={self.entry_swing_right_bars}, entry_buffer={self.entry_buffer}, confirmation_tf={self.entry_confirmation_tf}, atm_strike_offset={self.atm_strike_offset}")
-        logger.info(f"Stoploss config: timeframe={self.stoploss_timeframe}, swing_left_bars={self.stoploss_swing_left_bars}, swing_right_bars={self.stoploss_swing_right_bars}, trailing={self.stoploss_trailing}, sl_buffer={self.stoploss_sl_buffer}, confirmation_tf={self.stoploss_confirmation_tf}")
+        self._pending_signal = None  # Dict with 'breakout_price', 'breakout_time'
+        self._pending_signal_confirm_until = None  # Timestamp until which confirmation window ends
+        # Config fields modularized
+        self._entry_cfg = self.trade.get("entry", {})
+        self._stoploss_cfg = self.trade.get("stoploss", {})
+        self._confirm_cfg = self.trade.get("confirmation", {})
+        self.entry_timeframe = self._entry_cfg.get("timeframe", "5m")
+        self.entry_minutes = int(self.entry_timeframe.replace("m", "")) if self.entry_timeframe.endswith("m") else 5
+        self.entry_swing_left_bars = self._entry_cfg.get("swing_left_bars", 3)
+        self.entry_swing_right_bars = self._entry_cfg.get("swing_right_bars", 3)
+        self.entry_buffer = self._entry_cfg.get("entry_buffer", 0)
+        self.stop_timeframe = self._stoploss_cfg.get("timeframe", "5m")
+        self.stop_percentage = self._stoploss_cfg.get("percentage", 0.05)
+        self.confirm_timeframe = self._confirm_cfg.get("timeframe", "1m")
+        self.confirm_minutes = int(self.confirm_timeframe.replace("m", "")) if self.confirm_timeframe.endswith("m") else 1
+        self.confirm_candles = self._confirm_cfg.get("candles", 1)
+        self.ce_lot_qty = self.trade.get("ce_lot_qty", 2)
+        self.lot_size = self.trade.get("lot_size", 75)
+        self.rsi_ignore_above = self._entry_cfg.get("rsi_ignore_above", 80)
+        self.rsi_period = self.indicators.get("rsi_period", 14)
+        logger.info(f"SwingHighLowBuyStrategy config: {self.trade}")
+    
+    async def ensure_broker(self):
+        # No longer needed for data fetches, but keep for order placement if required
+        await self.dp._ensure_broker()
 
     async def setup(self) -> None:
         """
-        One-time setup for the strategy: fetch historical spot data for swing high/low detection
-        using entry config timeframe and swing settings. Sets _setup_failed if unable to proceed.
+        One-time setup: assign key config parameters to self for easy access throughout the strategy.
+        No data fetching or calculations are performed here.
         """
         try:
-            from algosat.common.strategy_utils import get_trade_day, get_ist_datetime, calculate_first_candle_details
-            trade_day = get_trade_day(get_ist_datetime())
-            interval_minutes = int(self.entry_timeframe.replace("m", "")) if self.entry_timeframe.endswith("m") else 5
-            first_candle_time = self.trade.get("first_candle_time", "09:15")
-            candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
-            from_date = candle_times["from_date"]
-            to_date = candle_times["to_date"]
-            # Fetch spot history ONLY (never option strikes)
-            from algosat.common import strategy_utils
-            spot_history_dict = await strategy_utils.fetch_strikes_history(
-                self.data_manager, [self.symbol], from_date, to_date, interval_minutes, ins_type=self.instrument, cache=True
+            # All config fields are set in __init__, nothing else to do.
+            logger.info(
+                f"SwingHighLowBuyStrategy setup: symbol={self.symbol}, "
+                f"entry_timeframe={self.entry_timeframe}, stop_timeframe={self.stop_timeframe}, "
+                f"entry_swing_left_bars={self.entry_swing_left_bars}, entry_swing_right_bars={self.entry_swing_right_bars}, "
+                f"entry_buffer={self.entry_buffer}, confirm_timeframe={self.confirm_timeframe}, "
+                f"confirm_candles={self.confirm_candles}, ce_lot_qty={self.ce_lot_qty}, lot_size={self.lot_size}, "
+                f"rsi_ignore_above={self.rsi_ignore_above}, rsi_period={self.rsi_period}, stop_percentage={self.stop_percentage}"
             )
-            spot_history = spot_history_dict.get(self.symbol)
-            if not spot_history or len(spot_history) < 20:
-                logger.error(f"Not enough bars for swing calculation: got {len(spot_history) if spot_history else 0}")
-                self._setup_failed = True
-                return
-            df = pd.DataFrame(spot_history)
-            if not all(col in df.columns for col in ["timestamp", "high", "low", "close"]):
-                logger.error("Missing required columns in OHLCV data")
-                self._setup_failed = True
-                return
-            # Calculate swing pivots using entry swing config
-            swing_df = swing_utils.find_hhlh_pivots(
-                df,
-                left_bars=self.entry_swing_left_bars,
-                right_bars=self.entry_swing_right_bars
-            )
-            hh_points = swing_df[swing_df["is_HH"]]
-            ll_points = swing_df[swing_df["is_LL"]]
-            self._hh_levels = hh_points[["timestamp", "zz"]].to_dict("records")
-            self._ll_levels = ll_points[["timestamp", "zz"]].to_dict("records")
-            logger.info(f"Identified {len(self._hh_levels)} HH and {len(self._ll_levels)} LL pivots for {self.symbol} (entry config)")
-            self._strikes = self.select_strikes_from_pivots()
         except Exception as e:
             logger.error(f"SwingHighLowBuyStrategy setup failed: {e}", exc_info=True)
             self._setup_failed = True
 
+    def compute_indicators(self, df: pd.DataFrame, config: dict) -> dict:
+        """
+        Compute swing pivots and any other indicators for the strategy.
+        Returns a dict with keys: hh_levels, ll_levels.
+        """
+        try:
+            left_bars = config.get("swing_left_bars", 3)
+            right_bars = config.get("swing_right_bars", 3)
+            swing_df = swing_utils.find_hhlh_pivots(
+                df,
+                left_bars=left_bars,
+                right_bars=right_bars
+            )
+            hh_points = swing_df[swing_df["is_HH"]]
+            ll_points = swing_df[swing_df["is_LL"]]
+            hh_levels = hh_points[["timestamp", "zz"]].to_dict("records")
+            ll_levels = ll_points[["timestamp", "zz"]].to_dict("records")
+            return {"hh_levels": hh_levels, "ll_levels": ll_levels}
+        except Exception as e:
+            logger.error(f"Error in compute_indicators: {e}", exc_info=True)
+            return {"hh_levels": [], "ll_levels": []}
+
     def select_strikes_from_pivots(self):
         """
-        Select option strikes for entry based on the latest swing high/low pivots.
-        This can be customized: e.g., use the most recent HH/LL, or a buffer above/below, etc.
-        Returns a list of strike symbols (strings) to monitor/trade.
+        Select option strikes for entry based on latest swing high/low pivots.
+        Returns a list of strike symbols to monitor/trade.
         """
-        # Example: Use the latest HH and LL price as reference for strike selection
         if not self._hh_levels or not self._ll_levels:
             logger.warning("No HH/LL pivots available for strike selection.")
             return []
         latest_hh = self._hh_levels[-1]["zz"]
         latest_ll = self._ll_levels[-1]["zz"]
-        # Use premium_selection config or fallback to ATM/OTM logic
-        strikes = []
-        # Example: ATM strike (rounded to nearest 50/100)
+        premium_selection = self.trade.get("premium_selection", {})
         atm = round((latest_hh + latest_ll) / 2, -2)
-        strikes.append(atm)
-        # Optionally add OTM/ITM strikes based on config
-        otm_offset = self.premium_selection.get("otm_offset", 100)
+        strikes = [atm]
+        otm_offset = premium_selection.get("otm_offset", 100)
         strikes.append(atm + otm_offset)
         strikes.append(atm - otm_offset)
-        # Convert to string if needed (depends on broker symbol format)
         return [str(s) for s in strikes]
-
-    async def place_order(self, strike: str, price: float, qty: int) -> Optional[dict]:
-        """
-        Place a buy order using the order_manager. Returns order details dict if successful.
-        """
-        try:
-            order_details = {
-                "symbol": self.symbol,
-                "strike": strike,
-                "side": "BUY",
-                "qty": qty,
-                "price": price,
-            }
-            # Integrate with order_manager (assume async API)
-            result = await self.order_manager.place_order(
-                symbol=self.symbol,
-                strike=strike,
-                side="BUY",
-                qty=qty,
-                price=price,
-                order_type="MARKET",  # or use config
-            )
-            order_id = result.get("order_id") if result else None
-            if order_id:
-                logger.info(f"Order placed successfully: {order_id}")
-                return {"order_id": order_id, **order_details}
-            else:
-                logger.error(f"Order placement failed: {result}")
-                return None
-        except Exception as e:
-            logger.error(f"Exception in place_order: {e}", exc_info=True)
-            return None
 
     async def process_cycle(self) -> Optional[dict]:
         """
-        Main signal evaluation cycle: fetch latest spot data, check for HH/LL breakout,
-        and place buy order if breakout conditions are met and no open position exists.
-        After entry, starts stoploss monitoring loop.
+        Modularized process_cycle: fetches data, evaluates signal, places order, and confirms entry.
+        All signal logic is moved to evaluate_signal.
         """
         try:
-            # Fetch latest spot candle (assume 1 bar, most recent)
-            from algosat.common import strategy_utils
-            interval_minutes = self.trade.get("interval_minutes", 5)
-            now = pd.Timestamp.now(tz="Asia/Kolkata")
-            # Use last completed candle's time window
-            to_date = now.floor(f"{interval_minutes}min")
-            from_date = to_date - pd.Timedelta(minutes=interval_minutes)
-            spot_history_dict = await strategy_utils.fetch_strikes_history(
-                self.data_manager, [self.symbol], from_date, to_date, interval_minutes, ins_type=self.instrument, cache=False
+            if self._setup_failed:
+                logger.warning("process_cycle aborted: setup failed.")
+                return None
+
+            # Sync open positions from DB before proceeding
+            await self.sync_open_positions()
+            # If any open position exists, skip processing
+            if self._positions and any(self._positions.values()):
+                logger.info("Open position(s) exist for this strategy, skipping process_cycle.")
+                return None
+
+            # 1. Fetch latest confirm timeframe data (1-min by default)
+            confirm_history_dict = await self.fetch_history_data(
+                self.dp, [self.symbol], self.confirm_minutes
             )
-            spot_history = spot_history_dict.get(self.symbol)
-            if not spot_history or len(spot_history) == 0:
-                logger.warning("No latest spot candle available for signal evaluation.")
+            confirm_df = confirm_history_dict.get(self.symbol)
+            if confirm_df is not None and not isinstance(confirm_df, pd.DataFrame):
+                confirm_df = pd.DataFrame(confirm_df)
+            # Defensive check
+            if confirm_df is None or len(confirm_df) < 2:
+                logger.info("Not enough confirm_df data for breakout evaluation.")
                 return None
-            latest_candle = spot_history[-1]
-            # Check for breakout above HH or below LL
-            if not self._hh_levels or not self._ll_levels:
-                logger.warning("No HH/LL pivots available for signal evaluation.")
+            # Only use closed candles
+            now = pd.Timestamp.now(tz="Asia/Kolkata").floor("min")
+            df = confirm_df.copy()
+            if "timestamp" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"])
+                df = df.sort_values("timestamp")
+                df = df.set_index("timestamp")
+            else:
+                logger.error("confirm_df missing 'timestamp' column.")
                 return None
-            last_hh = self._hh_levels[-1]["zz"]
-            last_ll = self._ll_levels[-1]["zz"]
-            close = latest_candle["close"]
-            # Only buy if price breaks above last HH (bullish breakout)
-            if close > last_hh:
-                if self._positions.get("buy", False):
-                    logger.info("Already in buy position, skipping new entry.")
+            if df.index.tz is None:
+                df.index = df.index.tz_localize("Asia/Kolkata")
+            df = df[df.index < now].copy()
+            if df is None or len(df) < 2:
+                logger.info("Not enough closed 1-min candles for breakout evaluation.")
+                return None
+            confirm_df_sorted = df.reset_index()
+
+            # 2. Fetch entry timeframe candles
+            entry_history_dict = await self.fetch_history_data(
+                self.dp, [self.symbol], self.entry_minutes
+            )
+            entry_df = entry_history_dict.get(self.symbol)
+            if entry_df is not None and not isinstance(entry_df, pd.DataFrame):
+                entry_df = pd.DataFrame(entry_df)
+            if entry_df is None or len(entry_df) < 10:
+                logger.info("Not enough entry_df data for swing high/low detection.")
+                return None
+
+            # 3. Evaluate signal using modular method
+            signal = await self.evaluate_signal(entry_df, confirm_df_sorted, self.trade)
+            if not signal:
+                logger.info("No trade signal detected for this cycle.")
+                return None
+            logger.info(f"Trade signal detected: {signal}")
+
+            # 4. Place order if signal
+            order_info = await self.process_order(signal, confirm_df_sorted, signal.symbol)
+            if order_info:
+                logger.info(f"Order placed: {order_info}. Awaiting atomic confirmation on next entry candle close.")
+                # Wait for next entry candle to confirm breakout
+                await strategy_utils.wait_for_next_candle(self.entry_minutes)
+                # Fetch fresh entry_df for confirmation
+                entry_history_dict2 = await self.fetch_history_data(
+                    self.dp, [self.symbol], self.entry_minutes
+                )
+                entry_df2 = entry_history_dict2.get(self.symbol)
+                if entry_df2 is not None and not isinstance(entry_df2, pd.DataFrame):
+                    entry_df2 = pd.DataFrame(entry_df2)
+                if entry_df2 is None or len(entry_df2) < 2:
+                    logger.warning("Not enough entry_df data for atomic confirmation after order.")
+                    # Unable to confirm, exit order for safety
+                    await self.exit_order(order_info.get("order_id") or order_info.get("id"))
+                    logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}")
                     return None
-                # Place buy order using order_manager
-                strike = self._strikes[0] if self._strikes else None
-                qty = self.ce_lot_qty * self.lot_size
-                order_result = await self.place_order(strike, close, qty)
-                if order_result:
-                    self._positions["buy"] = True
-                    # Start stoploss monitoring loop after entry
-                    logger.info("Starting stoploss monitoring after entry.")
-                    asyncio.create_task(self.monitor_stoploss_loop(order_result))
-                    return order_result
+                entry_df2_sorted = entry_df2.sort_values("timestamp")
+                latest_entry = entry_df2_sorted.iloc[-1]
+                # Confirm based on the breakout direction
+                if (signal.signal_direction == "UP" and latest_entry["close"] > signal.price) or \
+                   (signal.signal_direction == "DOWN" and latest_entry["close"] < signal.price):
+                    logger.info("Breakout confirmed after atomic check, holding position.")
+                    return order_info
                 else:
-                    logger.error("Order placement failed in process_cycle.")
+                    logger.info("Breakout failed atomic confirmation, exiting order.")
+                    await self.exit_order(order_info.get("order_id") or order_info.get("id"))
+                    logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}")
                     return None
             else:
-                logger.info(f"No breakout: close={close}, last_hh={last_hh}")
-            return None
+                logger.error("Order placement failed in dual timeframe breakout.")
+                return None
         except Exception as e:
             logger.error(f"Error in process_cycle: {e}", exc_info=True)
             return None
 
-    def evaluate_signal(self, spot_df_entry: pd.DataFrame, spot_df_confirm: pd.DataFrame, config: dict, strike: str) -> Optional[dict]:
+    async def cancel_order(self, order_id):
+        logger.info(f"Stub: cancelling order {order_id}")
+        # Implement integration with order manager if needed
+
+    async def exit_order(self, order_id):
         """
-        Evaluate entry signal for CE:
-        - Detect breakout: price must close above last swing high + entry_buffer (from entry config) on entry timeframe.
-        - Require a confirmation candle (from confirmation_candle_timeframe) that closes above previous close on confirmation timeframe.
-        - Only after both conditions are met, generate an entry signal (with price, strike, qty, etc).
-        - Uses spot data only for swing high detection.
-        - Always fetches latest swing points using swing_utils.get_last_swing_points.
+        Immediately exit/cancel the given order (atomic entry confirmation).
         """
-        if spot_df_entry is None or len(spot_df_entry) < 2 or spot_df_confirm is None or len(spot_df_confirm) < 2:
-            logger.info("Not enough spot data for signal evaluation.")
-            return None
-        # Calculate pivots and get last swing points every call (entry timeframe)
-        swing_df = swing_utils.find_hhlh_pivots(
-            spot_df_entry,
-            left_bars=self.entry_swing_left_bars,
-            right_bars=self.entry_swing_right_bars
-        )
-        last_hh, last_ll, _, _ = swing_utils.get_last_swing_points(swing_df)
-        if not last_hh:
-            logger.info("No HH pivot available for signal evaluation.")
-            return None
-        entry_buffer = self.entry_buffer
-        # 1. Detect breakout: close > last_hh['price'] + entry_buffer (entry timeframe)
-        last_row_entry = spot_df_entry.iloc[-1]
-        close_entry = last_row_entry["close"]
-        breakout = close_entry > (last_hh['price'] + entry_buffer)
-        if not breakout:
-            logger.info(f"No breakout: close={close_entry}, last_hh+buffer={last_hh['price'] + entry_buffer}")
-            return None
-        # 2. Confirmation candle logic (confirmation timeframe)
-        last_row_confirm = spot_df_confirm.iloc[-1]
-        prev_close_confirm = spot_df_confirm.iloc[-2]["close"]
-        close_confirm = last_row_confirm["close"]
-        if close_confirm <= prev_close_confirm:
-            logger.info(f"Confirmation failed: close={close_confirm} <= prev_close={prev_close_confirm}")
-            return None
-        # 3. Generate entry signal
-        qty = self.ce_lot_qty * self.lot_size
-        signal = {
-            "symbol": self.symbol,
-            "strike": strike,
-            "side": "BUY",
-            "qty": qty,
-            "price": close_entry,
-            "timestamp": last_row_entry["timestamp"],
-        }
-        # 4. RSI ignore logic (entry)
-        rsi_ignore_above = self.entry_cfg.get("rsi_ignore_above", 80)
-        rsi_ignore_below = self.entry_cfg.get("rsi_ignore_below", 20)
-        rsi_period = self.rsi_period
-        # Calculate RSI on entry timeframe
-        close_series = spot_df_entry["close"]
-        rsi = None
-        if len(close_series) >= rsi_period:
-            delta = close_series.diff()
-            gain = delta.where(delta > 0, 0.0)
-            loss = -delta.where(delta < 0, 0.0)
-            avg_gain = gain.rolling(window=rsi_period, min_periods=rsi_period).mean()
-            avg_loss = loss.rolling(window=rsi_period, min_periods=rsi_period).mean()
-            rs = avg_gain / avg_loss
-            rsi = 100 - (100 / (1 + rs))
-            rsi_val = rsi.iloc[-1]
-            logger.info(f"RSI at entry: {rsi_val}")
-            if rsi_val >= rsi_ignore_above:
-                logger.info(f"RSI {rsi_val} >= rsi_ignore_above {rsi_ignore_above}: ignoring entry signal.")
+        logger.info(f"Exiting order {order_id} due to failed atomic entry confirmation.")
+        # Implement integration with order manager if needed, e.g., cancel or market exit
+        await self.cancel_order(order_id)
+
+    async def fetch_history_data(self, broker, symbols, interval_minutes):
+        """
+        Modular history fetch for spot/option data, returns dict[symbol] = pd.DataFrame.
+        All datetimes should be timezone-aware (IST).
+        Calculates from_date and to_date internally based on config and current time.
+        """
+        from algosat.common import strategy_utils
+        try:
+            current_date = pd.Timestamp.now(tz="Asia/Kolkata")
+            back_days = calculate_backdate_days(interval_minutes)
+            trade_day = get_trade_day(current_date - timedelta(days=back_days))
+            start_date = localize_to_ist(datetime.combine(trade_day, time(9, 15)))
+            current_end_date = localize_to_ist(datetime.combine(current_date, get_ist_datetime().time()))
+            if interval_minutes == 1:
+                current_end_date = current_end_date.replace(hour=10, minute=15)  # Align to minute
+            elif interval_minutes == 5:
+                current_end_date = current_end_date.replace(hour=10, minute=20)
+            current_end_date = current_end_date.replace(day=18)
+            end_date = calculate_end_date(current_end_date, interval_minutes)
+            # end_date = end_date.replace(day=15,hour=10, minute=48, second=0, microsecond=0)  # Market close time
+            logger.info(f"Fetching history for {symbols} from {start_date} to {end_date} interval {interval_minutes}m")
+            # history_dict = await strategy_utils.fetch_instrument_history(
+            #     broker, symbols, start_date, end_date, interval_minutes, ins_type=self.instrument, cache=False
+            # )
+            
+            history_data = await strategy_utils.fetch_instrument_history(
+                self.dp,
+                [self.symbol],
+                from_date=start_date,
+                to_date=end_date,
+                interval_minutes=interval_minutes,
+                ins_type="",
+                cache=False
+            )
+            
+            return history_data
+        except Exception as e:
+            logger.error(f"Error in fetch_history_data: {e}", exc_info=True)
+            return {}
+
+    async def process_order(self, signal_payload, data, strike):
+        """
+        Place an order using the order_manager, passing config as in option_buy.py.
+        Returns order info dict if an order is placed, else None.
+        """
+        if signal_payload:
+            ts = data.iloc[-1].get('timestamp', 'N/A') if hasattr(data, 'iloc') and len(data) > 0 else signal_payload.get('timestamp', 'N/A')
+            logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
+            # order_request = {
+            #     "symbol": signal_payload.get("symbol", self.symbol),
+            #     "strike": signal_payload.get("strike", strike),
+            #     "side": signal_payload.get("side", "BUY"),
+            #     "qty": signal_payload.get("qty"),
+            #     "price": signal_payload.get("price"),
+            #     "order_type": self.trade.get("order_type", "MARKET"),
+            # }
+            order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
+                signal_payload, self.cfg
+            )
+            result = await self.order_manager.place_order(
+                self.cfg,
+                order_request,
+                strategy_name=None
+            )
+            if result:
+                logger.info(f"Order placed successfully: {result}")
+                # Convert OrderRequest to dict for merging
+                if hasattr(order_request, 'dict'):
+                    order_request_dict = order_request.dict()
+                else:
+                    order_request_dict = dict(order_request)
+                return {**order_request_dict, **result}
+            else:
+                logger.error(f"Order placement failed: {result}")
                 return None
-        signal = {
-            "symbol": self.symbol,
-            "strike": strike,
-            "side": "BUY",
-            "qty": qty,
-            "price": close_entry,
-            "timestamp": last_row_entry["timestamp"],
-            "rsi_at_entry": float(rsi_val) if rsi is not None else None,
-        }
-        logger.info(f"Entry signal generated: {signal}")
-        return signal
+        else:
+            logger.debug(f"No signal for {strike}.")
+            return None
+
+    # The dual timeframe breakout logic is now handled directly in process_cycle.
+    # The previous single-timeframe breakout evaluate_signal is obsolete and removed.
+
+    def evaluate_exit(self, data: Any, position: Any) -> Optional[dict]:
+        """
+        Evaluate exit conditions based on fetched data and current position.
+        This method combines price-based and candle-based exit logic.
+        Return an order payload dict if exit condition is met, otherwise None.
+        """
+        try:
+            if not position:
+                return None
+            
+            # Extract necessary info from position
+            parent_order_id = position.get("order_id") or position.get("id")
+            if not parent_order_id:
+                logger.warning("No order ID found in position data")
+                return None
+            
+            # Get current price from data
+            last_price = None
+            if isinstance(data, dict):
+                last_price = data.get("ltp") or data.get("close") or data.get("price")
+            elif hasattr(data, 'iloc') and len(data) > 0:  # DataFrame
+                last_row = data.iloc[-1]
+                last_price = last_row.get("close") or last_row.get("ltp")
+            
+            if last_price is None:
+                logger.warning("Could not extract price from data for exit evaluation")
+                return None
+            
+            # For now, implement basic exit logic
+            # In a production environment, this would check stop loss, take profit, 
+            # trailing stops, time-based exits, etc.
+            
+            # Example: Simple percentage-based stop loss
+            entry_price = position.get("entry_price") or position.get("price")
+            if entry_price:
+                stop_loss_pct = self._stoploss_cfg.get("percentage", 0.05)  # 5% default
+                stop_loss_price = entry_price * (1 - stop_loss_pct)
+                
+                if last_price <= stop_loss_price:
+                    logger.info(f"Stop loss triggered: price {last_price} <= stop {stop_loss_price}")
+                    return {
+                        "symbol": position.get("symbol", self.symbol),
+                        "strike": position.get("strike"),
+                        "side": "SELL",  # Exit by selling
+                        "qty": position.get("qty"),
+                        "price": last_price,
+                        "order_type": "MARKET",
+                        "exit_reason": "stop_loss"
+                    }
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error in evaluate_exit: {e}", exc_info=True)
+            return None
+        
+    async def evaluate_signal(self, entry_df, confirm_df, config) -> Optional[TradeSignal]:
+        """
+        Modular method to evaluate entry signals for swing high/low breakouts.
+        Returns a TradeSignal object if signal is detected, else None.
+        """
+        from algosat.core.signal import TradeSignal, SignalType
+        try:
+            # 1. Identify most recent swing high/low from entry_df
+            entry_left = self.entry_swing_left_bars
+            entry_right = self.entry_swing_right_bars
+            swing_df = swing_utils.find_hhlh_pivots(
+                entry_df,
+                left_bars=entry_left,
+                right_bars=entry_right
+            )
+            last_hh, last_ll, last_hl, last_lh = swing_utils.get_last_swing_points(swing_df)
+            logger.info(f"Latest swing points: HH={last_hh}, LL={last_ll}, HL={last_hl}, LH={last_lh}")
+            last_hh, last_ll = swing_utils.get_latest_confirmed_high_low(swing_df)
+            if not last_hh or not last_ll:
+                logger.info("No HH/LL pivot available for breakout evaluation.")
+                return None
+            entry_buffer = self.entry_buffer
+            breakout_high_level = last_hh["price"] + entry_buffer
+            breakout_low_level = last_ll["price"] - entry_buffer
+
+            # 2. In confirm_df, check last two closed candles for breakout
+            if "timestamp" in confirm_df.columns:
+                confirm_df = confirm_df.sort_values("timestamp")
+            last_two = confirm_df.tail(2)
+            if len(last_two) < 2:
+                logger.info("Not enough 1-min candles for confirmation logic.")
+                return None
+            prev_candle = last_two.iloc[0]
+            last_candle = last_two.iloc[1]
+
+            # 3. Determine breakout direction and signal
+            breakout_type = None
+            trend = None
+            direction = None
+            signal_price = None
+            if prev_candle["close"] > breakout_high_level and last_candle["close"] > prev_candle["close"]:
+                breakout_type = "CE"
+                trend = "UP"
+                direction = "UP"
+                signal_price = breakout_high_level
+            elif prev_candle["close"] < breakout_low_level and last_candle["close"] < prev_candle["close"]:
+                breakout_type = "PE"
+                trend = "DOWN"
+                direction = "DOWN"
+                signal_price = breakout_low_level
+            else:
+                logger.debug("No breakout detected in confirm candles.")
+                return None
+
+            # 4. Get spot price and ATM strike for option
+            # ltp_response = await self.dp.get_ltp(self.symbol)
+            # if isinstance(ltp_response, dict):
+            #     spot_price = ltp_response.get(self.symbol)
+            # else:
+            #     spot_price = ltp_response
+            spot_price = last_candle["close"]  # Use last candle close as spot price
+            strike = swing_utils.get_atm_strike_symbol(self.cfg.symbol, spot_price, breakout_type, self.trade)
+            qty = self.ce_lot_qty * self.lot_size if breakout_type == "CE" else self.trade.get("pe_lot_qty", 1) * self.lot_size
+            if breakout_type == "CE":
+                lot_qty = config.get("ce_lot_qty", 1)
+            else:
+                lot_qty = config.get("pe_lot_qty", 1)
+            logger.info(f"Breakout detected: type={breakout_type}, trend={trend}, direction={direction}, strike={strike}, price={last_candle['close']}")
+            from algosat.core.signal import Side
+            signal = TradeSignal(
+                symbol=strike,
+                side="BUY",
+                price=last_candle["close"],
+                signal_type=SignalType.ENTRY,
+                signal_time=last_candle["timestamp"],
+                signal_direction=direction,
+                lot_qty=lot_qty,
+            )
+            logger.info(f"Breakout detected: type={breakout_type}, direction={direction}, strike={strike}, price={last_candle['close']}")
+            return signal
+        except Exception as e:
+            logger.error(f"Error in evaluate_signal: {e}", exc_info=True)
+            return None
 
     async def evaluate_price_exit(self, parent_order_id: int, last_price: float):
-        """Exit based on price (stub)."""
+        """
+        Exit based on price (stub for parity with option_buy.py).
+        """
         return None
 
     async def evaluate_candle_exit(self, parent_order_id: int, history: dict):
-        """Exit based on candle history (stub)."""
+        """
+        Exit based on candle history (stub for parity with option_buy.py).
+        """
         return None
-
-    async def evaluate_stoploss_exit(self, spot_df_sl: pd.DataFrame, spot_df_confirm_sl: pd.DataFrame, entry_signal: dict) -> Optional[dict]:
-        """
-        Evaluate stoploss exit for CE:
-        - Use stoploss config timeframe and swing settings to find latest swing low.
-        - SL is updated to latest swing low (trailing if enabled).
-        - Exit if close < swing low + sl_buffer, and next 1-min candle closes below previous close.
-        - If trailing is enabled, SL is adjusted upward for every new higher swing low.
-        - Returns exit signal dict if exit condition met, else None.
-        """
-        if spot_df_sl is None or len(spot_df_sl) < 2 or spot_df_confirm_sl is None or len(spot_df_confirm_sl) < 2:
-            logger.info("Not enough spot data for stoploss evaluation.")
-            return None
-        # Calculate pivots and get last swing points every call (stoploss timeframe)
-        swing_df = swing_utils.find_hhlh_pivots(
-            spot_df_sl,
-            left_bars=self.stoploss_swing_left_bars,
-            right_bars=self.stoploss_swing_right_bars
-        )
-        _, last_ll, _, _ = swing_utils.get_last_swing_points(swing_df)
-        if not last_ll:
-            logger.info("No LL pivot available for stoploss evaluation.")
-            return None
-        sl_buffer = self.stoploss_sl_buffer
-        # 1. Compute stoploss level: swing low + sl_buffer
-        sl_level = last_ll['price'] + sl_buffer
-        last_row_sl = spot_df_sl.iloc[-1]
-        close_sl = last_row_sl["close"]
-        # 2. Exit if close < sl_level
-        if close_sl >= sl_level:
-            logger.info(f"No stoploss exit: close={close_sl}, sl_level={sl_level}")
-            return None
-        # 3. Confirmation candle logic (1-min candle closes below previous close)
-        last_row_confirm = spot_df_confirm_sl.iloc[-1]
-        prev_close_confirm = spot_df_confirm_sl.iloc[-2]["close"]
-        close_confirm = last_row_confirm["close"]
-        if close_confirm >= prev_close_confirm:
-            logger.info(f"Stoploss confirmation failed: close={close_confirm} >= prev_close={prev_close_confirm}")
-            return None
-        # 4. Trailing logic: if enabled, SL is updated upward for every new higher swing low
-        # (This is handled by always using latest swing low)
-        qty = entry_signal["qty"] if entry_signal else None
-        signal = {
-            "symbol": self.symbol,
-            "side": "SELL",
-            "qty": qty,
-            "price": close_sl,
-            "timestamp": last_row_sl["timestamp"],
-            "sl_level": sl_level,
-        }
-        logger.info(f"Stoploss exit signal generated: {signal}")
-        return signal
-
-    async def monitor_stoploss_loop(self, entry_signal: dict):
-        """
-        After entry, periodically fetch new spot history every X (stoploss timeframe) minutes
-        and evaluate stoploss exit logic. Stops when stoploss exit is triggered.
-        - Uses stoploss config for timeframe, swing, buffer, and confirmation tf.
-        - All spot data is fetched fresh each cycle.
-        - Logs all config usage and actions.
-        """
-        import asyncio
-        from algosat.common import strategy_utils
-        symbol = self.symbol
-        stoploss_tf = self.stoploss_timeframe
-        confirm_tf = self.stoploss_confirmation_tf
-        interval_minutes = int(stoploss_tf.replace("m", "")) if stoploss_tf.endswith("m") else 3
-        confirm_minutes = int(confirm_tf.replace("m", "")) if confirm_tf.endswith("m") else 1
-        logger.info(f"Starting stoploss monitoring loop: stoploss_tf={stoploss_tf}, confirm_tf={confirm_tf}")
-        last_exit_signal = None
-        while True:
-            now = pd.Timestamp.now(tz="Asia/Kolkata")
-            # Fetch stoploss timeframe spot history (enough bars for swing calc)
-            sl_bars = max(self.stoploss_swing_left_bars, self.stoploss_swing_right_bars) + 3
-            from_date_sl = now - pd.Timedelta(minutes=interval_minutes * sl_bars)
-            to_date_sl = now
-            spot_history_dict_sl = await strategy_utils.fetch_strikes_history(
-                self.data_manager, [symbol], from_date_sl, to_date_sl, interval_minutes, ins_type=self.instrument, cache=False
-            )
-            spot_history_sl = spot_history_dict_sl.get(symbol)
-            spot_df_sl = pd.DataFrame(spot_history_sl) if spot_history_sl else None
-            # Fetch confirmation tf spot history (last 2 bars)
-            from_date_confirm = now - pd.Timedelta(minutes=confirm_minutes * 2)
-            to_date_confirm = now
-            spot_history_dict_confirm = await strategy_utils.fetch_strikes_history(
-                self.data_manager, [symbol], from_date_confirm, to_date_confirm, confirm_minutes, ins_type=self.instrument, cache=False
-            )
-            spot_history_confirm = spot_history_dict_confirm.get(symbol)
-            spot_df_confirm = pd.DataFrame(spot_history_confirm) if spot_history_confirm else None
-            # Evaluate stoploss exit
-            exit_signal = await self.evaluate_stoploss_exit(spot_df_sl, spot_df_confirm, entry_signal)
-            if exit_signal:
-                logger.info(f"Stoploss exit triggered: {exit_signal}")
-                # Place exit order (integrate with order_manager if needed)
-                # await self.place_exit_order(exit_signal)  # Implement as needed
-                last_exit_signal = exit_signal
-                break
-            logger.info(f"No stoploss exit. Sleeping for {interval_minutes} minutes.")
-            await asyncio.sleep(interval_minutes * 60)
-        return last_exit_signal

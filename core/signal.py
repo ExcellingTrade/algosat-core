@@ -11,8 +11,8 @@ class SignalType(Enum):
 class TradeSignal:
     symbol: str
     side: Side
-    price: float
     signal_type: SignalType
+    price: float = None
     candle_range: float = None
     entry_price: float = None
     stop_loss: float = None

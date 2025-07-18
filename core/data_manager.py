@@ -343,7 +343,7 @@ class DataManager:
 
     async def fetch_history(self, symbol: str, interval_minutes: int = 1, lookback: int = 1) -> Optional[pd.DataFrame]:
         """
-        Fetch history for a single symbol using strategy_utils.fetch_strikes_history.
+        Fetch history for a single symbol using strategy_utils.fetch_instrument_history.
         This method provides a simplified interface for single symbol history fetching.
         
         Args:
@@ -357,7 +357,7 @@ class DataManager:
         try:
             from datetime import datetime, timedelta
             from algosat.core.time_utils import get_ist_datetime
-            from algosat.common.strategy_utils import fetch_strikes_history
+            from algosat.common.strategy_utils import fetch_instrument_history
             
             # Calculate date range based on lookback
             end_time = get_ist_datetime()
@@ -366,8 +366,8 @@ class DataManager:
             days_back = max(1, (lookback * interval_minutes) // (6 * 60) + 3)  # Rough estimate
             start_time = end_time - timedelta(days=days_back)
             
-            # Use fetch_strikes_history for a single symbol
-            history_data = await fetch_strikes_history(
+            # Use fetch_instrument_history for a single symbol
+            history_data = await fetch_instrument_history(
                 broker=self,
                 strike_symbols=[symbol],
                 from_date=start_time,
@@ -407,40 +407,39 @@ class DataManager:
             logger.error(f"Error in get_broker_symbol for symbol={symbol}, instrument_type={instrument_type}: {e}", exc_info=True)
             raise
 
-    async def get_order_aggregate(self, parent_order_id: int) -> OrderAggregate:
-        try:
-            from algosat.core.db import AsyncSessionLocal
-            async with AsyncSessionLocal() as session:
-                order_row = await get_order_by_id(session, parent_order_id)
-                broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
-                symbol = order_row.get("strike_symbol", "Unknown")
-                broker_orders: List[BrokerOrder] = []
-                for be in broker_execs:
-                    broker_name = await self.get_broker_name_by_id(be.get("broker_id"))
-                    std_status = standardize_order_status(
-                        broker_name,
-                        be.get("status"),
-                        be.get("raw_response")
-                    )
-                    broker_orders.append(BrokerOrder(
-                        id=be.get("id"),  # Pass the broker_executions table id
-                        broker_id=be.get("broker_id"),
-                        order_id=be.get("broker_order_id"),
-                        status=std_status,
-                        side=be.get("side"),
-                        raw_response=be.get("raw_response")
-                    ))
-                return OrderAggregate(
-                    strategy_config_id=order_row.get("strategy_symbol_id"),
-                    parent_order_id=parent_order_id,
-                    symbol=symbol,
-                    entry_price=order_row.get("entry_price"),
-                    side=order_row.get("side"),
-                    broker_orders=broker_orders
+    async def get_order_aggregate(self, parent_order_id: int) -> Optional[OrderAggregate]:
+        from algosat.core.db import AsyncSessionLocal
+        async with AsyncSessionLocal() as session:
+            order_row = await get_order_by_id(session, parent_order_id)
+            if order_row is None:
+                logger.warning(f"OrderAggregate: No order found for parent_order_id={parent_order_id}. It may have been deleted.")
+                return None
+            broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
+            symbol = order_row.get("strike_symbol", "Unknown")
+            broker_orders: List[BrokerOrder] = []
+            for be in broker_execs:
+                broker_name = await self.get_broker_name_by_id(be.get("broker_id"))
+                std_status = standardize_order_status(
+                    broker_name,
+                    be.get("status"),
+                    be.get("raw_response")
                 )
-        except Exception as e:
-            logger.error(f"Error in get_order_aggregate for parent_order_id={parent_order_id}: {e}", exc_info=True)
-            raise
+                broker_orders.append(BrokerOrder(
+                    id=be.get("id"),  # Pass the broker_executions table id
+                    broker_id=be.get("broker_id"),
+                    order_id=be.get("broker_order_id"),
+                    status=std_status,
+                    side=be.get("side"),
+                    raw_response=be.get("raw_response")
+                ))
+            return OrderAggregate(
+                strategy_config_id=order_row.get("strategy_symbol_id"),
+                parent_order_id=parent_order_id,
+                symbol=symbol,
+                entry_price=order_row.get("entry_price"),
+                side=order_row.get("side"),
+                broker_orders=broker_orders
+            )
 
     async def get_broker_name_by_id(self, broker_id: int) -> str:
         try:

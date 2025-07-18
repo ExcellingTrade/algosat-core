@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+import calendar
+from datetime import datetime, timedelta
 
 # ──────────────── Helper: find the previous non-NaN in a 1D numpy array ────────────────
 def previous_non_nan(arr: np.ndarray, idx: int):
@@ -384,3 +386,155 @@ def get_last_swing_points(df: pd.DataFrame):
         row_to_dict(last_hl) if last_hl is not None else None,
         row_to_dict(last_lh) if last_lh is not None else None,
     )
+
+
+# ──────────── Utility: Get latest confirmed swing high and low (HH/LH and LL/HL) ────────────────
+def get_latest_confirmed_high_low(df: pd.DataFrame):
+    """
+    Return the most recently confirmed swing high and low from the swing dataframe.
+    For "high": Compares the latest Higher High (HH) and Lower High (LH) pivots, and returns whichever is more recent.
+    For "low": Compares the latest Lower Low (LL) and Higher Low (HL) pivots, and returns whichever is more recent.
+    If neither found, returns None for that side.
+
+    Args:
+        df: DataFrame output from find_hhlh_pivots, containing is_HH, is_LH, is_LL, is_HL columns and 'zz'.
+
+    Returns:
+        (latest_high, latest_low): tuple of dicts in the format {'timestamp': ..., 'price': ...}, or None if not found.
+    """
+    # Helper to create dict from row, using the 'zz' price
+    def row_to_dict(row):
+        return {'timestamp': row['timestamp'], 'price': row['zz']}
+
+    # Find the latest HH and LH rows for the high
+    hh_row = df[df['is_HH']].iloc[-1] if df['is_HH'].any() else None
+    lh_row = df[df['is_LH']].iloc[-1] if df['is_LH'].any() else None
+    # Find the latest LL and HL rows for the low
+    ll_row = df[df['is_LL']].iloc[-1] if df['is_LL'].any() else None
+    hl_row = df[df['is_HL']].iloc[-1] if df['is_HL'].any() else None
+
+    # For "high": pick whichever of HH/LH is more recent (by timestamp)
+    latest_high = None
+    if hh_row is not None and lh_row is not None:
+        # Compare timestamps to determine which is more recent
+        latest_high = row_to_dict(hh_row) if hh_row['timestamp'] > lh_row['timestamp'] else row_to_dict(lh_row)
+    elif hh_row is not None:
+        latest_high = row_to_dict(hh_row)
+    elif lh_row is not None:
+        latest_high = row_to_dict(lh_row)
+    # If neither found, latest_high stays None
+
+    # For "low": pick whichever of LL/HL is more recent (by timestamp)
+    latest_low = None
+    if ll_row is not None and hl_row is not None:
+        # Compare timestamps to determine which is more recent
+        latest_low = row_to_dict(ll_row) if ll_row['timestamp'] > hl_row['timestamp'] else row_to_dict(hl_row)
+    elif ll_row is not None:
+        latest_low = row_to_dict(ll_row)
+    elif hl_row is not None:
+        latest_low = row_to_dict(hl_row)
+    # If neither found, latest_low stays None
+
+    return latest_high, latest_low
+
+
+# ──────────── Utility: Option ATM symbol builder ────────────────
+def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
+    """
+    Return the formatted option symbol for the given underlying, spot price, option type (CE/PE),
+    using expiry conventions and configurable step/offset.
+    - For NIFTY/BANKNIFTY/SENSEX: Use weekly expiry if underlying is NIFTY or BANKNIFTY, else monthly.
+    - "expiry_exit" config may advance expiry by 'days_before_expiry'.
+    - Option strike = rounded ATM + offset (separate for CE/PE).
+    - Naming convention per user spec above.
+    """
+    import re
+
+    # --- Sanitize symbol ---
+    # Remove NSE: prefix if present
+    if symbol.startswith("NSE:"):
+        symbol = symbol[4:]
+    # Remove -INDEX suffix if present
+    if symbol.endswith("-INDEX"):
+        symbol = symbol[:-6]
+    # For NIFTY, BANKNIFTY with numbers (NIFTY50), just map to NIFTY, BANKNIFTY
+    m = re.match(r"^(NIFTY|BANKNIFTY)\d+$", symbol)
+    if m:
+        symbol = m.group(1)
+    # Special handling: if symbol is NIFTYBANK, use BANKNIFTY for option symbol generation
+    if symbol == "NIFTYBANK":
+        symbol = "BANKNIFTY"
+    # (Otherwise, symbol is used as-is after prefix/suffix removal)
+
+    if today is None:
+        today = datetime.now()
+
+    # --- Extract expiry config ---
+    expiry_conf = config.get("expiry_exit", {"enabled": True, "days_before_expiry": 0})
+    entry_conf = config.get("entry", {})
+    days_before_expiry = expiry_conf.get("days_before_expiry", 0)
+    monthly_map = {1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN", 7: "JUL",
+                   8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC"}
+
+    # Determine expiry type
+    weekly_symbols = ("NIFTY")
+    is_weekly = any(symbol.startswith(sym) for sym in weekly_symbols)
+    expiry_date = None
+
+    if is_weekly:
+        # Find next Thursday as expiry, then subtract days_before_expiry, roll over if past
+        thursday = 3  # Monday=0
+        days_ahead = (thursday - today.weekday() + 7) % 7
+        if days_ahead == 0 and today.hour >= 15:
+            days_ahead = 7
+        expiry_date = today + timedelta(days=days_ahead)
+        expiry_date -= timedelta(days=days_before_expiry)
+        # If already past expiry, pick next expiry
+        if expiry_date.date() < today.date():
+            expiry_date += timedelta(days=7)
+    else:
+        # Monthly expiry (last Thursday of the month), then subtract days_before_expiry, roll over if past
+        month = today.month
+        year = today.year
+        last_day = calendar.monthrange(year, month)[1]
+        last_date = datetime(year, month, last_day)
+        while last_date.weekday() != 3:
+            last_date -= timedelta(days=1)
+        expiry_date = last_date - timedelta(days=days_before_expiry)
+        if expiry_date.date() < today.date():
+            # Next month
+            next_month = month + 1 if month < 12 else 1
+            next_year = year if month < 12 else year + 1
+            last_day = calendar.monthrange(next_year, next_month)[1]
+            last_date = datetime(next_year, next_month, last_day)
+            while last_date.weekday() != 3:
+                last_date -= timedelta(days=1)
+            expiry_date = last_date - timedelta(days=days_before_expiry)
+
+    # --- Read offset and step from config as per strategy expectation ---
+    if option_type.upper() == "CE":
+        offset = entry_conf.get("atm_strike_offset_CE", 0)
+        step = entry_conf.get("step_ce", 50)
+    else:
+        offset = entry_conf.get("atm_strike_offset_PE", 0)
+        step = entry_conf.get("step_pe", 50)
+
+    atm_strike = int(round((spot_price + offset) / step) * step)
+
+    yy = expiry_date.strftime("%y")
+    month_num = expiry_date.month
+    if is_weekly:
+        # Weekly expiry: NSE:{SYMBOL}{YY}{M}{DD}{STRIKE}{OPT_TYPE}
+        nse_weekly_map = {
+            1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
+            7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D"
+        }
+        m_char = nse_weekly_map[month_num]
+        dd = expiry_date.strftime("%d")
+        symbol_str = f"NSE:{symbol}{yy}{m_char}{dd}{atm_strike}{option_type.upper()}"
+    else:
+        # Monthly expiry: NSE:{SYMBOL}{YY}{MMM}{STRIKE}{OPT_TYPE}
+        mmm = monthly_map[month_num]
+        symbol_str = f"NSE:{symbol}{yy}{mmm}{atm_strike}{option_type.upper()}"
+
+    return symbol_str

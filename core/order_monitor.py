@@ -9,7 +9,7 @@ from algosat.core.data_manager import DataManager
 from algosat.core.order_manager import FYERS_STATUS_MAP, OrderManager
 from algosat.core.order_cache import OrderCache
 from algosat.core.order_request import OrderStatus
-from algosat.common.strategy_utils import wait_for_next_candle, fetch_strikes_history
+from algosat.common.strategy_utils import wait_for_next_candle, fetch_instrument_history
 
 logger = get_logger("OrderMonitor")
 
@@ -116,12 +116,19 @@ class OrderMonitor:
                 agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
             except Exception as e:
                 logger.error(f"OrderMonitor: Error in get_order_aggregate for order_id={self.order_id}: {e}")
+                # If order is deleted, stop monitoring this order_id
+                if "not found" in str(e).lower() or "deleted" in str(e).lower():
+                    logger.info(f"OrderMonitor: Stopping monitor for order_id={self.order_id} as order is deleted.")
+                    self.stop()
+                    return
                 await asyncio.sleep(self.price_order_monitor_seconds)
                 continue
             # Fetch order, strategy_symbol, and strategy in one go (cached)
             order_row, strategy_symbol, strategy = await self._get_order_and_strategy(self.order_id)
             if order_row is None:
-                break
+                logger.info(f"OrderMonitor: Stopping monitor for order_id={self.order_id} as order_row is None (order deleted).")
+                self.stop()
+                return
             # Initialize last_broker_statuses from agg.broker_orders if empty (first run or after restart)
             if not last_broker_statuses:
                 for bro in agg.broker_orders:
@@ -139,107 +146,123 @@ class OrderMonitor:
             entry_broker_db_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
             all_statuses = []
             status_set = set()
-            for bro in entry_broker_db_orders:
-                broker_exec_id = getattr(bro, 'id', None)
-                broker_order_id = getattr(bro, 'order_id', None)
-                broker_id = getattr(bro, 'broker_id', None)
-                broker_name = None
-                if broker_id is not None:
+            try:
+                for bro in entry_broker_db_orders:
                     try:
-                        broker_name = await self.data_manager.get_broker_name_by_id(broker_id)
-                    except Exception as e:
-                        logger.error(f"OrderMonitor: Could not get broker name for broker_id={broker_id}: {e}")
-                cache_lookup_order_id = self._get_cache_lookup_order_id(
-                    broker_order_id, broker_name, product_type
-                )
-                # Fetch live broker order from order_cache
-                cache_order = None
-                if broker_name and cache_lookup_order_id:
-                    cache_order = await self.order_cache.get_order_by_id(broker_name, cache_lookup_order_id)
-                # Use status from cache_order if available, else fallback to DB
-                broker_status = None
-                if cache_order and 'status' in cache_order:
-                    broker_status = cache_order['status']
-                else:
-                    broker_status = getattr(bro, 'status', None)
-                if broker_status and isinstance(broker_status, int) and broker_name == "fyers":
-                    broker_status = FYERS_STATUS_MAP.get(broker_status, broker_status)
-                # Normalize broker_status
-                if broker_status and isinstance(broker_status, str) and broker_status.startswith("OrderStatus."):
-                    broker_status = broker_status.split(".")[-1]
-                elif broker_status and isinstance(broker_status, OrderStatus):
-                    broker_status = broker_status.value
+                        broker_exec_id = getattr(bro, 'id', None)
+                        broker_order_id = getattr(bro, 'order_id', None)
+                        broker_id = getattr(bro, 'broker_id', None)
+                        broker_name = None
+                        if broker_id is not None:
+                            try:
+                                broker_name = await self.data_manager.get_broker_name_by_id(broker_id)
+                            except Exception as e:
+                                logger.error(f"OrderMonitor: Could not get broker name for broker_id={broker_id}: {e}")
+                        # If broker_order_id is None or empty, order is not placed, set status to FAILED
+                        cache_order = None
+                        if not broker_order_id:
+                            broker_status = "FAILED"
+                        else:
+                            cache_lookup_order_id = self._get_cache_lookup_order_id(
+                                broker_order_id, broker_name, product_type
+                            )
+                            # Fetch live broker order from order_cache
+                            if broker_name and cache_lookup_order_id:
+                                try:
+                                    cache_order = await self.order_cache.get_order_by_id(broker_name, cache_lookup_order_id)
+                                except Exception as e:
+                                    logger.error(f"OrderMonitor: Error fetching order from cache for broker_name={broker_name}, order_id={cache_lookup_order_id}: {e}")
+                            # Use status from cache_order if available, else fallback to DB
+                            broker_status = None
+                            if cache_order and 'status' in cache_order:
+                                broker_status = cache_order['status']
+                            else:
+                                broker_status = getattr(bro, 'status', None)
+                            if broker_status and isinstance(broker_status, int) and broker_name == "fyers":
+                                broker_status = FYERS_STATUS_MAP.get(broker_status, broker_status)
+                            # Normalize broker_status
+                            if broker_status and isinstance(broker_status, str) and broker_status.startswith("OrderStatus."):
+                                broker_status = broker_status.split(".")[-1]
+                            elif broker_status and isinstance(broker_status, OrderStatus):
+                                broker_status = broker_status.value
 
-                all_statuses.append(broker_status)
-                status_set.add(broker_status)
-                last_status = last_broker_statuses.get(broker_exec_id)
-                # --- Enhancement: Also check executed_quantity for PARTIALLY_FILLED updates ---
-                # Get executed_quantity from broker (cache or bro)
-                broker_executed_quantity = None
-                broker_placed_quantity = None
-                if cache_order:
-                    broker_executed_quantity = cache_order.get("executed_quantity") or cache_order.get("filled_quantity") or cache_order.get("filledQty")
-                    broker_placed_quantity = cache_order.get("quantity") or cache_order.get("qty") or cache_order.get("filledQty")
-                # if broker_executed_quantity is None:
-                    # broker_executed_quantity = getattr(bro, "executed_quantity", None) or getattr(bro, "filled_quantity", None) or getattr(bro, "filledQty", None)
-                # Get DB executed_quantity (from bro)
-                db_executed_quantity = getattr(bro, "executed_quantity", None) or getattr(bro, "filled_quantity", None) or getattr(bro, "filledQty", None)
-                # Only update if status changed, or for PARTIALLY_FILLED if executed_quantity increased
-                should_update = False
-                if broker_status != last_status:
-                    should_update = True
-                elif broker_status in ("PARTIALLY_FILLED", "PARTIAL"):
-                    try:
-                        if broker_executed_quantity is not None and db_executed_quantity is not None:
-                            if float(broker_executed_quantity) > float(db_executed_quantity):
-                                should_update = True
+                        all_statuses.append(broker_status)
+                        status_set.add(broker_status)
                     except Exception as e:
-                        logger.error(f"OrderMonitor: Error comparing executed_quantity for broker_exec_id={broker_exec_id}: {e}")
-                if should_update:
-                    # If status transitions from PENDING/PARTIAL to FILLED/PARTIAL, update all fields
-                    transition_to_filled = (
-                        (last_status in ("PENDING", "PARTIAL", "PARTIALLY_FILLED")) and
-                        (broker_status in ("FILLED", "PARTIAL", "PARTIALLY_FILLED"))
-                    )
-                    if transition_to_filled:
-                        from datetime import datetime, timezone
-                        executed_quantity = broker_executed_quantity
-                        quantity = broker_placed_quantity
-                        symbol_val = None
-                        # Prefer cache_order for execution details, fallback to bro
-                        if cache_order:
-                            execution_price = cache_order.get("exec_price") or cache_order.get("execution_price") or cache_order.get("average_price") or cache_order.get("tradedPrice")
-                            order_type = cache_order.get("order_type")
-                            product_type_val = cache_order.get("product_type")
-                            # Get quantity from cache_order (qty or quantity)
-                            quantity = cache_order.get("qty") or cache_order.get("quantity")
-                            # Get symbol from cache_order (symbol or tradingsymbol)
-                            symbol_val = cache_order.get("symbol") or cache_order.get("tradingsymbol")
-                        if execution_price is None:
-                            execution_price = getattr(bro, "exec_price", None) or getattr(bro, "execution_price", None) or getattr(bro, "average_price", None) or getattr(bro, "tradedPrice", None)
-                        if order_type is None:
-                            order_type = getattr(bro, "order_type", None)
-                        if product_type_val is None:
-                            product_type_val = getattr(bro, "product_type", None)
-                        # if quantity is None:
-                        #     quantity = getattr(bro, "qty", None) or getattr(bro, "quantity", None)
-                        if symbol_val is None:
-                            symbol_val = getattr(bro, "symbol", None) or getattr(bro, "tradingsymbol", None)
-                        execution_time = datetime.now(timezone.utc)
-                        await self.order_manager.update_broker_exec_status_in_db(
-                            broker_exec_id,
-                            broker_status,
-                            executed_quantity=executed_quantity,
-                            quantity = quantity,
-                            execution_price=execution_price,
-                            order_type=order_type,
-                            product_type=product_type_val,
-                            execution_time=execution_time,
-                            symbol=symbol_val
+                        logger.error(f"OrderMonitor: Unexpected error processing broker order (exec_id={getattr(bro, 'id', None)}): {e}", exc_info=True)
+                        all_statuses.append("FAILED")
+                        status_set.add("FAILED")
+                    last_status = last_broker_statuses.get(broker_exec_id)
+                    # --- Enhancement: Also check executed_quantity for PARTIALLY_FILLED updates ---
+                    # Get executed_quantity from broker (cache or bro)
+                    broker_executed_quantity = None
+                    broker_placed_quantity = None
+                    if cache_order:
+                        broker_executed_quantity = cache_order.get("executed_quantity") or cache_order.get("filled_quantity") or cache_order.get("filledQty")
+                        broker_placed_quantity = cache_order.get("quantity") or cache_order.get("qty") or cache_order.get("filledQty")
+                    # if broker_executed_quantity is None:
+                        # broker_executed_quantity = getattr(bro, "executed_quantity", None) or getattr(bro, "filled_quantity", None) or getattr(bro, "filledQty", None)
+                    # Get DB executed_quantity (from bro)
+                    db_executed_quantity = getattr(bro, "executed_quantity", None) or getattr(bro, "filled_quantity", None) or getattr(bro, "filledQty", None)
+                    # Only update if status changed, or for PARTIALLY_FILLED if executed_quantity increased
+                    should_update = False
+                    if broker_status != last_status:
+                        should_update = True
+                    elif broker_status in ("PARTIALLY_FILLED", "PARTIAL"):
+                        try:
+                            if broker_executed_quantity is not None and db_executed_quantity is not None:
+                                if float(broker_executed_quantity) > float(db_executed_quantity):
+                                    should_update = True
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: Error comparing executed_quantity for broker_exec_id={broker_exec_id}: {e}")
+                    if should_update:
+                        # If status transitions from PENDING/PARTIAL to FILLED/PARTIAL, update all fields
+                        transition_to_filled = (
+                            (last_status in ("PENDING", "PARTIAL", "PARTIALLY_FILLED")) and
+                            (broker_status in ("FILLED", "PARTIAL", "PARTIALLY_FILLED"))
                         )
-                    else:
-                        await self.order_manager.update_broker_exec_status_in_db(broker_exec_id, broker_status)
-                    last_broker_statuses[broker_exec_id] = broker_status
+                        if transition_to_filled:
+                            from datetime import datetime, timezone
+                            executed_quantity = broker_executed_quantity
+                            quantity = broker_placed_quantity
+                            symbol_val = None
+                            # Prefer cache_order for execution details, fallback to bro
+                            if cache_order:
+                                execution_price = cache_order.get("exec_price") or cache_order.get("execution_price") or cache_order.get("average_price") or cache_order.get("tradedPrice")
+                                order_type = cache_order.get("order_type")
+                                product_type_val = cache_order.get("product_type")
+                                # Get quantity from cache_order (qty or quantity)
+                                quantity = cache_order.get("qty") or cache_order.get("quantity")
+                                # Get symbol from cache_order (symbol or tradingsymbol)
+                                symbol_val = cache_order.get("symbol") or cache_order.get("tradingsymbol")
+                            if execution_price is None:
+                                execution_price = getattr(bro, "exec_price", None) or getattr(bro, "execution_price", None) or getattr(bro, "average_price", None) or getattr(bro, "tradedPrice", None)
+                            if order_type is None:
+                                order_type = getattr(bro, "order_type", None)
+                            if product_type_val is None:
+                                product_type_val = getattr(bro, "product_type", None)
+                            # if quantity is None:
+                            #     quantity = getattr(bro, "qty", None) or getattr(bro, "quantity", None)
+                            if symbol_val is None:
+                                symbol_val = getattr(bro, "symbol", None) or getattr(bro, "tradingsymbol", None)
+                            execution_time = datetime.now(timezone.utc)
+                            await self.order_manager.update_broker_exec_status_in_db(
+                                broker_exec_id,
+                                broker_status,
+                                executed_quantity=executed_quantity,
+                                quantity = quantity,
+                                execution_price=execution_price,
+                                order_type=order_type,
+                                product_type=product_type_val,
+                                execution_time=execution_time,
+                                symbol=symbol_val
+                            )
+                        else:
+                            await self.order_manager.update_broker_exec_status_in_db(broker_exec_id, broker_status)
+                        last_broker_statuses[broker_exec_id] = broker_status
+            except Exception as e:
+                logger.error(f"OrderMonitor: Unexpected error in broker order status loop: {e}", exc_info=True)
+               
 
             # --- Aggregate and update Orders table with sum of broker_execs quantities ---
             try:
@@ -286,6 +309,8 @@ class OrderMonitor:
                 main_status = OrderStatus.CANCELLED
             elif all(s == "REJECTED" for s in all_statuses) and all_statuses:
                 main_status = OrderStatus.REJECTED
+            elif all(s in ("REJECTED", "FAILED") for s in all_statuses) and all_statuses:
+                main_status = OrderStatus.CANCELLED
             # Only update Orders table if status changed
             if main_status is not None and main_status != last_main_status:
                 if main_status == OrderStatus.OPEN and any(s in ("FILLED", "PARTIALLY_FILLED") for s in status_set):
@@ -319,11 +344,19 @@ class OrderMonitor:
                 logger.error(f"OrderMonitor: Error in get_ltp for symbol={symbol}, order_id={self.order_id}: {e}")
                 ltp = None
             if ltp is not None and isinstance(ltp, (int, float)):
+                # Refetch latest order_row from DB to get updated executed_quantity, etc.
                 try:
-                    if order_row:
-                        entry_price = order_row.get('entry_price')
-                        qty = order_row.get('executed_quantity')
-                        side = order_row.get('side')
+                    from algosat.core.db import AsyncSessionLocal, get_order_by_id
+                    async with AsyncSessionLocal() as session:
+                        latest_order_row = await get_order_by_id(session, self.order_id)
+                except Exception as e:
+                    logger.error(f"OrderMonitor: Error refetching latest order_row for PnL calculation, order_id={self.order_id}: {e}")
+                    latest_order_row = order_row  # fallback to previous
+                try:
+                    if latest_order_row:
+                        entry_price = latest_order_row.get('entry_price')
+                        qty = latest_order_row.get('executed_quantity')
+                        side = latest_order_row.get('side')
                         if None not in (entry_price, qty, side):
                             if side == 'BUY':
                                 pnl = (ltp - entry_price) * qty
@@ -336,7 +369,7 @@ class OrderMonitor:
                 except Exception as e:
                     logger.error(f"OrderMonitor: Error calculating/updating PnL for order_id={self.order_id}: {e}")
                 try:
-                    exit_reason = self._evaluate_price_exit_logic(order_row, ltp)
+                    exit_reason = self._evaluate_price_exit_logic(latest_order_row, ltp)
                 except Exception as e:
                     logger.error(f"OrderMonitor: Error in price exit evaluation for order_id={self.order_id}: {e}")
                     exit_reason = None
@@ -346,6 +379,7 @@ class OrderMonitor:
                     return
             await asyncio.sleep(self.price_order_monitor_seconds)
         logger.info(f"OrderMonitor: Stopping price monitor for order_id={self.order_id} (last status: {last_main_status})")
+    
     def _evaluate_price_exit_logic(self, order, ltp):
         """
         Deduplicated price-based exit logic for all strategies.
@@ -435,6 +469,7 @@ class OrderMonitor:
             except Exception as e:
                 logger.error(f"OrderMonitor: Error in get_ltp (slow) for symbol={agg.symbol}, order_id={self.order_id}: {e}")
                 ltp = None
+            
             strategy.update_trailing_stop_loss(self.order_id, ltp, history, self.order_manager)
             try:
                 exit_req = await strategy.evaluate_candle_exit(self.order_id, history)

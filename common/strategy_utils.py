@@ -26,7 +26,7 @@ logger = get_logger("strategy_utils")
 # In-memory cache for history fetches (TTL: 1 day, maxsize: 128)
 _history_cache = cachetools.TTLCache(maxsize=128, ttl=60*60*24)
 
-async def fetch_strikes_history(
+async def fetch_instrument_history(
     broker: 'DataManager',
     strike_symbols,
     from_date,
@@ -128,7 +128,7 @@ async def fetch_option_chain_and_first_candle_history(broker: 'DataManager', sym
         return {}
     logger.debug(f"⏳ Strike symbols from broker.get_strike_list: {strike_symbols}")
     # Fetch history for all strikes in parallel, with progress bar
-    history_data = await fetch_strikes_history(
+    history_data = await fetch_instrument_history(
         broker, strike_symbols, from_date, to_date, interval_minutes, ins_type=""
     )
     return history_data
@@ -306,19 +306,22 @@ def calculate_backdate_days(interval_minutes):
 # Calculate end_date for fetching historical data
 def calculate_end_date(current_date, interval_minutes):
     """
-    Calculate the end date/time to fetch historical data, ensuring no incomplete candles are included.
-
-    :param current_date:
-    :param interval_minutes: Candle interval in minutes.
-    :return: Adjusted datetime object for the end date.
+    Returns the timestamp for the last **completed** candle of the given interval.
+    If now is 10:43 and interval is 5, returns 10:35 (because 10:40 candle is forming).
     """
-    # current_time = current_date.replace(hour=10, minute=30)
-    current_time = current_date
-    end_date = (
-            current_time - timedelta(minutes=interval_minutes)
-    ).replace(second=0, microsecond=0)
+    # Strip seconds/microseconds
+    current_time = current_date.replace(second=0, microsecond=0)
+    # Minutes since midnight
+    total_minutes = current_time.hour * 60 + current_time.minute
+    # Floor to nearest interval (could be current incomplete candle)
+    floored_minutes = (total_minutes // interval_minutes) * interval_minutes
+    # Subtract one interval to get the *previous* completed candle
+    completed_minutes = floored_minutes - interval_minutes
+    if completed_minutes < 0:
+        # Handle edge case at midnight
+        completed_minutes = 0
+    end_date = current_time.replace(hour=0, minute=0) + timedelta(minutes=completed_minutes)
     return end_date
-
 
 # --- Utility: Dynamic Buffer Calculation ---
 def get_dynamic_buffer(candle_range, threshold, small_buffer, large_buffer):

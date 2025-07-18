@@ -524,7 +524,7 @@ class BrokerManager:
             'quantity': getattr(config, 'quantity', 1) or (config.trade.get('quantity', 1) if hasattr(config, 'trade') and isinstance(config.trade, dict) else 1),
         }
         # Core OrderRequest fields
-        if hasattr(signal, 'price') and signal.price is not None:
+        if hasattr(signal, 'price') and signal.price is not None and product_type != 'DELIVERY':
             order_kwargs['price'] = signal.price
         if hasattr(signal, 'trigger_price') and signal.trigger_price is not None:
             order_kwargs['trigger_price'] = signal.trigger_price
@@ -549,17 +549,24 @@ class BrokerManager:
         if 'trigger_price_diff' not in extra:
             extra['trigger_price_diff'] = trigger_price_diff if 'trigger_price_diff' in config.trade else 0.0
         if 'target_price' in extra:
-            extra['takeProfit'] = round(abs(extra['entry_price'] - extra['target_price']),2)
-        if 'stop_loss' in extra:
-            extra['stopLoss'] = signal.price - extra['stop_loss'] if 'stop_loss' in extra else None
-            extra['stopLoss'] = round(round(extra['stopLoss'] / 0.05) * 0.05,2)
-        extra['target_price'] = round(extra['target_price'] / 0.05) * 0.05
-        entry_price = round(round(signal.price / 0.05) * 0.05, 2)
-        trigger_price_diff = extra['trigger_price_diff']
-        stopPrice = (entry_price - trigger_price_diff) if signal.side == Side.BUY.value else (entry_price + trigger_price_diff)
-        stopPrice = round(round(stopPrice / 0.05) * 0.05, 2)
-        order_kwargs['trigger_price'] = stopPrice
-        order_kwargs['quantity'] = lot_size * extra['lot_qty']
+            try:
+                extra['takeProfit'] = round(abs(extra['entry_price'] - extra['target_price']),2)
+                extra['target_price'] = round(extra['target_price'] / 0.05) * 0.05
+            except Exception as e:
+                logger.warning(f"Could not compute takeProfit/target_price: {e}")
+        # Only compute entry_price and stopPrice if signal.price is not None and product_type is not DELIVERY
+        if getattr(signal, 'price', None) is not None and product_type != 'DELIVERY':
+            entry_price = round(round(signal.price / 0.05) * 0.05, 2)
+            trigger_price_diff = extra['trigger_price_diff']
+            stopPrice = (entry_price - trigger_price_diff) if signal.side == Side.BUY.value else (entry_price + trigger_price_diff)
+            stopPrice = round(round(stopPrice / 0.05) * 0.05, 2)
+            order_kwargs['trigger_price'] = stopPrice
+        else:
+            entry_price = None
+            stopPrice = None
+        # Only set quantity if lot_size and lot_qty are present
+        if lot_size is not None and 'lot_qty' in extra and extra['lot_qty'] is not None:
+            order_kwargs['quantity'] = lot_size * extra['lot_qty']
         
 
         # Normalize side for OptionBuy/OptionSell strategies

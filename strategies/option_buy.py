@@ -16,7 +16,7 @@ from algosat.common.strategy_utils import (
     calculate_first_candle_details,
     fetch_option_chain_and_first_candle_history,
     identify_strike_price_combined,
-    fetch_strikes_history,
+    fetch_instrument_history,
     calculate_backdate_days,
     localize_to_ist,
     calculate_trade,
@@ -250,10 +250,10 @@ class OptionBuyStrategy(StrategyBase):
             start_date = localize_to_ist(datetime.combine(trade_day, time(9, 15)))
             current_end_date = localize_to_ist(datetime.combine(current_date, get_ist_datetime().time()))
             end_date = calculate_end_date(current_end_date, trade_config['interval_minutes'])
-            end_date = end_date.replace(hour=9, minute=45, second=0, microsecond=0)
+            # end_date = end_date.replace(hour=9, minute=45, second=0, microsecond=0)
             logger.debug(f"Fetching history for strike symbols {', '.join(str(strike) for strike in strike_symbols)}...")
             logger.debug(f"Start date: {start_date}, End date: {end_date}, Interval: {trade_config['interval_minutes']} minutes")
-            history_data = await fetch_strikes_history(
+            history_data = await fetch_instrument_history(
                 self.dp,
                 self._strikes,
                 from_date=start_date,

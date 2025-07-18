@@ -959,6 +959,7 @@ class OrderManager:
         """
         Fetch and normalize order details from all trade-enabled brokers via BrokerManager.
         Returns a dict: broker_name -> list of normalized order dicts (empty list if no orders).
+        Assumes broker_manager.get_all_broker_order_details() returns a list of orders per broker.
         """
         broker_orders_raw = await self.broker_manager.get_all_broker_order_details()
         normalized_orders_by_broker = {}
@@ -972,9 +973,12 @@ class OrderManager:
         for broker_name, orders in broker_orders_raw.items():
             broker_id = await get_broker_id_cached(broker_name)
             normalized_orders = []
-            # Fyers: orders is a dict with 'orderBook' key
-            if broker_name.lower() == "fyers" and isinstance(orders, dict) and "orderBook" in orders:
-                for o in orders["orderBook"]:
+            if not isinstance(orders, list):
+                # Defensive: if not a list, skip
+                continue
+            for o in orders:
+                # Fyers normalization
+                if broker_name.lower() == "fyers":
                     status = FYERS_STATUS_MAP.get(o.get("status"), str(o.get("status")))
                     order_type = FYERS_ORDER_TYPE_MAP.get(o.get("type"), o.get("type"))
                     normalized_orders.append({
@@ -987,12 +991,11 @@ class OrderManager:
                         "executed_quantity": o.get("filledQty", 0),
                         "exec_price": o.get("tradedPrice", 0),
                         "product_type": o.get("productType"),
-                        "order_type":order_type,
-                        "raw": o
+                        "order_type": order_type,
+                        # "raw": o
                     })
-            # Zerodha: orders is a list of dicts
-            elif broker_name.lower() == "zerodha" and isinstance(orders, list):
-                for o in orders:
+                # Zerodha normalization
+                elif broker_name.lower() == "zerodha":
                     status = ZERODHA_STATUS_MAP.get(o.get("status"), o.get("status"))
                     normalized_orders.append({
                         "broker_name": broker_name,
@@ -1005,21 +1008,18 @@ class OrderManager:
                         "exec_price": o.get("average_price", 0),
                         "product_type": o.get("product"),
                         "order_type": o.get("order_type"),
+                        # "raw": o
+                    })
+                # Fallback normalization for other brokers
+                else:
+                    normalized_orders.append({
+                        "broker_name": broker_name,
+                        "broker_id": broker_id,
+                        "order_id": o.get("order_id") or o.get("id"),
+                        "status": o.get("status"),
+                        "symbol": o.get("symbol") or o.get("tradingsymbol"),
                         "raw": o
                     })
-            # Add more brokers as needed
-            else:
-                # Fallback: treat as list of dicts
-                if isinstance(orders, list):
-                    for o in orders:
-                        normalized_orders.append({
-                            "broker_name": broker_name,
-                            "broker_id": broker_id,
-                            "order_id": o.get("order_id") or o.get("id"),
-                            "status": o.get("status"),
-                            "symbol": o.get("symbol") or o.get("tradingsymbol"),
-                            "raw": o
-                        })
             normalized_orders_by_broker[broker_name] = normalized_orders
         return normalized_orders_by_broker
     
