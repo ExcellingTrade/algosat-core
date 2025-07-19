@@ -600,7 +600,7 @@ class BrokerManager:
                 broker_orders[broker_name] = []
         return broker_orders
 
-    async def get_broker_by_id(self, broker_id: int):
+    async def get_broker_by_id(self, broker_id: int) -> Optional[object]:
         """
         Fetch the broker object from self.brokers using broker_id.
         """
@@ -616,7 +616,7 @@ class BrokerManager:
             logger.error(f"BrokerManager: Broker name {broker_name} not found in self.brokers for broker_id={broker_id}")
             return None
 
-    async def exit_order(self, broker_id, broker_order_id, symbol=None, product_type=None, exit_reason=None):
+    async def exit_order(self, broker_id, broker_order_id, symbol=None, product_type=None, exit_reason=None,side=None):
         """
         Route exit order to the correct broker by broker_id.
         """
@@ -634,7 +634,7 @@ class BrokerManager:
             if broker_name:
                 symbol_info = await self.get_symbol_info(broker_name, symbol, instrument_type='NFO')
                 normalized_symbol = symbol_info.get('symbol', symbol)
-        return await broker.exit_order(broker_order_id, symbol=normalized_symbol, product_type=product_type, exit_reason=exit_reason)
+        return await broker.exit_order(broker_order_id, symbol=normalized_symbol, product_type=product_type, exit_reason=exit_reason,side=side )
 
     async def cancel_order(self, broker_id, broker_order_id, symbol=None, product_type=None, variety=None, cancel_reason=None, **kwargs):
         """

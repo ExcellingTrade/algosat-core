@@ -1243,12 +1243,15 @@ class FyersWrapper(BrokerInterface):
         logger.info("WebSocket Connected.")
         self.ws_connected = True
 
-    async def exit_order(self, broker_order_id, symbol=None, product_type=None, exit_reason=None):
+    async def exit_order(self, broker_order_id, symbol=None, product_type=None, exit_reason=None, side=None):
         """
-        Exit a Fyers order by calling exit_positions with correct id (symbol-BO).
+        Exit a Fyers order by calling exit_positions with correct id (symbol-product_type).
         """
         if symbol:
-            exit_id = f"{symbol}-BO"
+            if product_type:
+                exit_id = f"{symbol}-{product_type}"
+            else:
+                exit_id = f"{symbol}-BO"  # fallback for backward compatibility
         else:
             logger.error("Symbol must be provided to exit order.")
             return None

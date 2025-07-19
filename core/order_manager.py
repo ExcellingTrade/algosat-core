@@ -1181,6 +1181,7 @@ class OrderManager:
             broker_execs = await get_broker_executions_for_order(session, parent_order_id)
             order_row = await get_order_by_id(session, parent_order_id)
             logical_symbol = order_row.get('strike_symbol') # or order_row.get('symbol') if order_row else None
+            order_side = order_row.get('side') if order_row else None
             
             # If LTP is not provided, fetch it from the market
             if ltp is None and logical_symbol:
@@ -1231,15 +1232,15 @@ class OrderManager:
                     exit_time = datetime.datetime.now(datetime.timezone.utc)
                     if status == 'FILLED':
                         logger.info(f"OrderManager: Initiating exit for broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
-                        await self.broker_manager.exit_order(
+                        exit_resp = await self.broker_manager.exit_order(
                             broker_id,
                             broker_order_id,
                             symbol=symbol,
                             product_type=product_type,
-                            exit_reason=exit_reason
+                            exit_reason=exit_reason,
+                            side=order_side
                         )
-                        
-                        logger.info(f"OrderManager: Exit order sent to broker_id={broker_id} for broker_order_id={broker_order_id}")
+                        logger.info(f"OrderManager: Exit order sent to broker_id={broker_id} for broker_order_id={broker_order_id}. Response: {exit_resp}")
                         await self._insert_exit_broker_execution(
                             session,
                             parent_order_id=parent_order_id,
@@ -1258,15 +1259,16 @@ class OrderManager:
                         )
                     elif status in ('PARTIALLY_FILLED', 'PARTIAL'):
                         logger.info(f"OrderManager: Initiating exit for PARTIALLY_FILLED broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
-                        await self.broker_manager.exit_order(
+                        exit_resp = await self.broker_manager.exit_order(
                             broker_id,
                             broker_order_id,
                             symbol=symbol,
                             product_type=product_type,
                             exit_reason=exit_reason
                         )
+                        logger.info(f"OrderManager: Exit order sent to broker_id={broker_id} for broker_order_id={broker_order_id}. Response: {exit_resp}")
                         logger.info(f"OrderManager: Now also sending cancel for PARTIALLY_FILLED broker_execution id={be.get('id')}")
-                        await self.broker_manager.cancel_order(
+                        cancel_resp = await self.broker_manager.cancel_order(
                             broker_id,
                             broker_order_id,
                             symbol=symbol,
@@ -1274,6 +1276,7 @@ class OrderManager:
                             variety='regular',
                             cancel_reason=f"Exit requested for PARTIALLY_FILLED order"
                         )
+                        logger.info(f"OrderManager: Cancel order sent to broker_id={broker_id} for broker_order_id={broker_order_id}. Response: {cancel_resp}")
                         await self._insert_exit_broker_execution(
                             session,
                             parent_order_id=parent_order_id,
@@ -1292,15 +1295,15 @@ class OrderManager:
                         )
                     elif status in ('AWAITING_ENTRY', 'PENDING', 'REJECTED'):
                         logger.info(f"OrderManager: Initiating cancel for broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
-                        await self.broker_manager.cancel_order(
+                        cancel_resp = await self.broker_manager.cancel_order(
                             broker_id,
                             broker_order_id,
                             symbol=symbol,
                             product_type=product_type,
-                            variety= 'regular',
+                            variety='regular',
                             cancel_reason=f"Exit requested but status was {status}"
                         )
-                        logger.info(f"OrderManager: Cancel order sent to broker_id={broker_id} for broker_order_id={broker_order_id}")
+                        logger.info(f"OrderManager: Cancel order sent to broker_id={broker_id} for broker_order_id={broker_order_id}. Response: {cancel_resp}")
                         await self._insert_exit_broker_execution(
                             session,
                             parent_order_id=parent_order_id,

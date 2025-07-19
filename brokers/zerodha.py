@@ -527,7 +527,7 @@ class ZerodhaWrapper(BrokerInterface):
             logger.error(f"Zerodha get_trades failed for order {broker_order_id}: {e}")
             return 0
 
-    async def exit_order(self, broker_order_id, symbol=None, product_type=None, exit_reason=None):
+    async def exit_order(self, broker_order_id, symbol=None, product_type=None, exit_reason=None, side=None):
         """
         Zerodha-specific exit logic: fetch filled qty from positions, compare to expected, and place opposite order if needed.
         Assumes symbol is already sanitized by BrokerManager.
@@ -551,21 +551,21 @@ class ZerodhaWrapper(BrokerInterface):
                 logger.warning(f"Zerodha exit_order: No filled quantity for symbol {sanitized_symbol} in positions, skipping exit.")
                 return {"status": False, "message": "No filled quantity, cannot exit."}
             # Fetch original order details to get side, etc.
-            order_hist = await self.get_order_history(broker_order_id)
-            if not order_hist or not order_hist.get('raw'):
-                logger.error(f"Zerodha exit_order: Could not fetch order history for {broker_order_id}")
-                return {"status": False, "message": "Order history not found."}
-            orig_order = order_hist['raw'][-1] if isinstance(order_hist['raw'], list) else order_hist['raw']
-            orig_side = orig_order.get('transaction_type') or orig_order.get('side')
-            orig_product = orig_order.get('product') or product_type
+            # order_hist = await self.get_order_history(broker_order_id)
+            # if not order_hist or not order_hist.get('raw'):
+            #     logger.error(f"Zerodha exit_order: Could not fetch order history for {broker_order_id}")
+            #     return {"status": False, "message": "Order history not found."}
+            # orig_order = order_hist['raw'][-1] if isinstance(order_hist['raw'], list) else order_hist['raw']
+            # orig_side = orig_order.get('transaction_type') or orig_order.get('side')
+            orig_product = matched_position.get('product', product_type)
             # Determine exit side (opposite of original)
-            exit_side = 'SELL' if orig_side == 'BUY' else 'BUY'
+            exit_side = 'SELL' if side == 'BUY' else 'BUY'
             # Build exit order request
             exit_order_req = OrderRequest(
                 symbol=sanitized_symbol,
                 side=exit_side,
                 order_type=OrderType.MARKET,
-                product_type=orig_product,
+                product_type= orig_product,
                 quantity=filled_qty
             )
             logger.info(f"Zerodha exit_order: Preparing exit order for {broker_order_id} with side={exit_side}, qty={filled_qty}, symbol={sanitized_symbol}, product_type={orig_product}, reason={exit_reason}")
