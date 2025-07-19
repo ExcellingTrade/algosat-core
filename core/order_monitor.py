@@ -269,17 +269,15 @@ class OrderMonitor:
                 from algosat.core.db import AsyncSessionLocal, update_rows_in_table
                 from algosat.core.dbschema import orders, broker_executions
                 async with AsyncSessionLocal() as session:
-                    # Fetch all broker_executions for this order (fresh from DB for latest values)
-                    result = await session.execute(
-                        broker_executions.select().where(broker_executions.c.parent_order_id == self.order_id)
-                    )
-                    broker_exec_rows = result.fetchall()
+                    # Fetch all broker_executions for this order with side='ENTRY' (fresh from DB for latest values)
+                    from algosat.core.db import get_broker_executions_for_order
+                    broker_exec_rows = await get_broker_executions_for_order(session, self.order_id, side='ENTRY')
                     total_quantity = 0
                     total_executed_quantity = 0
                     vwap_total_value = 0.0
                     vwap_total_qty = 0.0
-                    for row in broker_exec_rows:
-                        be = dict(row._mapping)
+                    for be in broker_exec_rows:
+                        # be = dict(row._mapping)
                         q = be.get('quantity') or 0
                         eq = be.get('executed_quantity') or 0
                         exec_price = be.get('execution_price') or 0

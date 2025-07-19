@@ -7,8 +7,8 @@ from algosat.core.db import (
     get_orders_by_broker, 
     get_orders_by_broker_and_strategy,
     get_order_by_id,
-    get_broker_executions_by_order_id,
-    get_granular_executions_by_order_id,
+    get_broker_executions_for_order,
+    # get_granular_executions_for_order,
     get_executions_summary_by_order_id,
     get_orders_summary_by_symbol,
     get_orders_by_strategy_symbol_id,
@@ -335,7 +335,7 @@ async def get_broker_executions(
     Use /orders/{order_id}/granular-executions for new granular execution data.
     """
     try:
-        executions = await get_broker_executions_by_order_id(db, order_id)
+        executions = await get_broker_executions_for_order(db, order_id)
         return executions
     except Exception as e:
         logger.error(f"Error in get_broker_executions: {e}")
@@ -361,7 +361,7 @@ async def get_granular_executions(
         if side and side.upper() not in ['ENTRY', 'EXIT']:
             raise HTTPException(status_code=400, detail="Invalid side parameter. Use 'ENTRY' or 'EXIT'")
         
-        executions = await get_granular_executions_by_order_id(db, order_id, side)
+        executions = await get_granular_executions_for_order(db, order_id, side)
         
         # Convert to response models
         return [GranularExecutionResponse(

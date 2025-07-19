@@ -9,7 +9,7 @@ import pandas as pd
 from algosat.common.logger import get_logger
 from algosat.models.order_aggregate import OrderAggregate, BrokerOrder
 from typing import List, Dict, Any, Optional, Union
-from algosat.core.db import get_order_by_id, get_broker_executions_by_order_id
+from algosat.core.db import get_broker_executions_for_order, get_order_by_id
 
 logger = get_logger("data_manager")
 
@@ -414,7 +414,7 @@ class DataManager:
             if order_row is None:
                 logger.warning(f"OrderAggregate: No order found for parent_order_id={parent_order_id}. It may have been deleted.")
                 return None
-            broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
+            broker_execs = await get_broker_executions_for_order(session, parent_order_id)
             symbol = order_row.get("strike_symbol", "Unknown")
             broker_orders: List[BrokerOrder] = []
             for be in broker_execs:

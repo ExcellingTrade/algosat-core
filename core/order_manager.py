@@ -454,9 +454,9 @@ class OrderManager:
         After exit/cancel, insert a new broker_executions row with side=EXIT, exit price as LTP (passed in), and update exit_time.
         ltp: If provided, use as exit price. If not provided, will fetch current LTP from the market.
         """
-        from algosat.core.db import AsyncSessionLocal, get_broker_executions_by_order_id, get_order_by_id
+        from algosat.core.db import AsyncSessionLocal, get_broker_executions_for_order, get_order_by_id
         async with AsyncSessionLocal() as session:
-            broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
+            broker_execs = await get_broker_executions_for_order(session, parent_order_id)
             order_row = await get_order_by_id(session, parent_order_id)
             logical_symbol = order_row.get('strike_symbol') or order_row.get('symbol') if order_row else None
             
@@ -1176,9 +1176,9 @@ class OrderManager:
         After exit/cancel, insert a new broker_executions row with side=EXIT, exit price as LTP (passed in), and update exit_time.
         ltp: If provided, use as exit price. If not provided, will fetch current LTP from the market.
         """
-        from algosat.core.db import AsyncSessionLocal, get_broker_executions_by_order_id, get_order_by_id
+        from algosat.core.db import AsyncSessionLocal, get_broker_executions_for_order, get_order_by_id
         async with AsyncSessionLocal() as session:
-            broker_execs = await get_broker_executions_by_order_id(session, parent_order_id)
+            broker_execs = await get_broker_executions_for_order(session, parent_order_id)
             order_row = await get_order_by_id(session, parent_order_id)
             logical_symbol = order_row.get('strike_symbol') # or order_row.get('symbol') if order_row else None
             
@@ -1238,6 +1238,7 @@ class OrderManager:
                             product_type=product_type,
                             exit_reason=exit_reason
                         )
+                        
                         logger.info(f"OrderManager: Exit order sent to broker_id={broker_id} for broker_order_id={broker_order_id}")
                         await self._insert_exit_broker_execution(
                             session,

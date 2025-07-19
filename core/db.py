@@ -1087,28 +1087,24 @@ async def get_broker_executions_by_order_id(session, order_id: int):
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
 
-async def get_granular_executions_by_order_id(session, order_id: int, side: str = None):
+async def get_broker_executions_for_order(session, order_id: int, side: str = None):
     """
-    Return granular execution records for a given logical order_id.
-    
+    Return broker_executions rows for a given logical order_id, optionally filtered by side ('ENTRY' or 'EXIT').
     Args:
         session: Database session
         order_id: Parent order ID from orders table
         side: Optional filter by 'ENTRY' or 'EXIT'
-        
     Returns:
-        List of execution records with actual traded prices and quantities
+        List of execution records as dicts
     """
     from algosat.core.dbschema import broker_executions
     from sqlalchemy import and_
-    
     conditions = [broker_executions.c.parent_order_id == order_id]
     if side:
         conditions.append(broker_executions.c.side == side)
-    
     stmt = select(broker_executions).where(and_(*conditions)).order_by(
         broker_executions.c.execution_time,
-        broker_executions.c.sequence_number
+        broker_executions.c.id
     )
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
