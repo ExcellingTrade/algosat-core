@@ -301,7 +301,14 @@ class BrokerManager:
         enabled_broker_names = await db_get_trade_enabled_brokers()
         return {name: self.brokers.get(name) for name in enabled_broker_names}
 
-    async def place_order(self, order_payload, strategy_name=None, retries=3, delay=1):
+    async def place_order(
+        self,
+        order_payload: OrderRequest,
+        strategy_name: Optional[str] = None,
+        retries: int = 3,
+        delay: int = 1,
+        check_margin: bool = False
+    ) -> dict:
         """
         Place order in all trade-enabled brokers (even if not authenticated), with retry on retryable errors.
         Accepts an OrderRequest object and passes it to each broker's place_order.
@@ -328,6 +335,53 @@ class BrokerManager:
                         "symbol": symbol_info["symbol"],
                         "side": order_payload.side if isinstance(order_payload.side, Side) else Side(order_payload.side)
                     })
+
+                    # Margin check logic
+                    if check_margin:
+                        from algosat.core.order_request import OrderResponse, OrderStatus
+                        if not hasattr(broker, "check_margin_availability") or not callable(getattr(broker, "check_margin_availability", None)):
+                            results[broker_name] = OrderResponse(
+                                status=OrderStatus.FAILED,
+                                order_id="",
+                                order_message="Margin check not implemented for this broker",
+                                broker=broker_name,
+                                raw_response=None,
+                                symbol=getattr(order_payload, 'symbol', None),
+                                side=getattr(order_payload, 'side', None),
+                                quantity=getattr(order_payload, 'quantity', None),
+                                order_type=getattr(order_payload, 'order_type', None)
+                            ).dict()
+                            continue
+                        try:
+                            margin_ok = await broker.check_margin_availability(broker_order_payload)
+                        except Exception as e:
+                            logger.error(f"Error checking margin: {e}")
+                            results[broker_name] = OrderResponse(
+                                status=OrderStatus.FAILED,
+                                order_id="",
+                                order_message=f"Margin check error: {e}",
+                                broker=broker_name,
+                                raw_response=None,
+                                symbol=getattr(order_payload, 'symbol', None),
+                                side=getattr(order_payload, 'side', None),
+                                quantity=getattr(order_payload, 'quantity', None),
+                                order_type=getattr(order_payload, 'order_type', None)
+                            ).dict()
+                            continue
+                        if not margin_ok:
+                            results[broker_name] = OrderResponse(
+                                status=OrderStatus.FAILED,
+                                order_id="",
+                                order_message="Insufficient margin",
+                                broker=broker_name,
+                                raw_response=None,
+                                symbol=getattr(order_payload, 'symbol', None),
+                                side=getattr(order_payload, 'side', None),
+                                quantity=getattr(order_payload, 'quantity', None),
+                                order_type=getattr(order_payload, 'order_type', None)
+                            ).dict()
+                            continue
+
                     result = await async_retry(broker.place_order, broker_order_payload, retries=retries, delay=delay)
                     broker_row = await get_broker_by_name(session, broker_name)
                     broker_id = broker_row["id"] if broker_row else None

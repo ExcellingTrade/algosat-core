@@ -17,6 +17,12 @@ from algosat.core.time_utils import get_ist_datetime
 logger = get_logger("angel_wrapper")
 
 class AngelWrapper(BrokerInterface):
+
+    async def check_margin_availability(self, order_payload):
+        """
+        Margin check is not implemented for AngelWrapper.
+        """
+        raise NotImplementedError("Margin check is not implemented for AngelWrapper.")
     """
     Async wrapper for Angel One (SmartAPI) using SmartConnect.
     Credentials are stored in broker_credentials table and managed via common.broker_utils.
@@ -88,16 +94,21 @@ class AngelWrapper(BrokerInterface):
             try:
                 self.smart_api, login_data = await loop.run_in_executor(None, _sync_login)
             except requests.exceptions.RequestException as e:
-                logger.error(f"Network error during Angel SmartConnect login: {e}")
-                print("\n[AngelOne] Network error: Could not connect to AngelOne API. Please check your internet connection or if the broker's API is down.\n")
+                logger.error("Network error during Angel SmartConnect login: %s. Could not connect to AngelOne API. Please check your internet connection or if the broker's API is down.", e)
                 return False
             except ConnectionResetError as e:
-                logger.error(f"Connection reset during Angel SmartConnect login: {e}")
-                print("\n[AngelOne] Connection was reset by the server. This may be a temporary issue with AngelOne's API or your network. Please try again later.\n")
+                logger.error("Connection reset during Angel SmartConnect login: %s. This may be a temporary issue with AngelOne's API or your network. Please try again later.", e)
                 return False
             except Exception as e:
+                # Handle SmartApi DataException without traceback
+                try:
+                    from SmartApi.smartExceptions import DataException
+                except ImportError:
+                    DataException = None
+                if DataException and isinstance(e, DataException):
+                    logger.error(f"Angel SmartConnect login failed (DataException): {e}")
+                    return False
                 logger.error(f"Angel SmartConnect login failed: {e}", exc_info=True)
-                print("\n[AngelOne] Unexpected error during login. See logs for details.\n")
                 return False
 
             # Validate login response

@@ -1,7 +1,9 @@
+
 import math
 import os
 import json
 import asyncio
+import re
 from datetime import datetime, timedelta
 from rich.console import Console
 from rich.progress import (
@@ -526,3 +528,89 @@ async def wait_for_next_candle(interval_minutes: int) -> float:
         wait_time = 0
     await asyncio.sleep(wait_time)
     return wait_time
+
+
+def get_max_premium_from_config(trade_config: dict, symbol: str, current_dt: 'datetime') -> int:
+    """
+    Determine the maximum premium based on the trade_config, symbol, and current datetime.
+    Expiry type (weekly/monthly) is auto-detected from symbol:
+      - For NIFTY and BANKNIFTY, treat as "weekly".
+      - For all other symbols, treat as "monthly".
+    Symbol is sanitized (strips NSE: prefix, -INDEX suffix, NIFTYBANK→BANKNIFTY, etc).
+    Supports dynamic selection via max_premium_selection in config for weekly/monthly expiries.
+    Falls back to trade_config['max_premium'] or 100 if not found.
+    Logs the expiry_type, detection path, and selected premium.
+    Args:
+        trade_config (dict): The trade config dict.
+        symbol (str): The trading symbol (e.g., "NIFTY", "NSE:BANKNIFTY", etc).
+        current_dt (datetime): The current datetime (IST).
+    Returns:
+        int: The selected max_premium value.
+    """
+    # --- Symbol sanitization (same as get_atm_strike_symbol in swing_utils.py) ---
+    orig_symbol = symbol
+    if symbol.startswith("NSE:"):
+        symbol = symbol[4:]
+    if symbol.endswith("-INDEX"):
+        symbol = symbol[:-6]
+    m = re.match(r"^(NIFTY|BANKNIFTY)\d+$", symbol)
+    if m:
+        symbol = m.group(1)
+    if symbol == "NIFTYBANK":
+        symbol = "BANKNIFTY"
+    symbol_upper = symbol.upper()
+    # --- Detect expiry_type ---
+    # For NIFTY and BANKNIFTY: weekly. For all others: monthly.
+    if symbol_upper in ("NIFTY"):
+        expiry_type = "weekly"
+        expiry_reason = f"Detected as weekly expiry for symbol '{symbol_upper}'"
+    else:
+        expiry_type = "monthly"
+        expiry_reason = f"Detected as monthly expiry for symbol '{symbol_upper}'"
+    # --- Select max_premium as before ---
+    max_premium_selection = trade_config.get("max_premium_selection")
+    fallback = trade_config.get("max_premium", 100)
+    result = fallback
+    details = ""
+    try:
+        if isinstance(max_premium_selection, dict):
+            if expiry_type == "weekly":
+                weekday = current_dt.strftime("%A").lower()
+                weekly_map = max_premium_selection.get("weekly", {})
+                # result = weekly_map.get(weekday, fallback)
+                if weekday in weekly_map:
+                    result = weekly_map[weekday]
+                else:
+                    result = max_premium_selection.get("max_threshold", fallback)
+                    logger.warning(
+                        f"[get_max_premium_from_config] WEEKLY: No entry for weekday='{weekday}' in map, using fallback={result} (symbol={orig_symbol})"
+                    )
+                details = f"weekly, day={weekday}"
+            elif expiry_type == "monthly":
+                day = current_dt.day
+                week_of_month = ((day - 1) // 7) + 1
+                week_key = f"week{week_of_month}"
+                monthly_map = max_premium_selection.get("monthly", {})
+                # result = monthly_map.get(week_key,  fallback)
+                if week_key in monthly_map:
+                    result = monthly_map[week_key]
+                else:
+                    result = max_premium_selection.get("max_threshold", fallback)
+                    logger.warning(
+                        f"[get_max_premium_from_config] MONTHLY: No entry for {week_key} in map, using fallback={result} (symbol={orig_symbol})"
+                    )
+                details = f"monthly, {week_key}"
+            else:
+                result = fallback
+                details = "unknown expiry_type"
+        else:
+            result = fallback
+            details = "no max_premium_selection"
+    except Exception as e:
+        logger.warning(f"[get_max_premium_from_config] Error during max_premium selection: {e}")
+        result = fallback
+        details = "exception fallback"
+    logger.debug(
+        f"[get_max_premium_from_config] symbol={orig_symbol} (sanitized={symbol_upper}), expiry_type={expiry_type} ({expiry_reason}), {details}, selected max_premium={result}"
+    )
+    return result

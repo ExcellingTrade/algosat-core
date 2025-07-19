@@ -21,14 +21,14 @@ class OrderMonitor:
         order_manager: OrderManager,
         order_cache: OrderCache,  # new dependency
         price_order_monitor_seconds: float = 60.0,  # 1 minute default
-        signal_monitor_minutes: int = None  # will be set from strategy config
+        signal_monitor_seconds: int = None  # will be set from strategy config
     ):
         self.order_id: int = order_id
         self.data_manager: DataManager = data_manager
         self.order_manager: OrderManager = order_manager
         self.order_cache: OrderCache = order_cache
         self.price_order_monitor_seconds: float = price_order_monitor_seconds
-        self.signal_monitor_minutes: int = signal_monitor_minutes
+        self.signal_monitor_seconds: int = signal_monitor_seconds
         self._running: bool = True
         # Track last main order status to avoid redundant DB updates
         self._last_main_status = None
@@ -40,68 +40,47 @@ class OrderMonitor:
 
     async def _get_order_and_strategy(self, order_id: int):
         """
-        Fetch order, strategy_symbol, and strategy for this order_id, cache the result.
-        Returns (order, strategy_symbol, strategy) tuple. Always checks cache first.
+        Fetch order, strategy_symbol, strategy_config, and strategy for this order_id, cache the result.
+        Returns (order, strategy_symbol, strategy_config, strategy) tuple. Always checks cache first.
         If order is missing, logs error and stops the monitor.
         """
         # Check cache first
         if order_id in self._order_strategy_cache:
             return self._order_strategy_cache[order_id]
         # Lazy-load session if not present
-        from algosat.core.db import AsyncSessionLocal, get_order_by_id, get_strategy_symbol_by_id, get_strategy_by_id
-        # if self._db_session is None:
-        #     self._db_session = AsyncSessionLocal()
-        #     self._db_session_obj = await self._db_session.__aenter__()
-        # session = self._db_session_obj
-        # order = await get_order_by_id(session, order_id)
-        # if not order:
-        #     logger.error(f"OrderMonitor: No order found for order_id={order_id}")
-        #     self._order_strategy_cache[order_id] = (None, None, None)
-        #     self.stop()
-        #     return None, None, None
-        # strategy_symbol_id = order.get('strategy_symbol_id')
-        # if not strategy_symbol_id:
-        #     logger.error(f"OrderMonitor: No strategy_symbol_id for order_id={order_id}")
-        #     self._order_strategy_cache[order_id] = (order, None, None)
-        #     return order, None, None
-        # strategy_symbol = await get_strategy_symbol_by_id(session, strategy_symbol_id)
-        # if not strategy_symbol:
-        #     logger.error(f"OrderMonitor: No strategy_symbol found for id={strategy_symbol_id}")
-        #     self._order_strategy_cache[order_id] = (order, None, None)
-        #     return order, None, None
-        # strategy_id = strategy_symbol.get('strategy_id')
-        # if not strategy_id:
-        #     logger.error(f"OrderMonitor: No strategy_id in strategy_symbol for id={strategy_symbol_id}")
-        #     self._order_strategy_cache[order_id] = (order, strategy_symbol, None)
-        #     return order, strategy_symbol, None
-        # strategy = await get_strategy_by_id(session, strategy_id)
-        # self._order_strategy_cache[order_id] = (order, strategy_symbol, strategy)
-        # return order, strategy_symbol, strategy
+        from algosat.core.db import AsyncSessionLocal, get_order_by_id, get_strategy_symbol_by_id, get_strategy_by_id, get_strategy_config_by_id
+        # Fetch order, strategy_symbol, strategy_config, and strategy in one go
         async with AsyncSessionLocal() as session:
             order = await get_order_by_id(session, order_id)
             if not order:
                 logger.error(f"OrderMonitor: No order found for order_id={order_id}")
-                self._order_strategy_cache[order_id] = (None, None, None)
+                self._order_strategy_cache[order_id] = (None, None, None, None)
                 self.stop()
-                return None, None, None
+                return None, None, None, None
             strategy_symbol_id = order.get('strategy_symbol_id')
             if not strategy_symbol_id:
                 logger.error(f"OrderMonitor: No strategy_symbol_id for order_id={order_id}")
-                self._order_strategy_cache[order_id] = (order, None, None)
-                return order, None, None
+                self._order_strategy_cache[order_id] = (order, None, None, None)
+                return order, None, None, None
             strategy_symbol = await get_strategy_symbol_by_id(session, strategy_symbol_id)
             if not strategy_symbol:
                 logger.error(f"OrderMonitor: No strategy_symbol found for id={strategy_symbol_id}")
-                self._order_strategy_cache[order_id] = (order, None, None)
-                return order, None, None
+                self._order_strategy_cache[order_id] = (order, None, None, None)
+                return order, None, None, None
+            config_id = strategy_symbol.get('config_id')
+            strategy_config = None
+            if config_id:
+                strategy_config = await get_strategy_config_by_id(session, config_id)
+                if not strategy_config:
+                    logger.error(f"OrderMonitor: No strategy_config found for id={config_id}")
             strategy_id = strategy_symbol.get('strategy_id')
             if not strategy_id:
                 logger.error(f"OrderMonitor: No strategy_id in strategy_symbol for id={strategy_symbol_id}")
-                self._order_strategy_cache[order_id] = (order, strategy_symbol, None)
-                return order, strategy_symbol, None
+                self._order_strategy_cache[order_id] = (order, strategy_symbol, strategy_config, None)
+                return order, strategy_symbol, strategy_config, None
             strategy = await get_strategy_by_id(session, strategy_id)
-            self._order_strategy_cache[order_id] = (order, strategy_symbol, strategy)
-            return order, strategy_symbol, strategy
+            self._order_strategy_cache[order_id] = (order, strategy_symbol, strategy_config, strategy)
+            return order, strategy_symbol, strategy_config, strategy
 
     async def _price_order_monitor(self) -> None:
         """
@@ -123,8 +102,8 @@ class OrderMonitor:
                     return
                 await asyncio.sleep(self.price_order_monitor_seconds)
                 continue
-            # Fetch order, strategy_symbol, and strategy in one go (cached)
-            order_row, strategy_symbol, strategy = await self._get_order_and_strategy(self.order_id)
+            # Fetch order, strategy_symbol, strategy_config, and strategy in one go (cached)
+            order_row, strategy_symbol, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
             if order_row is None:
                 logger.info(f"OrderMonitor: Stopping monitor for order_id={self.order_id} as order_row is None (order deleted).")
                 self.stop()
@@ -322,6 +301,8 @@ class OrderMonitor:
                 main_status = OrderStatus.CANCELLED
             elif all(s == "REJECTED" for s in all_statuses) and all_statuses:
                 main_status = OrderStatus.REJECTED
+            elif all(s == "FAILED" for s in all_statuses) and all_statuses:
+                main_status = OrderStatus.FAILED
             elif all(s in ("REJECTED", "FAILED") for s in all_statuses) and all_statuses:
                 main_status = OrderStatus.CANCELLED
             # Only update Orders table if status changed
@@ -329,10 +310,12 @@ class OrderMonitor:
                 if main_status == OrderStatus.OPEN and any(s in ("FILLED", "PARTIALLY_FILLED") for s in status_set):
                     from datetime import datetime, timezone
                     entry_time = datetime.now(timezone.utc)
+                    logger.info(f"OrderMonitor: Updating order_id={self.order_id} to {main_status} with entry_time={entry_time}")
                     await self.order_manager.update_order_status_in_db(self.order_id, main_status)
                     await self.order_manager.update_order_stop_loss_in_db(self.order_id, order_row.get('stop_loss'))
                     from algosat.core.db import AsyncSessionLocal, update_rows_in_table
                     from algosat.core.dbschema import orders
+                   
                     async with AsyncSessionLocal() as session:
                         await update_rows_in_table(
                             target_table=orders,
@@ -340,9 +323,10 @@ class OrderMonitor:
                             new_values={"entry_time": entry_time}
                         )
                 else:
+                    logger.info(f"OrderMonitor: Updating order_id={self.order_id} to {main_status}")
                     await self.order_manager.update_order_status_in_db(self.order_id, main_status)
                 last_main_status = main_status
-                if main_status in (OrderStatus.CANCELLED, OrderStatus.REJECTED):
+                if main_status in (OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.FAILED):
                     self.stop()
                     return
             symbol = agg.symbol
@@ -382,7 +366,7 @@ class OrderMonitor:
                 except Exception as e:
                     logger.error(f"OrderMonitor: Error calculating/updating PnL for order_id={self.order_id}: {e}")
                 try:
-                    exit_reason = self._evaluate_price_exit_logic(latest_order_row, ltp)
+                    exit_reason = self._evaluate_price_exit_logic(latest_order_row, ltp, product_type)
                 except Exception as e:
                     logger.error(f"OrderMonitor: Error in price exit evaluation for order_id={self.order_id}: {e}")
                     exit_reason = None
@@ -393,7 +377,7 @@ class OrderMonitor:
             await asyncio.sleep(self.price_order_monitor_seconds)
         logger.info(f"OrderMonitor: Stopping price monitor for order_id={self.order_id} (last status: {last_main_status})")
     
-    def _evaluate_price_exit_logic(self, order, ltp):
+    def _evaluate_price_exit_logic(self, order, ltp, product_type) -> Optional[str]:
         """
         Deduplicated price-based exit logic for all strategies.
         Returns exit_reason string if exit conditions are met, else None.
@@ -407,7 +391,8 @@ class OrderMonitor:
         side = order.get('side')
         qty = order.get('qty')
         if None in (stop_loss, target_price, entry_price, side, qty):
-            logger.error(f"OrderMonitor: Missing fields for price exit evaluation (order_id={self.order_id})")
+            if not (product_type and str(product_type).lower() == 'delivery'):
+                logger.error(f"OrderMonitor: Missing fields for price exit evaluation (order_id={self.order_id})")
             return None
         exit_reason = None
         if side == 'BUY':
@@ -458,13 +443,13 @@ class OrderMonitor:
                 agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
             except Exception as e:
                 logger.error(f"OrderMonitor: Error in get_order_aggregate (signal) for order_id={self.order_id}: {e}")
-                await asyncio.sleep(self.signal_monitor_minutes * 60)
+                await asyncio.sleep(self.signal_monitor_seconds)
                 continue
-            # Fetch order, strategy_symbol, and strategy from unified cache
-            order_row, strategy_symbol, strategy = await self._get_order_and_strategy(self.order_id)
+            # Fetch order, strategy_symbol, strategy_config, and strategy from unified cache
+            order_row, strategy_symbol, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
             if strategy is None:
                 # If strategy is missing, just skip this iteration
-                await asyncio.sleep(self.signal_monitor_minutes * 60)
+                await asyncio.sleep(self.signal_monitor_seconds)
                 continue
             try:
                 interval = getattr(strategy, "entry_interval", 1)
@@ -493,17 +478,23 @@ class OrderMonitor:
                 await self.order_manager.place_order(exit_req, strategy_name=strategy.name)
                 self.stop()
                 return
-            await asyncio.sleep(self.signal_monitor_minutes * 60)
+            await asyncio.sleep(self.signal_monitor_seconds)
 
     async def start(self) -> None:
-        # Fetch signal_monitor_minutes from strategy config if not set
-        if self.signal_monitor_minutes is None:
-            # Use unified cache-based access for strategy
-            _, _, strategy_config = await self._get_order_and_strategy(self.order_id)
-            if strategy_config:
-                # Try to get interval_minutes from trade_param
-                import json
-                trade_param = strategy_config.get('trade_param')
+        # Fetch signal_monitor_seconds from strategy config if not set
+        if self.signal_monitor_seconds is None:
+            # Use unified cache-based access for strategy_config and strategy
+            _, _, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
+            strategy_id = None
+            if strategy:
+                # Try to get id from strategy object (dict or object)
+                strategy_id = getattr(strategy, 'id', None)
+                if strategy_id is None and isinstance(strategy, dict):
+                    strategy_id = strategy.get('id')
+            import json
+            trade_param = strategy_config.get('trade') if strategy_config else None
+            if strategy_id in (1, 2):
+                # For strategy_id 1, 2: use interval_minutes from trade param
                 interval_minutes = None
                 if trade_param:
                     try:
@@ -512,38 +503,43 @@ class OrderMonitor:
                     except Exception as e:
                         logger.error(f"OrderMonitor: Could not parse trade_param for order_id={self.order_id}: {e}")
                 if interval_minutes:
-                    self.signal_monitor_minutes = interval_minutes
+                    self.signal_monitor_seconds = int(interval_minutes) * 60
                 else:
-                    self.signal_monitor_minutes = 5  # fallback default
-        logger.debug(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_minutes}m)")
-        await asyncio.gather(self._price_order_monitor())#, self._signal_monitor())
+                    self.signal_monitor_seconds = 5 * 60  # fallback default
+            elif strategy_id in (3, 4):
+                # For strategy_id 3, 4: use stoploss.timeframe from trade param
+                stoploss_timeframe = None
+                if trade_param:
+                    try:
+                        trade_param_dict = json.loads(trade_param) if isinstance(trade_param, str) else trade_param
+                        stoploss_section = trade_param_dict.get('stoploss', {})
+                        stoploss_timeframe = stoploss_section.get('timeframe')
+                    except Exception as e:
+                        logger.error(f"OrderMonitor: Could not parse stoploss section for order_id={self.order_id}: {e}")
+                if stoploss_timeframe:
+                    # Remove 'm' prefix if present and convert to int
+                    if isinstance(stoploss_timeframe, str) and stoploss_timeframe.endswith('m'):
+                        stoploss_timeframe = stoploss_timeframe[:-1]
+                    try:
+                        self.signal_monitor_seconds = int(stoploss_timeframe) * 60
+                    except Exception as e:
+                        logger.error(f"OrderMonitor: Could not convert stoploss_timeframe to int for order_id={self.order_id}: {e}")
+                        self.signal_monitor_seconds = 5 * 60
+                else:
+                    self.signal_monitor_seconds = 5 * 60
+            else:
+                # fallback default
+                self.signal_monitor_seconds = 5 * 60
+        logger.info(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_seconds}s)")
+        await asyncio.gather(self._price_order_monitor())  #, self._signal_monitor())
 
     def stop(self) -> None:
         self._running = False
-        # Close DB session if open
-        # if self._db_session is not None:
-        #     async def _close_session():
-        #         try:
-        #             if hasattr(self._db_session, '__aexit__'):
-        #                 await self._db_session.__aexit__(None, None, None)
-        #         except Exception as e:
-        #             logger.error(f"OrderMonitor: Error closing DB session: {e}")
-        #     try:
-        #         import asyncio
-        #         if asyncio.get_event_loop().is_running():
-        #             asyncio.create_task(_close_session())
-        #         else:
-        #             loop = asyncio.get_event_loop()
-        #             loop.run_until_complete(_close_session())
-        #     except Exception:
-        #         pass
-        #     self._db_session = None
-        #     self._db_session_obj = None
 
     @property
     async def strategy(self):
         """
         Returns the strategy dict for this order_id (uses unified order/strategy cache).
         """
-        _, _, strategy = await self._get_order_and_strategy(self.order_id)
+        _, _, _, strategy = await self._get_order_and_strategy(self.order_id)
         return strategy

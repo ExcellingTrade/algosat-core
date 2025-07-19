@@ -129,9 +129,9 @@ class OrderManager:
         # Check for split
         max_nse_qty = None
         if hasattr(config, 'trade') and isinstance(config.trade, dict):
-            max_nse_qty = config.trade.get('max_nse_qty') or config.trade.get('max_nse_qtty')
+            max_nse_qty = config.trade.get('max_nse_qty', config.trade.get('max_nse_qtty', 900))
         if max_nse_qty and order_payload.quantity > max_nse_qty:
-            return await self.split_and_place_order(config, order_payload, max_nse_qty, strategy_name)
+            return await self.split_and_place_order(config, order_payload, max_nse_qty, strategy_name, check_margin=check_margin)
         # 1. Insert logical order row (orders)
         async with AsyncSessionLocal() as session:
             order_id = await self._insert_and_get_order_id(
@@ -145,7 +145,8 @@ class OrderManager:
                 logger.error("Failed to insert logical order row.")
                 return None
             # 2. Place order(s) with brokers
-            broker_responses = await self.broker_manager.place_order(order_payload, strategy_name=strategy_name)
+            check_margin = config.trade.get('check_margin', False)
+            broker_responses = await self.broker_manager.place_order(order_payload, strategy_name=strategy_name, check_margin=check_margin)
             # 3. Insert broker_executions rows
             for broker_name, response in broker_responses.items():
                 await self._insert_broker_execution(session, order_id, broker_name, response, side=ExecutionSide.ENTRY.value)
@@ -164,6 +165,7 @@ class OrderManager:
         order_payload: OrderRequest,
         max_nse_qty: int,
         strategy_name: Optional[str] = None,
+        check_margin: bool = False,
     ) -> Dict[str, Any]:
         """
         Split the order into chunks if the quantity exceeds max_nse_qty and place each chunk as a separate order.
@@ -201,7 +203,7 @@ class OrderManager:
                 qty = min(qty_left, max_nse_qty)
                 trigger_price = (current_price - trigger_price_diff) if order_payload.side == Side.BUY else (current_price + trigger_price_diff)
                 slice_payload = self.create_slice_payload(order_payload, qty, current_price, trigger_price, "ENTRY")
-                broker_responses = await self.broker_manager.place_order(slice_payload, strategy_name=strategy_name)
+                broker_responses = await self.broker_manager.place_order(slice_payload, strategy_name=strategy_name, check_margin=check_margin)
                 for broker_name, response in broker_responses.items():
                     # Assume response['order_id'] is a single string (not a list)
                     order_id = response.get('order_id') or (response.get('order_ids')[0] if isinstance(response.get('order_ids'), list) else response.get('order_ids'))

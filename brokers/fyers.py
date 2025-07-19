@@ -106,6 +106,7 @@ rate_limiter_per_minute = Limiter(190 / 60)
 
 
 class FyersWrapper(BrokerInterface):
+    
     """
     FyersWrapper
 
@@ -131,61 +132,127 @@ class FyersWrapper(BrokerInterface):
         self.ws_connected = False
         self._ws_callbacks = {}
 
-    @staticmethod
-    def _make_margin_request(data):
+    def _make_margin_request(self, data):
         """
         Helper method to make margin request using the Fyers API.
         """
         try:
             url = "https://api-t1.fyers.in/api/v3/multiorder/margin"
             headers = {
-                "Authorization": f"{FyersWrapper.appId}:{FyersWrapper.token}",
+                "Authorization": f"{self.appId}:{self.token}",
                 "Content-Type": "application/json",
             }
+            import requests
             response = requests.post(url, headers=headers, json=data)
             return response.json()
         except Exception as e:
             raise RuntimeError(f"Failed to check margin: {e}")
 
-    @staticmethod
-    async def check_margin_async(data):
+    async def check_margin_async(self, data):
         """
         Check margin requirements asynchronously before placing orders.
 
         :param data: Order details to check the margin for.
         :return: Parsed margin response.
         """
+        import asyncio
         loop = asyncio.get_running_loop()
-        response = await loop.run_in_executor(None, FyersWrapper._make_margin_request, data)
+        response = await loop.run_in_executor(None, self._make_margin_request, data)
         if response.get("s") != "ok":
             raise ValueError(f"Margin check failed: {response.get('message', 'Unknown error')}")
         return response["data"]
 
-    @staticmethod
-    def check_margin_sync(data):
+    def check_margin_sync(self, data):
         """
         Check margin requirements synchronously before placing orders.
 
         :param data: Order details to check the margin for.
         :return: Parsed margin response.
         """
-        response = FyersWrapper._make_margin_request(data)
+        response = self._make_margin_request(data)
         if response.get("s") != "ok":
             raise ValueError(f"Margin check failed: {response.get('message', 'Unknown error')}")
         return response["data"]
 
-    @staticmethod
-    def check_margin(data):
+    async def check_margin(self, data):
         """
         Dynamically check margin based on the mode (sync/async).
 
         :param data: Order details to check the margin for.
         :return: Parsed margin response.
         """
-        if FyersWrapper.is_async:
-            return FyersWrapper.check_margin_async(data)
+        if self.is_async:
+            return await self.check_margin_async(data)
         else:
-            return FyersWrapper.check_margin_sync(data)
+            return self.check_margin_sync(data)
+    
+    async def check_margin_availability(self, *order_params_list):
+        """
+        Check if the sufficient margin is available before placing the trade.
+
+        :param order_params_list: One or more standardized OrderRequest dicts.
+        :return: True if sufficient margin is available, otherwise False.
+        """
+        try:
+            # Convert standardized dicts to Fyers dicts
+            fyers_params_list = []
+            for param in order_params_list:
+                # If param is a list, flatten it
+                if isinstance(param, list):
+                    for p in param:
+                        if hasattr(p, 'to_fyers_dict'):
+                            fyers_params_list.append(p.to_fyers_dict())
+                        elif isinstance(p, dict) and 'to_fyers_dict' in p:
+                            fyers_params_list.append(p['to_fyers_dict']())
+                        else:
+                            fyers_params_list.append(p)
+                else:
+                    if hasattr(param, 'to_fyers_dict'):
+                        fyers_params_list.append(param.to_fyers_dict())
+                    elif isinstance(param, dict) and 'to_fyers_dict' in param:
+                        fyers_params_list.append(param['to_fyers_dict']())
+                    else:
+                        fyers_params_list.append(param)
+
+            # Defensive: if still not a list, wrap
+            if not isinstance(fyers_params_list, list):
+                fyers_params_list = [fyers_params_list]
+
+            # Create margin request data
+            margin_request_data = {
+                "data": [
+                    {
+                        "symbol": order_params["symbol"],
+                        "qty": order_params["qty"],
+                        "side": order_params["side"],
+                        "type": order_params["type"],
+                        "productType": order_params.get("productType", "BO"),
+                        "limitPrice": order_params.get("limitPrice", 0.0),
+                        "stopLoss": order_params.get("stopLoss", 0.0),
+                        "stopPrice": order_params.get("stopPrice", 0.0),
+                        "takeProfit": order_params.get("takeProfit", 0.0),
+                    }
+                    for order_params in fyers_params_list
+                ]
+            }
+            logger.debug(f"Margin req data: {margin_request_data}")
+            # Perform margin check
+            margin_response = await self.check_margin(margin_request_data)
+            logger.debug(margin_response)
+            margin_avail = margin_response["margin_avail"]
+            margin_required = margin_response["margin_new_order"]
+
+            # Log margin details
+            logger.info(
+                f"Margin Check: Required (Fyers): {margin_required}, Available: {margin_avail}, "
+                f"Orders: {[order['symbol'] for order in margin_request_data['data']]}"
+            )
+
+            # Return whether a sufficient margin is available
+            return margin_required <= margin_avail
+        except Exception as error:
+            logger.error(f"Error checking margin: {error}")
+            return False
 
     async def login(self, force_reauth: bool = False) -> bool:
         """

@@ -210,6 +210,18 @@ class SwingHighLowBuyStrategy(StrategyBase):
             # 4. Place order if signal
             order_info = await self.process_order(signal, confirm_df_sorted, signal.symbol)
             if order_info:
+                # Check if all broker_responses are terminal (FAILED, CANCELLED, REJECTED)
+                broker_responses = order_info.get('broker_responses') if order_info else None
+                failed_statuses = {"FAILED", "CANCELLED", "REJECTED"}
+                all_failed = False
+                if broker_responses and isinstance(broker_responses, dict):
+                    statuses = [str(resp.get('status')) if resp else None for resp in broker_responses.values()]
+                    statuses = [s.split('.')[-1].replace("'", "").replace(">", "").upper() if s else None for s in statuses]
+                    if statuses and all(s in failed_statuses for s in statuses if s):
+                        all_failed = True
+                if all_failed:
+                    logger.error(f"Order placement failed for all brokers, skipping atomic confirmation: {order_info}")
+                    return order_info
                 logger.info(f"Order placed: {order_info}. Awaiting atomic confirmation on next entry candle close.")
                 # Wait for next entry candle to confirm breakout
                 await strategy_utils.wait_for_next_candle(self.entry_minutes)
@@ -305,14 +317,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
         if signal_payload:
             ts = data.iloc[-1].get('timestamp', 'N/A') if hasattr(data, 'iloc') and len(data) > 0 else signal_payload.get('timestamp', 'N/A')
             logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
-            # order_request = {
-            #     "symbol": signal_payload.get("symbol", self.symbol),
-            #     "strike": signal_payload.get("strike", strike),
-            #     "side": signal_payload.get("side", "BUY"),
-            #     "qty": signal_payload.get("qty"),
-            #     "price": signal_payload.get("price"),
-            #     "order_type": self.trade.get("order_type", "MARKET"),
-            # }
+
             order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
                 signal_payload, self.cfg
             )

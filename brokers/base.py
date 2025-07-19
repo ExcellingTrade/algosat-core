@@ -4,6 +4,12 @@ import datetime
 from .models import BalanceSummary
 
 class BrokerInterface(ABC):
+    async def check_margin_availability(self, broker, total_qty, *order_params_list):
+        """
+        Check if the sufficient margin is available before placing the trade.
+        Should be implemented by broker wrappers that support margin checks.
+        """
+        raise NotImplementedError
     """
     Abstract base class defining the contract for all broker wrappers.
     Using Python's built-in `abc` module, this declares methods that
@@ -106,5 +112,13 @@ class BrokerInterface(ABC):
     async def cancel_order(self, *args, **kwargs):
         """
         Cancel an order. Arguments depend on broker implementation.
+        """
+        pass
+
+    @abstractmethod
+    async def check_margin_availability(self, broker, total_qty, *order_params_list):
+        """
+        Check if the sufficient margin is available before placing the trade.
+        Should be implemented by broker wrappers that support margin checks.
         """
         pass

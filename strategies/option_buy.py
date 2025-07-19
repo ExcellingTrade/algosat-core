@@ -20,6 +20,7 @@ from algosat.common.strategy_utils import (
     calculate_backdate_days,
     localize_to_ist,
     calculate_trade,
+    get_max_premium_from_config,
 )
 from algosat.utils.indicators import (
     calculate_supertrend,
@@ -118,15 +119,17 @@ class OptionBuyStrategy(StrategyBase):
         interval_minutes = trade.get("interval_minutes", 5)
         first_candle_time = trade.get("first_candle_time", "09:15")
         max_strikes = trade.get("max_strikes", 40)
-        max_premium = trade.get("max_premium", 200)
         symbol = self.symbol
         if not symbol:
             logger.error("No symbol configured for OptionBuy strategy.")
             return
+        today_dt = get_ist_datetime()
+        # Dynamically select max_premium (expiry_type is auto-detected inside)
+        max_premium = get_max_premium_from_config(trade, symbol, today_dt)
         # 1. Wait for first candle completion
         # await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
         # 2. Calculate first candle data using the correct trade day
-        trade_day = get_trade_day(get_ist_datetime())#  - timedelta(days=4)
+        trade_day = get_trade_day(get_ist_datetime())
         # 3. Fetch option chain and identify strikes
         cache = load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
@@ -139,7 +142,6 @@ class OptionBuyStrategy(StrategyBase):
         candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
         from_date = candle_times["from_date"]
         to_date = candle_times["to_date"]
-        # await self.ensure_broker()  # Only for order placement, not for data fetch
         history_data = await fetch_option_chain_and_first_candle_history(
             self.dp, symbol, interval_minutes, max_strikes, from_date, to_date, bot_name="OptionBuy"
         )

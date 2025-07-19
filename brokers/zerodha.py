@@ -24,6 +24,8 @@ from algosat.core.order_request import OrderRequest, Side, OrderType
 logger = get_logger("zerodha_wrapper")
 
 class ZerodhaWrapper(BrokerInterface):
+
+   
     """
     Async wrapper for Zerodha's Kite Connect API.
     This is a placeholder implementation.
@@ -588,3 +590,64 @@ class ZerodhaWrapper(BrokerInterface):
         except Exception as e:
             logger.error(f"Zerodha cancel_order failed for order {broker_order_id}: {e}")
             return {"status": False, "message": str(e)}
+        
+    async def get_order_margin(self, *order_params_list):
+        """
+        Call self.kite.order_margins with the given order params (list of dicts).
+        Returns the list of margin dicts as returned by KiteConnect.
+        """
+        try:
+            if not self.kite:
+                logger.error("Kite client not initialized. Please login first.")
+                return []
+            # Kite expects a list of order dicts
+            loop = asyncio.get_event_loop()
+            margin_result = await loop.run_in_executor(None, self.kite.order_margins, list(order_params_list))
+            return margin_result
+        except Exception as e:
+            logger.error(f"Failed to fetch Zerodha order margin: {e}")
+            return []
+
+    async def check_margin_availability(self, *order_params_list):
+        """
+        Check if sufficient margin is available before placing the trade.
+        Accepts one or more OrderRequest objects or dicts, converts OrderRequest to dict using to_zerodha_dict.
+        :param order_params_list: One or more OrderRequest objects or dicts
+        :return: True if sufficient margin is available, otherwise False
+        """
+        try:
+            # Convert OrderRequest objects to dicts using to_zerodha_dict
+            converted_params = []
+            for param in order_params_list:
+                if hasattr(param, 'to_zerodha_dict'):
+                    d = param.to_zerodha_dict()
+                    d = {k: v for k, v in d.items() if v is not None}
+                    converted_params.append(d)
+                elif isinstance(param, dict):
+                    converted_params.append(param)
+                else:
+                    logger.error(f"Zerodha check_margin_availability: Invalid order param type: {type(param)}")
+                    return False
+
+            if not converted_params:
+                logger.error("Zerodha check_margin_availability: No valid order params provided.")
+                return False
+
+            margin_result = await self.get_order_margin(*converted_params)
+            if not margin_result or not isinstance(margin_result, list):
+                logger.error(f"Zerodha check_margin_availability: Invalid margin result: {margin_result}")
+                return False
+            total_required = sum(float(m.get('total', 0)) for m in margin_result)
+            logger.debug(f"Zerodha margin required for order(s): {total_required}")
+
+            # Get available balance (net) from get_balance
+            balance = await self.get_balance()
+            equity_data = balance.get("equity", {})
+            net_available = float(equity_data.get("net", 0))
+            logger.debug(f"Zerodha available net balance: {net_available}")
+
+            logger.info(f"Margin Check: Required (Zerodha): {total_required}, Available: {net_available}, Orders: {[o.get('tradingsymbol') for o in converted_params]}")
+            return total_required <= net_available
+        except Exception as error:
+            logger.error(f"Error checking Zerodha margin: {error}")
+            return False
