@@ -26,3 +26,4 @@ class TradeSignal:
     signal_direction: str = None
     lot_qty: int = None
     side_value: int = None
+    orig_target: float = None  # Optional: original target price for trailing stoploss logic

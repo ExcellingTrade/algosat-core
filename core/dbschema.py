@@ -165,6 +165,7 @@ orders = Table(
     Column("entry_price",  Float, nullable=True),
     Column("stop_loss",  Float, nullable=True),
     Column("target_price",  Float, nullable=True),
+    Column("orig_target", Float, nullable=True),  # NEW: Original target price, optional
     Column("signal_time", DateTime(timezone=True), nullable=True),
     Column("entry_time", DateTime(timezone=True), nullable=True),
     Column("exit_time", DateTime(timezone=True), nullable=True),

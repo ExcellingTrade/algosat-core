@@ -440,44 +440,51 @@ class OrderMonitor:
         await self.data_manager.ensure_broker()
         while self._running:
             try:
-                agg: OrderAggregate = await self.data_manager.get_order_aggregate(self.order_id)
+                # Fetch order, strategy_symbol, strategy_config, and strategy (cached)
+                order_row, strategy_symbol, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
             except Exception as e:
-                logger.error(f"OrderMonitor: Error in get_order_aggregate (signal) for order_id={self.order_id}: {e}")
+                logger.error(f"OrderMonitor: Error in _get_order_and_strategy for order_id={self.order_id}: {e}", exc_info=True)
                 await asyncio.sleep(self.signal_monitor_seconds)
                 continue
-            # Fetch order, strategy_symbol, strategy_config, and strategy from unified cache
-            order_row, strategy_symbol, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
-            if strategy is None:
-                # If strategy is missing, just skip this iteration
+
+            if strategy is None or order_row is None:
+                logger.warning(f"OrderMonitor: Missing strategy or order_row for order_id={self.order_id}. Skipping iteration.")
                 await asyncio.sleep(self.signal_monitor_seconds)
                 continue
+
+            # Determine strategy_id
+            strategy_id = None
+            if isinstance(strategy, dict):
+                strategy_id = strategy.get('id')
+            else:
+                strategy_id = getattr(strategy, 'id', None)
+
+            logger.info(f"OrderMonitor: Calling evaluate_exit for order_id={self.order_id}, strategy_id={strategy_id}")
             try:
-                interval = getattr(strategy, "entry_interval", 1)
-                lookback = getattr(strategy, "exit_lookback", 1) + 1
-                history = await self.data_manager.fetch_history(
-                    agg.symbol,
-                    interval_minutes=interval,
-                    lookback=lookback
-                )
+                evaluate_exit_fn = getattr(strategy, "evaluate_exit", None)
+                if evaluate_exit_fn is None:
+                    logger.warning(f"OrderMonitor: Strategy missing evaluate_exit method for order_id={self.order_id}")
+                    await asyncio.sleep(self.signal_monitor_seconds)
+                    continue
+                result = evaluate_exit_fn(order_row)
+                if asyncio.iscoroutine(result):
+                    should_exit = await result
+                else:
+                    should_exit = result
             except Exception as e:
-                logger.error(f"OrderMonitor: Error in fetch_history (slow) for symbol={agg.symbol}, order_id={self.order_id}: {e}")
-                history = None
-            try:
-                ltp = await self.data_manager.get_ltp(agg.symbol)
-            except Exception as e:
-                logger.error(f"OrderMonitor: Error in get_ltp (slow) for symbol={agg.symbol}, order_id={self.order_id}: {e}")
-                ltp = None
-            
-            strategy.update_trailing_stop_loss(self.order_id, ltp, history, self.order_manager)
-            try:
-                exit_req = await strategy.evaluate_candle_exit(self.order_id, history)
-            except Exception as e:
-                logger.error(f"OrderMonitor: Error in evaluate_candle_exit for order_id={self.order_id}: {e}")
-                exit_req = None
-            if exit_req:
-                await self.order_manager.place_order(exit_req, strategy_name=strategy.name)
+                logger.error(f"OrderMonitor: Exception in evaluate_exit for order_id={self.order_id}: {e}", exc_info=True)
+                await asyncio.sleep(self.signal_monitor_seconds)
+                continue
+
+            if should_exit:
+                logger.info(f"OrderMonitor: evaluate_exit returned True for order_id={self.order_id}. Exiting order.")
+                try:
+                    await self.order_manager.exit_order(self.order_id)
+                except Exception as e:
+                    logger.error(f"OrderMonitor: Failed to exit order {self.order_id}: {e}", exc_info=True)
                 self.stop()
                 return
+
             await asyncio.sleep(self.signal_monitor_seconds)
 
     async def start(self) -> None:
