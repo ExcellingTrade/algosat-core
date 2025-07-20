@@ -176,33 +176,63 @@ class OptionSellStrategy(StrategyBase):
         Also tracks the last signal direction per strike.
         """
         self._positions = {}
+        open_statuses = ['AWAITING_ENTRY', 'OPEN', 'PARTIALLY_FILLED', 'PENDING', 'TRIGGER_PENDING']
         async with AsyncSessionLocal() as session:
-            from algosat.core.db import get_open_orders_for_strategy_and_tradeday
-            
+            from algosat.core.db import get_all_orders_for_strategy_and_tradeday
+
             trade_day = get_trade_day(get_ist_datetime())
             strategy_id = getattr(self.cfg, 'strategy_id', None)
-            
+
             if not strategy_id:
                 logger.warning("No strategy_id found in config, cannot sync open positions")
                 return
-            
-            # Get all open orders for this strategy on the current trade day
-            open_orders = await get_open_orders_for_strategy_and_tradeday(session, strategy_id, trade_day)
-            
-            # Group orders by strike symbol (now direct from orders.strike_symbol)
+
+            # Get all orders for this strategy on the current trade day (no status filter)
+            all_orders = await get_all_orders_for_strategy_and_tradeday(session, strategy_id, trade_day)
+
+            # Filter for open statuses
+            open_orders = [o for o in all_orders if o.get('status') in open_statuses]
+
+            # Group open orders by strike symbol
             for order in open_orders:
                 strike_symbol = order.get("strike_symbol")
                 if strike_symbol and strike_symbol in self._strikes:
                     if strike_symbol not in self._positions:
                         self._positions[strike_symbol] = []
                     self._positions[strike_symbol].append(order)
-            # Update last signal direction per strike to the most recent order's side
-            for strike_symbol, order_list in self._positions.items():
-                if order_list:
-                    # Find the most recent order by timestamp (assume latest in list if not sorted)
-                    latest_order = max(order_list, key=lambda o: o.get("timestamp", ""))
-                    self._last_signal_direction[strike_symbol] = latest_order.get("side")
+
+            # For all orders (not just open), sort by strike and timestamp, and set last_signal_direction
+            orders_by_strike = {}
+            for order in all_orders:
+                strike_symbol = order.get("strike_symbol")
+                if strike_symbol and strike_symbol in self._strikes:
+                    if strike_symbol not in orders_by_strike:
+                        orders_by_strike[strike_symbol] = []
+                    orders_by_strike[strike_symbol].append(order)
+
+            from datetime import datetime
+            def safe_parse_timestamp(ts):
+                # Accepts string (ISO), datetime, or None. Returns a sortable value.
+                if isinstance(ts, datetime):
+                    return ts
+                if isinstance(ts, str):
+                    try:
+                        # Try ISO format first
+                        return datetime.fromisoformat(ts)
+                    except Exception:
+                        pass
+                # If None or malformed, return minimal value so it sorts first
+                return datetime.min
+
+            for strike_symbol, order_list in orders_by_strike.items():
+                # Sort by timestamp ascending (oldest to newest), robust to malformed/missing timestamps
+                sorted_orders = sorted(order_list, key=lambda o: safe_parse_timestamp(o.get("timestamp")))
+                if sorted_orders:
+                    self._last_signal_direction[strike_symbol] = sorted_orders[-1].get("side")
+
             logger.debug(f"Synced positions for strategy {strategy_id}: {list(self._positions.keys())}")
+            logger.debug(f"Synced last_signal_direction: {self._last_signal_direction}")
+            
 
     async def process_cycle(self) -> Optional[dict]:
         """
@@ -364,6 +394,14 @@ class OptionSellStrategy(StrategyBase):
             # Track signal direction logic
             curr_signal_direction = curr.get("supertrend_signal")
             last_signal_direction = self._last_signal_direction.get(strike)
+
+            # Reset last_signal_direction to None if signal flipped to BUY from SELL
+            # if curr_signal_direction != constants.TRADE_DIRECTION_SELL:
+            if curr_signal_direction == constants.TRADE_DIRECTION_BUY and last_signal_direction == constants.TRADE_DIRECTION_SELL:
+                self._last_signal_direction[strike] = None
+                logger.info(
+                    f"Signal flipped to BUY for {strike} at {curr.get('timestamp')}. Reset last_signal_direction to None."
+                )
             # Only allow SELL entries, and prevent stacking same direction
             if (
                 prev["supertrend_signal"] == constants.TRADE_DIRECTION_BUY

@@ -1012,6 +1012,29 @@ async def get_open_orders_for_symbol_and_tradeday(session, symbol: str, trade_da
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
 
+async def get_all_orders_for_strategy_and_tradeday(session, strategy_id: int, trade_day):
+    """
+    Return all orders for a given strategy_id and trade_day (no status filtering).
+    Args:
+        session: SQLAlchemy async session
+        strategy_id: int, the strategy id
+        trade_day: date or datetime, the trade day (should match the date part of signal_time)
+    Returns:
+        List of order dicts
+    """
+    from algosat.core.dbschema import orders, strategy_symbols
+    # Join orders with strategy_symbols to get strategy_id
+    stmt = (
+        select(orders)
+        .select_from(orders.join(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id))
+        .where(strategy_symbols.c.strategy_id == strategy_id)
+        .where(func.date(orders.c.signal_time) == trade_day.date())
+        .order_by(orders.c.signal_time.asc(), orders.c.id.asc())
+    )
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
+
+
 async def get_open_orders_for_strategy_symbol_and_tradeday(session, strategy_config_id: int, symbol: str, trade_day):
     """Return all open orders for a given strategy config, symbol, and trade day."""
     return await get_open_orders_for_symbol_and_tradeday(session, symbol, trade_day, strategy_config_id)

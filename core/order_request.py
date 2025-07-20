@@ -112,7 +112,7 @@ class OrderRequest(BaseModel):
             "disclosedQty": self.extra.get("disclosedQty", 0),
             "validity": self.validity or "DAY",
             "offlineOrder": self.extra.get("offlineOrder", False),
-            "stopLoss": self.extra.get("stopLoss", 0),
+            "stopLoss": getattr(self, 'stop_loss', None) or self.extra.get("stopLoss") or self.extra.get("stoploss") or self.extra.get("stop_loss") or 0,
             "takeProfit": self.extra.get("takeProfit", 0),
             "orderTag": self.tag or ""
         }
