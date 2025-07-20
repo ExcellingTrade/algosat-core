@@ -354,10 +354,57 @@ class OptionSellStrategy(StrategyBase):
         Process order using the new TradeSignal and BrokerManager logic.
         Always pass self.cfg (StrategyConfig) as the config to order_manager.place_order for correct DB logging.
         Returns order info dict with local DB order_id if an order is placed, else None.
+        Now also fetches hedge symbol and logs it.
         """
         if signal_payload:
             ts = data.iloc[-1].get('timestamp', 'N/A')
             logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
+            # Fetch hedge symbol for this strike (pass strike directly)
+            hedge_symbol = await self.fetch_hedge_symbol(self.order_manager.broker_manager, strike, self.trade)
+            if hedge_symbol:
+                logger.info(f"Hedge symbol for {strike}: {hedge_symbol}")
+                hedge_signal_payload = TradeSignal(
+                    symbol=hedge_symbol,
+                    side="BUY",
+                    signal_type=SignalType.HEDGE_ENTRY,
+                    signal_time=signal_payload.signal_time,
+                    signal_direction="hedge buy",
+                    lot_qty=signal_payload.lot_qty,
+                )
+                # Build order request for hedge
+                hedge_order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
+                    hedge_signal_payload, self.cfg
+                )
+                # Place hedge order
+                hedge_order_result = await self.order_manager.place_order(
+                    self.cfg,
+                    hedge_order_request,
+                    strategy_name=None
+                )
+                logger.debug(f"Hedge order result for {hedge_symbol}: {hedge_order_result}")
+                 # Check if any broker response is failed/cancelled/rejected
+                failed_statuses = {"FAILED", "CANCELLED", "REJECTED"}
+                broker_responses = hedge_order_result.get('broker_responses') if hedge_order_result else None
+                any_failed = False
+                if broker_responses and isinstance(broker_responses, dict):
+                    statuses = [str(resp.get('status')) if resp else None for resp in broker_responses.values()]
+                    statuses = [s.split('.')[-1].replace("'", "").replace(">", "").upper() if s else None for s in statuses]
+                    if any(s in failed_statuses for s in statuses if s):
+                        any_failed = True
+                if any_failed:
+                    logger.error(f"At least one hedge order broker response failed/cancelled/rejected, aborting entry. Details: {hedge_order_result}")
+                    hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
+                    if hedge_order_id:
+                        await self.exit_order(hedge_order_id)
+                    return None
+
+            else:
+                logger.error(f"No hedge symbol found for {strike}")
+                return None
+            
+            
+
+            
             order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
                 signal_payload, self.cfg
             )
@@ -577,3 +624,40 @@ class OptionSellStrategy(StrategyBase):
         except Exception as e:
             logger.error(f"Error in evaluate_exit for order_id={order_row.get('id')}: {e}")
             return False
+        
+    async def fetch_hedge_symbol(self, broker, strike, trade_config):
+        """
+        Identify the hedge symbol from the option chain for the given strike, based on opp_side_max_premium.
+
+        :param broker: Broker instance.
+        :param strike: The strike symbol for which to find the hedge (e.g., 'NIFTY25JUL24500CE').
+        :param trade_config: Trade configuration dictionary.
+        :return: The hedge symbol or None if not found.
+        """
+        try:
+            # Use the passed strike symbol to infer option type
+            opp_side = constants.OPTION_TYPE_CALL if constants.OPTION_TYPE_CALL in strike else constants.OPTION_TYPE_PUT
+            max_premium = trade_config.get("opp_side_max_premium") or self.trade.get("opp_side_max_premium")
+            logger.info(f"Identifying hedge symbol for {opp_side} with max premium: {max_premium}")
+            # Assume broker.get_option_chain returns all options for the relevant symbol family
+            option_chain_response = await broker.get_option_chain(strike, trade_config.get("max_strikes", 40))
+            option_chain_df = pd.DataFrame(option_chain_response['data']['optionsChain'])
+            # Filter for the opposite side
+            hedge_options = option_chain_df[
+                (option_chain_df[constants.COLUMN_OPTION_TYPE] == opp_side) &
+                (pd.to_numeric(option_chain_df[constants.COLUMN_LTP], errors='coerce') <= max_premium)
+            ]
+            if hedge_options.empty:
+                logger.warning("No suitable hedge options found.")
+                return None
+            # Select the closest strike price (highest LTP under max_premium)
+            hedge_options[constants.COLUMN_LTP] = pd.to_numeric(
+                hedge_options[constants.COLUMN_LTP], errors='coerce'
+            )
+            hedge_option = hedge_options.loc[hedge_options[constants.COLUMN_LTP].idxmax()]
+            hedge_symbol = hedge_option[constants.COLUMN_SYMBOL]
+            logger.info(f"Hedge symbol identified: {hedge_symbol}")
+            return hedge_symbol
+        except Exception as error:
+            logger.error(f"Error fetching hedge symbol: {error}")
+            return None

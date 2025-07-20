@@ -241,8 +241,9 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 entry_df2_sorted = entry_df2.sort_values("timestamp")
                 latest_entry = entry_df2_sorted.iloc[-1]
                 # Confirm based on the breakout direction
-                if (signal.signal_direction == "UP" and latest_entry["close"] > signal.price) or \
-                   (signal.signal_direction == "DOWN" and latest_entry["close"] < signal.price):
+                confirm_last_close = confirm_df.iloc[-1]["close"] if "close" in confirm_df.columns else None
+                if (signal.signal_direction == "UP" and latest_entry["close"] > confirm_last_close) or \
+                   (signal.signal_direction == "DOWN" and latest_entry["close"] < confirm_last_close):
                     logger.info("Breakout confirmed after atomic check, holding position.")
                     return order_info
                 else:
@@ -472,7 +473,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             signal = TradeSignal(
                 symbol=strike,
                 side="BUY",
-                price=last_candle["close"],
+                # price=last_candle["close"],
                 signal_type=SignalType.ENTRY,
                 signal_time=last_candle["timestamp"],
                 signal_direction=direction,

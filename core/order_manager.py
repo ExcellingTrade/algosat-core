@@ -146,10 +146,12 @@ class OrderManager:
                 return None
             # 2. Place order(s) with brokers
             check_margin = config.trade.get('check_margin', False)
+            
             broker_responses = await self.broker_manager.place_order(order_payload, strategy_name=strategy_name, check_margin=check_margin)
             # 3. Insert broker_executions rows
             for broker_name, response in broker_responses.items():
-                await self._insert_broker_execution(session, order_id, broker_name, response, side=ExecutionSide.ENTRY.value)
+                action = str(getattr(order_payload, 'side', None) or response.get('side', None) or 'BUY').upper()
+                await self._insert_broker_execution(session, order_id, broker_name, response, side=ExecutionSide.ENTRY.value, action=action)
             await session.commit()
         # Return enhanced response with traded_price
         return {
@@ -169,7 +171,7 @@ class OrderManager:
     ) -> Dict[str, Any]:
         """
         Split the order into chunks if the quantity exceeds max_nse_qty and place each chunk as a separate order.
-        Each broker gets a single broker_executions entry with all order_ids from the splits.
+        Each split order is inserted as a separate broker_executions entry (per split).
         """
         logger.info(f"Splitting order for symbol={order_payload.symbol}, total_qty={order_payload.quantity}, max_nse_qty={max_nse_qty}")
         trigger_price_diff = 0.0
@@ -183,11 +185,6 @@ class OrderManager:
         current_price = original_price
         qty_left = total_qty
         slice_num = 0
-        # Aggregate order_ids and messages per broker
-        broker_order_ids_map = {}  # broker_name -> list of order_ids
-        broker_order_messages_map = {}  # broker_name -> list of messages
-        broker_status_map = {}  # broker_name -> last status
-        broker_raw_responses = {}  # broker_name -> list of raw responses
         async with AsyncSessionLocal() as session:
             parent_order_id = await self._insert_and_get_order_id(
                 config=config,
@@ -205,17 +202,16 @@ class OrderManager:
                 slice_payload = self.create_slice_payload(order_payload, qty, current_price, trigger_price, "ENTRY")
                 broker_responses = await self.broker_manager.place_order(slice_payload, strategy_name=strategy_name, check_margin=check_margin)
                 for broker_name, response in broker_responses.items():
-                    # Assume response['order_id'] is a single string (not a list)
-                    order_id = response.get('order_id') or (response.get('order_ids')[0] if isinstance(response.get('order_ids'), list) else response.get('order_ids'))
-                    if order_id:
-                        broker_order_ids_map.setdefault(broker_name, []).append(order_id)
-                    # Aggregate messages
-                    order_message = response.get('order_messages')
-                    if order_message:
-                        broker_order_messages_map.setdefault(broker_name, []).append(order_message)
-                    # Track last status and raw response for this broker
-                    broker_status_map[broker_name] = response.get('status')
-                    broker_raw_responses.setdefault(broker_name, []).append(response)
+                    # Insert a broker_executions row for this split order
+                    action = str(getattr(order_payload, 'side', None) or response.get('side', None) or 'BUY').upper()
+                    await self._insert_broker_execution(
+                        session,
+                        parent_order_id,
+                        broker_name,
+                        response,
+                        side=ExecutionSide.ENTRY.value,
+                        action=action
+                    )
                     responses.append({
                         'broker_name': broker_name,
                         'response': response,
@@ -226,29 +222,6 @@ class OrderManager:
                         current_price = min(original_price + max_price_increase, current_price + price_increment)
                 qty_left -= qty
                 slice_num += 1
-            # After all slices, insert a single broker_executions row per broker
-            for broker_name in broker_order_ids_map:
-                # Consolidate raw_responses as a dict: order_id -> response
-                raw_responses_dict = {}
-                for idx, order_id in enumerate(broker_order_ids_map[broker_name]):
-                    # Try to match order_id to response in order (fallback to idx)
-                    responses_for_broker = broker_raw_responses.get(broker_name, [])
-                    if idx < len(responses_for_broker):
-                        raw_responses_dict[order_id] = responses_for_broker[idx]
-                    else:
-                        raw_responses_dict[order_id] = None
-                await self._insert_broker_execution(
-                    session,
-                    parent_order_id,
-                    broker_name,
-                    {
-                        'order_ids': broker_order_ids_map[broker_name],
-                        'order_messages': broker_order_messages_map.get(broker_name, []),
-                        'status': broker_status_map.get(broker_name, 'FAILED'),
-                        'raw_response': raw_responses_dict,
-                    },
-                    side=ExecutionSide.ENTRY.value
-                )
             await session.commit()
         return {'order_id': parent_order_id, 'slices': responses}
 
@@ -356,7 +329,7 @@ class OrderManager:
             return val.value
         return val
 
-    def build_broker_exec_data(self, *, parent_order_id, broker_id, broker_order_id, side, status, executed_quantity=0, execution_price=0.0, product_type=None, order_type=None, order_messages=None, raw_execution_data=None, symbol=None, execution_time=None, notes=None):
+    def build_broker_exec_data(self, *, parent_order_id, broker_id, broker_order_id, side, status, executed_quantity=0, execution_price=0.0, product_type=None, order_type=None, order_messages=None, action=None, raw_execution_data=None, symbol=None, execution_time=None, notes=None):
         """
         Utility to build the broker execution data dict for DB insert.
         """
@@ -365,6 +338,7 @@ class OrderManager:
             broker_id=broker_id,
             broker_order_id=broker_order_id,
             side=side,
+            action=action or side,
             status=OrderManager.to_enum_value(status),
             executed_quantity=executed_quantity,
             execution_price=execution_price,
@@ -397,7 +371,7 @@ class OrderManager:
             'side': side
         })
 
-    async def _insert_broker_execution(self, session, parent_order_id, broker_name, response, side=ExecutionSide.ENTRY.value):
+    async def _insert_broker_execution(self, session, parent_order_id, broker_name, response, side=ExecutionSide.ENTRY.value, action=None):
         try:
             from algosat.core.dbschema import broker_executions
             broker_id = response.get("broker_id")
@@ -410,11 +384,13 @@ class OrderManager:
             order_type = response.get("order_type")
             exec_price = response.get("execPrice", 0.0)
             exec_quantity = response.get("execQuantity", 0)
+            action_val = action or response.get("side", "BUY")
             broker_exec_data = self.build_broker_exec_data(
                 parent_order_id=parent_order_id,
                 broker_id=broker_id,
                 broker_order_id=order_id,
                 side=side,
+                action=action_val,
                 status=status_val,
                 executed_quantity=exec_quantity,
                 execution_price=exec_price,
@@ -507,6 +483,7 @@ class OrderManager:
                 try:
                     import datetime
                     exit_time = datetime.datetime.now(datetime.timezone.utc)
+                    orig_side = (be.get('action') or '').upper()
                     if status == 'FILLED':
                         logger.info(f"OrderManager: Initiating exit for broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
                         await self.broker_manager.exit_order(
@@ -514,14 +491,23 @@ class OrderManager:
                             broker_order_id,
                             symbol=symbol,
                             product_type=product_type,
-                            exit_reason=exit_reason
+                            exit_reason=exit_reason,
+                            side=orig_side
                         )
                         logger.info(f"OrderManager: Exit order sent to broker_id={broker_id} for broker_order_id={broker_order_id}")
+                        # Determine opposite action for exit
+                        if orig_side == 'BUY':
+                            exit_action = 'SELL'
+                        elif orig_side == 'SELL':
+                            exit_action = 'BUY'
+                        else:
+                            exit_action = ''
                         await self._insert_exit_broker_execution(
                             session,
                             parent_order_id=parent_order_id,
                             broker_id=broker_id,
                             broker_order_id=broker_order_id,
+                            action=exit_action,
                             side='EXIT',
                             status='FILLED',
                             executed_quantity=be.get('executed_quantity', 0),
@@ -540,7 +526,8 @@ class OrderManager:
                             broker_order_id,
                             symbol=symbol,
                             product_type=product_type,
-                            exit_reason=exit_reason
+                            exit_reason=exit_reason,
+                            side = orig_side
                         )
                         logger.info(f"OrderManager: Now also sending cancel for PARTIALLY_FILLED broker_execution id={be.get('id')}")
                         await self.broker_manager.cancel_order(
@@ -556,6 +543,7 @@ class OrderManager:
                             broker_id=broker_id,
                             broker_order_id=broker_order_id,
                             side='EXIT',
+                            action=exit_action,
                             status='FILLED',
                             executed_quantity=be.get('executed_quantity', 0),
                             execution_price=ltp or 0.0,
@@ -576,21 +564,10 @@ class OrderManager:
                             cancel_reason=f"Exit requested but status was {status}"
                         )
                         logger.info(f"OrderManager: Cancel order sent to broker_id={broker_id} for broker_order_id={broker_order_id}")
-                        await self._insert_exit_broker_execution(
-                            session,
-                            parent_order_id=parent_order_id,
-                            broker_id=broker_id,
-                            broker_order_id=broker_order_id,
-                            side='EXIT',
-                            status='CANCELLED',
-                            executed_quantity=0,
-                            execution_price=0.0,
-                            product_type=product_type,
-                            order_type=None,
-                            order_messages=f"Cancel order placed. Reason: {exit_reason}",
-                            symbol=symbol,
-                            execution_time=exit_time,
-                            notes=f"Auto cancel via OrderManager. Reason: {exit_reason}"
+                        # Instead of inserting a new broker_executions row, update the status to CANCELLED
+                        await self.update_broker_exec_status_in_db(
+                            broker_exec_id=be.get('id'),
+                            status='CANCELLED'
                         )
                 except Exception as e:
                     logger.error(f"OrderManager: Error exiting/cancelling order for broker_id={broker_id}, broker_order_id={broker_order_id}: {e}")
@@ -1275,8 +1252,7 @@ class OrderManager:
                             broker_order_id,
                             symbol=symbol,
                             product_type=product_type,
-                            variety='regular',
-                            cancel_reason=f"Exit requested for PARTIALLY_FILLED order"
+                            exit_reason=f"Exit requested for PARTIALLY_FILLED order"
                         )
                         logger.info(f"OrderManager: Cancel order sent to broker_id={broker_id} for broker_order_id={broker_order_id}. Response: {cancel_resp}")
                         await self._insert_exit_broker_execution(
@@ -1295,32 +1271,19 @@ class OrderManager:
                             execution_time=exit_time,
                             notes=f"Auto exit+cancel via OrderManager. Reason: {exit_reason}"
                         )
-                    elif status in ('AWAITING_ENTRY', 'PENDING', 'REJECTED'):
+                    elif status in ('AWAITING_ENTRY', 'PENDING'):
                         logger.info(f"OrderManager: Initiating cancel for broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
-                        cancel_resp = await self.broker_manager.cancel_order(
+                        await self.broker_manager.cancel_order(
                             broker_id,
                             broker_order_id,
                             symbol=symbol,
                             product_type=product_type,
-                            variety='regular',
                             cancel_reason=f"Exit requested but status was {status}"
                         )
                         logger.info(f"OrderManager: Cancel order sent to broker_id={broker_id} for broker_order_id={broker_order_id}. Response: {cancel_resp}")
-                        await self._insert_exit_broker_execution(
-                            session,
-                            parent_order_id=parent_order_id,
-                            broker_id=broker_id,
-                            broker_order_id=broker_order_id,
-                            side='EXIT',
-                            status='CANCELLED',
-                            executed_quantity=0,
-                            execution_price=0.0,
-                            product_type=product_type,
-                            order_type=None,
-                            order_messages=f"Cancel order placed. Reason: {exit_reason}",
-                            symbol=symbol,
-                            execution_time=exit_time,
-                            notes=f"Auto cancel via OrderManager. Reason: {exit_reason}"
+                        await self.update_broker_exec_status_in_db(
+                            broker_exec_id=be.get('id'),
+                            status='CANCELLED'
                         )
                 except Exception as e:
                     logger.error(f"OrderManager: Error exiting/cancelling order for broker_id={broker_id}, broker_order_id={broker_order_id}: {e}")

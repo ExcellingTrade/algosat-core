@@ -193,21 +193,22 @@ broker_executions = Table(
     # Core execution details - one execution per row
     Column("broker_order_id", String(100), nullable=False, index=True),  # Single broker order ID for this execution
     Column("side", String(10), nullable=False, index=True),  # 'ENTRY' or 'EXIT'
+    Column("action", String(20), nullable=False, server_default=text("'BUY'")),  # NEW: Action column (BUY/SELL/EXIT/etc.)
     Column("execution_price", Numeric(15, 4), nullable=False),  # Actual traded price for this execution
     Column("executed_quantity", Integer, nullable=False),  # Actual executed quantity for this execution
     Column("execution_time", DateTime(timezone=True), nullable=True),  # When this execution happened
     Column("symbol", String(100), nullable=True),  # Symbol for this execution (useful for hedge orders)
-    
+
     # Status and tracking
     Column("status", String(50), nullable=False, index=True),  # FILLED, PARTIAL, CANCELLED, etc.
     Column("order_type", String(20), nullable=True),  # MARKET, LIMIT, SL, etc.
     Column("product_type", String(20), nullable=True),  # MARKET, LIMIT, SL, etc.
     Column("notes", String(500), nullable=True),  # Any additional notes (manual exit, BO leg, etc.)
-    
+
     # Legacy and raw data
     Column("raw_execution_data", JSONB, nullable=True),  # Complete broker response for this execution
     Column("order_messages", JSONB, nullable=True),  # Any messages related to this execution
-    
+
     # Deprecated fields - keep for migration compatibility
     Column("broker_name", String, nullable=True),  # Deprecated: use broker_id
     # Column("broker_order_ids", JSONB, nullable=True),  # Deprecated: now single broker_order_id

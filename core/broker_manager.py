@@ -549,22 +549,30 @@ class BrokerManager:
         """
         Build a broker-agnostic OrderRequest from a TradeSignal and StrategyConfig.
         Uses logical order_type and product_type for OptionBuy/OptionSell, and config values for others.
+        For hedge entry signals, always use MARKET/INTRADAY.
         """
         order_type = None
         product_type = None
         strategy_id = getattr(config, 'strategy_id', None)
         strategy_name = None
-        if strategy_id is not None:
-            async with AsyncSessionLocal() as session:
-                strat = await get_strategy_by_id(session, strategy_id)
-                if strat:
-                    strategy_name = strat.get('key')
-                    if strategy_name in ["OptionBuy", "OptionSell"]:
-                        order_type = "OPTION_STRATEGY"
-                        product_type = "OPTION_STRATEGY"
-                    else:
-                        order_type = strat.get('order_type')
-                        product_type = strat.get('product_type')
+
+        # If this is a hedge entry, skip strategy table lookup and use MARKET/INTRADAY
+        from algosat.core.signal import SignalType
+        if getattr(signal, 'signal_type', None) == SignalType.HEDGE_ENTRY:
+            order_type = "MARKET"
+            product_type = "INTRADAY"
+        else:
+            if strategy_id is not None:
+                async with AsyncSessionLocal() as session:
+                    strat = await get_strategy_by_id(session, strategy_id)
+                    if strat:
+                        strategy_name = strat.get('key')
+                        if strategy_name in ["OptionBuy", "OptionSell"]:
+                            order_type = "OPTION_STRATEGY"
+                            product_type = "OPTION_STRATEGY"
+                        else:
+                            order_type = strat.get('order_type')
+                            product_type = strat.get('product_type')
         if not order_type:
             order_type = "MARKET"
         if not product_type:

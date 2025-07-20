@@ -4,6 +4,7 @@ from algosat.core.order_request import Side
 
 class SignalType(Enum):
     ENTRY     = "ENTRY"
+    HEDGE_ENTRY = "HEDGE_ENTRY"  # New type for hedge entry signals
     STOPLOSS  = "STOPLOSS"
     TRAIL     = "TRAIL"
 
