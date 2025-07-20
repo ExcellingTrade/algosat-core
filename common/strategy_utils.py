@@ -212,20 +212,20 @@ def identify_strike_price_combined(option_chain_df=None, history_data=None, max_
         logger.error(f"🔴 Error in identify_strike_price_combined: {error}")
         return None, None
 
-async def evaluate_signals(candle_data, history_df, trade_config, strike_symbol):
-    # ...strategy logic for signal evaluation...
-    pass
+# async def evaluate_signals(candle_data, history_df, trade_config, strike_symbol):
+#     # ...strategy logic for signal evaluation...
+#     pass
 
-async def evaluate_trade_signal(candle, history_upto_candle, trade_config, strike_symbol):
-    signal = await evaluate_signals(candle, history_upto_candle, trade_config, strike_symbol)
-    if signal:
-        # ...construct trade dict...
-        return signal  # or trade dict
-    return None
+# async def evaluate_trade_signal(candle, history_upto_candle, trade_config, strike_symbol):
+#     signal = await evaluate_signals(candle, history_upto_candle, trade_config, strike_symbol)
+#     if signal:
+#         # ...construct trade dict...
+#         return signal  # or trade dict
+#     return None
 
-async def evaluate_exit_conditions(trade, candle, current_signal_direction):
-    # ...strategy logic for exit conditions...
-    pass
+# async def evaluate_exit_conditions(trade, candle, current_signal_direction):
+#     # ...strategy logic for exit conditions...
+#     pass
 
 async def wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol=None):
     from datetime import datetime, timedelta
@@ -437,65 +437,65 @@ def get_trade_config_value(trade_config, key, default=None):
         return default
     return default
 
-async def process_trade(order_manager, trade, trade_config, strategy_config_id, broker_id):
-    """
-    Process the trade: Place the order using OrderManager based on trade details and config.
-    Only perform trade calculations here; broker-specific product/order type logic is handled in OrderManager.
-    :param order_manager: OrderManager instance.
-    :param trade: Trade dictionary containing trade details.
-    :param trade_config: Trade configuration dictionary, tuple, or ORM row.
-    :param strategy_config_id: Strategy config ID for DB tracking.
-    :param broker_id: Broker ID for DB tracking.
-    :return: Result dict for the placed order or error info.
-    """
-    try:
-        symbol = trade[constants.TRADE_KEY_SYMBOL]
-        is_call_option = constants.OPTION_TYPE_CALL in symbol
-        lot_qty = get_trade_config_value(trade_config, "ce_lot_qty") if is_call_option else get_trade_config_value(trade_config, "pe_lot_qty")
-        lot_size = get_trade_config_value(trade_config, "lot_size", 1)
-        if lot_qty is None or lot_size is None:
-            logger.error(f"[process_trade] Missing lot_qty or lot_size in trade_config: ce_lot_qty={get_trade_config_value(trade_config, 'ce_lot_qty')}, pe_lot_qty={get_trade_config_value(trade_config, 'pe_lot_qty')}, lot_size={lot_size}")
-            return {"status": "error", "error": "Missing lot_qty or lot_size in trade_config"}
-        total_qty = lot_qty * lot_size
-        entry_price = round(round(trade[constants.TRADE_KEY_ENTRY_PRICE] / 0.05) * 0.05, 2)
-        sl_price = round(round(trade[constants.TRADE_KEY_STOP_LOSS] / 0.05) * 0.05, 2)
-        target_price = round(round(trade[constants.TRADE_KEY_TARGET_PRICE] / 0.05) * 0.05, 2)
-        trigger_price_diff = get_trade_config_value(trade_config, 'trigger_price_diff', 0)
-        stopPrice = (entry_price - trigger_price_diff) if trade["side"] == 1 else (entry_price + trigger_price_diff)
-        stopPrice = round(round(stopPrice / 0.05) * 0.05, 2)
-        # Map side and order_type to enums (always use Side enum, never broker-specific int)
-        side_enum = Side.BUY if trade['side'] == 1 else Side.SELL
-        order_type_enum = OrderType.LIMIT  # Default to LIMIT, can be made dynamic if needed
-        order_request = OrderRequest(
-            symbol=symbol,
-            quantity=total_qty,
-            side=side_enum,  # Always pass Side enum, never int
-            order_type=order_type_enum,
-            price=entry_price,
-            trigger_price=stopPrice,
-            product_type=get_trade_config_value(trade_config, 'product_type', None),
-            tag=str(strategy_config_id),
-            validity="DAY",
-            extra={
-                "stopLoss": sl_price,
-                "takeProfit": abs(target_price)
-            }
-        )
-        logger.info(f"[process_trade] Placing order for {symbol} | qty: {total_qty} | entry: {entry_price} | sl: {sl_price} | target: {target_price}")
-        # Place order via OrderManager (OrderManager will set productType/type based on broker)
-        result = await order_manager.place_order(
-            config=trade_config,
-            order_payload=order_request,
-            strategy_name=None  # Optionally pass strategy name if needed
-        )
-        if result.get('status') == 'success':
-            logger.info(f"[process_trade] Order placed successfully: {result}")
-        else:
-            logger.warning(f"[process_trade] Order placement failed: {result}")
-        return result
-    except Exception as error:
-        logger.error(f"Error processing trade: {error}", exc_info=True)
-        return {"status": "error", "error": str(error)}
+# async def process_trade(order_manager, trade, trade_config, strategy_config_id, broker_id):
+#     """
+#     Process the trade: Place the order using OrderManager based on trade details and config.
+#     Only perform trade calculations here; broker-specific product/order type logic is handled in OrderManager.
+#     :param order_manager: OrderManager instance.
+#     :param trade: Trade dictionary containing trade details.
+#     :param trade_config: Trade configuration dictionary, tuple, or ORM row.
+#     :param strategy_config_id: Strategy config ID for DB tracking.
+#     :param broker_id: Broker ID for DB tracking.
+#     :return: Result dict for the placed order or error info.
+#     """
+#     try:
+#         symbol = trade[constants.TRADE_KEY_SYMBOL]
+#         is_call_option = constants.OPTION_TYPE_CALL in symbol
+#         lot_qty = get_trade_config_value(trade_config, "ce_lot_qty") if is_call_option else get_trade_config_value(trade_config, "pe_lot_qty")
+#         lot_size = get_trade_config_value(trade_config, "lot_size", 1)
+#         if lot_qty is None or lot_size is None:
+#             logger.error(f"[process_trade] Missing lot_qty or lot_size in trade_config: ce_lot_qty={get_trade_config_value(trade_config, 'ce_lot_qty')}, pe_lot_qty={get_trade_config_value(trade_config, 'pe_lot_qty')}, lot_size={lot_size}")
+#             return {"status": "error", "error": "Missing lot_qty or lot_size in trade_config"}
+#         total_qty = lot_qty * lot_size
+#         entry_price = round(round(trade[constants.TRADE_KEY_ENTRY_PRICE] / 0.05) * 0.05, 2)
+#         sl_price = round(round(trade[constants.TRADE_KEY_STOP_LOSS] / 0.05) * 0.05, 2)
+#         target_price = round(round(trade[constants.TRADE_KEY_TARGET_PRICE] / 0.05) * 0.05, 2)
+#         trigger_price_diff = get_trade_config_value(trade_config, 'trigger_price_diff', 0)
+#         stopPrice = (entry_price - trigger_price_diff) if trade["side"] == 1 else (entry_price + trigger_price_diff)
+#         stopPrice = round(round(stopPrice / 0.05) * 0.05, 2)
+#         # Map side and order_type to enums (always use Side enum, never broker-specific int)
+#         side_enum = Side.BUY if trade['side'] == 1 else Side.SELL
+#         order_type_enum = OrderType.LIMIT  # Default to LIMIT, can be made dynamic if needed
+#         order_request = OrderRequest(
+#             symbol=symbol,
+#             quantity=total_qty,
+#             side=side_enum,  # Always pass Side enum, never int
+#             order_type=order_type_enum,
+#             price=entry_price,
+#             trigger_price=stopPrice,
+#             product_type=get_trade_config_value(trade_config, 'product_type', None),
+#             tag=str(strategy_config_id),
+#             validity="DAY",
+#             extra={
+#                 "stopLoss": sl_price,
+#                 "takeProfit": abs(target_price)
+#             }
+#         )
+#         logger.info(f"[process_trade] Placing order for {symbol} | qty: {total_qty} | entry: {entry_price} | sl: {sl_price} | target: {target_price}")
+#         # Place order via OrderManager (OrderManager will set productType/type based on broker)
+#         result = await order_manager.place_order(
+#             config=trade_config,
+#             order_payload=order_request,
+#             strategy_name=None  # Optionally pass strategy name if needed
+#         )
+#         if result.get('status') == 'success':
+#             logger.info(f"[process_trade] Order placed successfully: {result}")
+#         else:
+#             logger.warning(f"[process_trade] Order placement failed: {result}")
+#         return result
+#     except Exception as error:
+#         logger.error(f"Error processing trade: {error}", exc_info=True)
+#         return {"status": "error", "error": str(error)}
 
 async def get_broker_symbol(broker_manager, broker_name, symbol, instrument_type=None):
     """
@@ -614,3 +614,133 @@ def get_max_premium_from_config(trade_config: dict, symbol: str, current_dt: 'da
         f"[get_max_premium_from_config] symbol={orig_symbol} (sanitized={symbol_upper}), expiry_type={expiry_type} ({expiry_reason}), {details}, selected max_premium={result}"
     )
     return result
+
+from datetime import datetime, timedelta
+
+async def get_regime_reference_points(
+    data_manager,
+    symbol: str,
+    first_candle_time: str = "09:15",
+    first_candle_interval: int = 5,
+    current_dt: datetime = None,
+) -> dict:
+    """
+    Fetch previous day high/low and first candle high/low for regime identification.
+    """
+    logger = logging.getLogger("regime_utils")
+
+    # Get today's trading day (IST)
+    trade_day = get_trade_day(current_dt or get_ist_datetime())
+    prev_day = trade_day - timedelta(days=1)
+
+    # 1. Fetch previous day OHLC
+    prev_day_history = await fetch_instrument_history(
+        data_manager,
+        [symbol],
+        prev_day,
+        prev_day,
+        interval_minutes="day",  # Or 1440, depending on your system
+        ins_type=""
+    )
+    prev_day_ohlc = prev_day_history.get(symbol)
+    if prev_day_ohlc is None or prev_day_ohlc.empty:
+        logger.warning(f"Could not fetch previous day OHLC for {symbol} on {prev_day}")
+        return None
+    prev_day_high = float(prev_day_ohlc.iloc[-1]['high'])
+    prev_day_low = float(prev_day_ohlc.iloc[-1]['low'])
+
+    # 2. Fetch today's first candle
+    # first_candle_start = datetime.combine(trade_day, datetime.strptime(first_candle_time, "%H:%M").time())
+    # first_candle_end = first_candle_start + timedelta(minutes=first_candle_interval)
+    candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, first_candle_interval)
+    from_date = candle_times["from_date"]
+    to_date = candle_times["to_date"]
+    today_intraday = await fetch_instrument_history(
+        data_manager,
+        [symbol],
+        from_date,
+        to_date,
+        interval_minutes=first_candle_interval,
+        ins_type=""
+    )
+    first_candle_df = today_intraday.get(symbol)
+    if first_candle_df is None or first_candle_df.empty:
+        logger.warning(f"Could not fetch first candle for {symbol} on {trade_day}")
+        return None
+    first_candle_high = float(first_candle_df.iloc[0]['high'])
+    first_candle_low = float(first_candle_df.iloc[0]['low'])
+
+    return {
+        "prev_day_high": prev_day_high,
+        "prev_day_low": prev_day_low,
+        "first_candle_high": first_candle_high,
+        "first_candle_low": first_candle_low,
+        "first_candle_time": first_candle_time,
+        "first_candle_interval": first_candle_interval,
+        "trade_day": trade_day
+    }
+
+
+def detect_regime(
+    entry_price: float,
+    regime_ref: dict,
+    option_type: str,   # "CE" or "PE"
+    strategy: str       # "BUY" or "SELL"
+):
+    """
+    Universal regime detector for options strategies.
+
+    Args:
+        entry_price (float): The entry price for the option.
+        regime_ref (dict): Reference dict with keys: prev_day_high, prev_day_low, first_candle_high, first_candle_low.
+        option_type (str): "CE" or "PE"
+        strategy (str): "BUY" or "SELL"
+    Returns:
+        str: One of {"Uptrend", "Downtrend", "Sideways", "NoTrade"}
+    """
+
+    ph = regime_ref["prev_day_high"]
+    pl = regime_ref["prev_day_low"]
+    fh = regime_ref["first_candle_high"]
+    fl = regime_ref["first_candle_low"]
+
+    # BUY strategies
+    if strategy.upper() == "BUY":
+        if option_type.upper() == "CE":
+            # CE BUY in uptrend
+            if entry_price > ph and entry_price > fh:
+                return "Uptrend"
+            elif entry_price > fh:
+                return "Sideways"
+            else:
+                return "NoTrade"
+        elif option_type.upper() == "PE":
+            # PE BUY in downtrend
+            if entry_price < pl and entry_price < fl:
+                return "Downtrend"
+            elif entry_price < fl:
+                return "Sideways"
+            else:
+                return "NoTrade"
+
+    # SELL strategies
+    elif strategy.upper() == "SELL":
+        if option_type.upper() == "PE":
+            # PE SELL in uptrend
+            if entry_price > ph and entry_price > fh:
+                return "Uptrend"
+            elif entry_price > fh:
+                return "Sideways"
+            else:
+                return "NoTrade"
+        elif option_type.upper() == "CE":
+            # CE SELL in downtrend
+            if entry_price < pl and entry_price < fl:
+                return "Downtrend"
+            elif entry_price < fl:
+                return "Sideways"
+            else:
+                return "NoTrade"
+
+    # Default
+    return "NoTrade"

@@ -14,6 +14,8 @@ from algosat.core.db import AsyncSessionLocal, get_order_by_id
 from algosat.core.signal import TradeSignal, SignalType
 from algosat.common.strategy_utils import (
     calculate_end_date,
+    detect_regime,
+    get_regime_reference_points,
     wait_for_first_candle_completion,
     calculate_first_candle_details,
     fetch_option_chain_and_first_candle_history,
@@ -128,6 +130,14 @@ class OptionBuyStrategy(StrategyBase):
             logger.error("No symbol configured for OptionBuy strategy.")
             return
         today_dt = get_ist_datetime()
+        self.regime_reference = await get_regime_reference_points(
+            self.dp,
+            self.symbol,
+            first_candle_time,
+            interval_minutes,
+            today_dt
+        )
+        logger.info(f"Regime reference points for {symbol}: {self.regime_reference}")
         # Dynamically select max_premium (expiry_type is auto-detected inside)
         max_premium = get_max_premium_from_config(trade, symbol, today_dt)
         # 1. Wait for first candle completion
@@ -448,9 +458,16 @@ class OptionBuyStrategy(StrategyBase):
                     'entry_price': trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
                     'timestamp': curr.get('timestamp')
                 }]
+                option_type = "CE" if strike.endswith("CE") else "PE"
+                regime = detect_regime(
+                    entry_price=trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
+                    regime_ref=getattr(self, 'regime_reference', None),
+                    option_type=option_type,
+                    strategy="BUY"
+                )
+                
                 self._last_signal_direction[strike] = constants.TRADE_DIRECTION_BUY
-
-                logger.info(f"🟢 Signal formed for {strike} at {curr.get('timestamp')}: Entry at {trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE)} | Updated last_signal_direction to BUY.")
+                logger.info(f"🟢 Signal formed for {strike} at {curr.get('timestamp')}: Entry at {trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE)} | Regime: {regime} | Updated last_signal_direction to BUY.")
                 return TradeSignal(
                     symbol=strike,
                     side=trade_dict.get('side', Side.BUY),
