@@ -360,14 +360,14 @@ class OrderMonitor:
                     total_pnl = 0.0
                     all_closed = True
                     for bro in entry_broker_db_orders:
-                        # broker_id = getattr(bro, 'broker_id', None)
-                        # broker_name = None
-                        # if broker_id is not None:
-                        #     try:
-                        #         broker_name = await self.data_manager.get_broker_name_by_id(broker_id)
-                        #     except Exception as e:
-                        #         logger.error(f"OrderMonitor: Could not get broker name for broker_id={broker_id}: {e}")
-                        broker_name = await self.data_manager.get_broker_name_by_id(bro.get("broker_id"))
+                        broker_id = getattr(bro, 'broker_id', None)
+                        broker_name = None
+                        if broker_id is not None:
+                            try:
+                                broker_name = await self.data_manager.get_broker_name_by_id(broker_id)
+                            except Exception as e:
+                                logger.error(f"OrderMonitor: Could not get broker name for broker_id={broker_id}: {e}")
+                        # broker_name = await self.data_manager.get_broker_name_by_id(bro.get("broker_id"))
                         symbol_val = bro.get('symbol', None) or bro.get('tradingsymbol', None)
                         qty = bro.get('quantity', None)
                         product = bro.get('product_type', None) or bro.get('product', None)
