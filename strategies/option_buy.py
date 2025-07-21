@@ -407,13 +407,11 @@ class OptionBuyStrategy(StrategyBase):
             last_signal_direction = self._last_signal_direction.get(strike)
 
             # Reset last_signal_direction to None if signal flipped to BUY from SELL
-            # if curr_signal_direction != constants.TRADE_DIRECTION_BUY and curr_signal_direction != last_signal_direction:
             if curr_signal_direction == constants.TRADE_DIRECTION_SELL and last_signal_direction == constants.TRADE_DIRECTION_BUY:
                 self._last_signal_direction[strike] = None
                 logger.info(
                     f"Signal flipped to SELL for {strike} at {curr.get('timestamp')}. Reset last_signal_direction to None."
                 )
-            # Only allow SELL entries, and prevent stacking same direction
 
             # Only allow BUY entries, and prevent stacking same direction
             if (
@@ -433,6 +431,7 @@ class OptionBuyStrategy(StrategyBase):
                     f"Skipping signal for {strike} at {curr.get('timestamp')}: Last signal direction is also BUY, not allowing stacking same direction."
                 )
                 return None
+
             threshold_entry = config.get('threshold_entry', 500)
             if (
                 curr["supertrend_signal"] == constants.TRADE_DIRECTION_BUY
@@ -441,8 +440,32 @@ class OptionBuyStrategy(StrategyBase):
                 and curr['close'] > curr['sma']
                 and curr['high'] < threshold_entry
             ):
+                # --- Sideways regime logic ---
+                sideways_enabled = config.get('sideways_trade_enabled', False)
+                sideways_qty_perc = config.get('sideways_qty_percentage', 0)
+                option_type = "CE" if strike.endswith("CE") else "PE"
                 trade_dict = calculate_trade(curr, data, strike, config, side=Side.BUY)
+                lot_qty = trade_dict.get(constants.TRADE_KEY_LOT_QTY, 0)
+                regime = detect_regime(
+                    entry_price=trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
+                    regime_ref=getattr(self, 'regime_reference', None),
+                    option_type=option_type,
+                    strategy="BUY"
+                )
+                if sideways_enabled and regime == "Sideways":
+                    if sideways_qty_perc == 0:
+                        logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, sideways_qty_percentage is 0, skipping trade.")
+                        return None
+                    new_lot_qty = int(round(lot_qty * sideways_qty_perc / 100))
+                    if new_lot_qty == 0:
+                        logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, computed lot_qty is 0, skipping trade.")
+                        return None
+                    # Call calculate_trade again with target_atr_multiplier=1 and new lot_qty
+                    trade_dict = calculate_trade(curr, data, strike, config, side=Side.BUY, target_atr_multiplier=1)
+                    trade_dict[constants.TRADE_KEY_LOT_QTY] = new_lot_qty
+                    logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, updating lot_qty to {new_lot_qty} ({sideways_qty_perc}% of {lot_qty}) and using target_atr_multiplier=1")
                 orig_target = trade_dict.get(constants.TRADE_KEY_TARGET_PRICE)
+
                 # Trailing stoploss logic: update target if enabled
                 if config.get("trailing_stoploss", False):
                     try:
@@ -458,14 +481,6 @@ class OptionBuyStrategy(StrategyBase):
                     'entry_price': trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
                     'timestamp': curr.get('timestamp')
                 }]
-                option_type = "CE" if strike.endswith("CE") else "PE"
-                regime = detect_regime(
-                    entry_price=trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
-                    regime_ref=getattr(self, 'regime_reference', None),
-                    option_type=option_type,
-                    strategy="BUY"
-                )
-                
                 self._last_signal_direction[strike] = constants.TRADE_DIRECTION_BUY
                 logger.info(f"🟢 Signal formed for {strike} at {curr.get('timestamp')}: Entry at {trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE)} | Regime: {regime} | Updated last_signal_direction to BUY.")
                 return TradeSignal(

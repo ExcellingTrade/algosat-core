@@ -345,61 +345,63 @@ class SwingHighLowBuyStrategy(StrategyBase):
     # The dual timeframe breakout logic is now handled directly in process_cycle.
     # The previous single-timeframe breakout evaluate_signal is obsolete and removed.
 
-    def evaluate_exit(self, data: Any, position: Any) -> Optional[dict]:
+    async def evaluate_exit(self, order_row):
         """
-        Evaluate exit conditions based on fetched data and current position.
-        This method combines price-based and candle-based exit logic.
-        Return an order payload dict if exit condition is met, otherwise None.
+        Evaluate exit for a given order_row.
+        Args:
+            order_row: The order dict (from DB).
+        Returns:
+            True if exit signal should be triggered, else False.
         """
         try:
-            if not position:
-                return None
-            
-            # Extract necessary info from position
-            parent_order_id = position.get("order_id") or position.get("id")
-            if not parent_order_id:
-                logger.warning("No order ID found in position data")
-                return None
-            
-            # Get current price from data
-            last_price = None
-            if isinstance(data, dict):
-                last_price = data.get("ltp") or data.get("close") or data.get("price")
-            elif hasattr(data, 'iloc') and len(data) > 0:  # DataFrame
-                last_row = data.iloc[-1]
-                last_price = last_row.get("close") or last_row.get("ltp")
-            
-            if last_price is None:
-                logger.warning("Could not extract price from data for exit evaluation")
-                return None
-            
-            # For now, implement basic exit logic
-            # In a production environment, this would check stop loss, take profit, 
-            # trailing stops, time-based exits, etc.
-            
-            # Example: Simple percentage-based stop loss
-            entry_price = position.get("entry_price") or position.get("price")
-            if entry_price:
-                stop_loss_pct = self._stoploss_cfg.get("percentage", 0.05)  # 5% default
-                stop_loss_price = entry_price * (1 - stop_loss_pct)
-                
-                if last_price <= stop_loss_price:
-                    logger.info(f"Stop loss triggered: price {last_price} <= stop {stop_loss_price}")
-                    return {
-                        "symbol": position.get("symbol", self.symbol),
-                        "strike": position.get("strike"),
-                        "side": "SELL",  # Exit by selling
-                        "qty": position.get("qty"),
-                        "price": last_price,
-                        "order_type": "MARKET",
-                        "exit_reason": "stop_loss"
-                    }
-            
-            return None
-            
+            strike_symbol = order_row.get('strike_symbol') or order_row.get('symbol') or order_row.get('strike')
+            if not strike_symbol:
+                logger.error("evaluate_exit: Missing strike_symbol in order_row.")
+                return False
+            # Use the spot symbol for spot-level stoploss checks
+            spot_symbol = self.symbol
+            trade_config = self.trade
+            # Fetch recent candle history for the strike symbol (option or spot)
+            from algosat.common.strategy_utils import fetch_instrument_history
+            # For swing_highlow_buy, the strike_symbol may be spot, so fetch accordingly
+            history_dict = await fetch_instrument_history(
+                self.dp,
+                [strike_symbol],
+                interval_minutes=self.entry_minutes,
+                ins_type="",
+                cache=False
+            )
+            history_df = history_dict.get(str(strike_symbol))
+            if history_df is None or len(history_df) < 2:
+                logger.warning(f"evaluate_exit: Not enough history for {strike_symbol}.")
+                return False
+            # --- Trailing stoploss logic (stub for future extension) ---
+            if trade_config.get("trailing_stoploss_enabled", False):
+                # Implement future trailing stoploss logic here (see option_buy.py)
+                pass
+            # --- Price-based stoploss using spot-levels ---
+            # If order_row contains a stoploss_spot_level, compare with current spot LTP
+            stoploss_spot_level = order_row.get("stoploss_spot_level")
+            if stoploss_spot_level is not None:
+                # Fetch spot LTP (last close of spot symbol)
+                spot_history_dict = await fetch_instrument_history(
+                    self.dp,
+                    [spot_symbol],
+                    interval_minutes=1,
+                    ins_type="",
+                    cache=False
+                )
+                spot_df = spot_history_dict.get(str(spot_symbol))
+                if spot_df is not None and len(spot_df) > 0:
+                    spot_ltp = spot_df.iloc[-1].get("close") or spot_df.iloc[-1].get("ltp")
+                    if spot_ltp is not None and float(spot_ltp) <= float(stoploss_spot_level):
+                        logger.info(f"evaluate_exit: Spot stoploss triggered for {strike_symbol}. Spot LTP {spot_ltp} <= stoploss_spot_level {stoploss_spot_level}. Exit signal triggered.")
+                        return True
+            # --- Other exit logic can be added here ---
+            return False
         except Exception as e:
-            logger.error(f"Error in evaluate_exit: {e}", exc_info=True)
-            return None
+            logger.error(f"Error in evaluate_exit for order_id={order_row.get('id')}: {e}", exc_info=True)
+            return False
         
     async def evaluate_signal(self, entry_df, confirm_df, config) -> Optional[TradeSignal]:
         """
@@ -425,6 +427,13 @@ class SwingHighLowBuyStrategy(StrategyBase):
             entry_buffer = self.entry_buffer
             breakout_high_level = last_hh["price"] + entry_buffer
             breakout_low_level = last_ll["price"] - entry_buffer
+
+            # Prepare new fields
+            entry_spot_price = None
+            entry_spot_swing_high = None
+            entry_spot_swing_low = None
+            stoploss_spot_level = None
+            target_spot_level = None
 
             # 2. In confirm_df, check last two closed candles for breakout
             if "timestamp" in confirm_df.columns:
@@ -456,28 +465,56 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 return None
 
             # 4. Get spot price and ATM strike for option
-            # ltp_response = await self.dp.get_ltp(self.symbol)
-            # if isinstance(ltp_response, dict):
-            #     spot_price = ltp_response.get(self.symbol)
-            # else:
-            #     spot_price = ltp_response
             spot_price = last_candle["close"]  # Use last candle close as spot price
             strike = swing_utils.get_atm_strike_symbol(self.cfg.symbol, spot_price, breakout_type, self.trade)
             qty = self.ce_lot_qty * self.lot_size if breakout_type == "CE" else self.trade.get("pe_lot_qty", 1) * self.lot_size
             if breakout_type == "CE":
                 lot_qty = config.get("ce_lot_qty", 1)
+                stoploss_spot_level = last_ll["price"]  # Stoploss is swing low for CE
             else:
                 lot_qty = config.get("pe_lot_qty", 1)
-            logger.info(f"Breakout detected: type={breakout_type}, trend={trend}, direction={direction}, strike={strike}, price={last_candle['close']}")
+                stoploss_spot_level = last_hh["price"]  # Stoploss is swing high for PE
+
+            entry_spot_price = spot_price
+            entry_spot_swing_high = last_hh["price"]
+            entry_spot_swing_low = last_ll["price"]
+
+            # Target calculation
+            target_cfg = config.get("target", {})
+            target_type = target_cfg.get("type", "ATR")
+            if target_type == "ATR":
+                # Calculate ATR on 5m candle timeframe
+                atr_period = target_cfg.get("atr_period", 14)
+                atr_multiplier = target_cfg.get("atr_multiplier", 1)
+                # Defensive: ensure entry_df has enough data
+                atr_value = None
+                try:
+                    from algosat.utils.indicators import calculate_atr
+                    atr_df = calculate_atr(entry_df, atr_period)
+                    if "atr" in atr_df.columns:
+                        atr_value = atr_df["atr"].iloc[-1]
+                except Exception as e:
+                    logger.error(f"Error calculating ATR for target: {e}")
+                if atr_value is not None:
+                    target_spot_level = float(entry_spot_price) + float(atr_value) * float(atr_multiplier)
+            elif target_type == "fixed":
+                fixed_points = target_cfg.get("fixed_points", 0)
+                target_spot_level = float(entry_spot_price) + float(fixed_points)
+
+            logger.info(f"Breakout detected: type={breakout_type}, trend={trend}, direction={direction}, strike={strike}, price={last_candle['close']}, entry_spot_price={entry_spot_price}, entry_spot_swing_high={entry_spot_swing_high}, entry_spot_swing_low={entry_spot_swing_low}, stoploss_spot_level={stoploss_spot_level}, target_spot_level={target_spot_level}")
             from algosat.core.signal import Side
             signal = TradeSignal(
                 symbol=strike,
                 side="BUY",
-                # price=last_candle["close"],
                 signal_type=SignalType.ENTRY,
                 signal_time=last_candle["timestamp"],
                 signal_direction=direction,
                 lot_qty=lot_qty,
+                entry_spot_price=entry_spot_price,
+                entry_spot_swing_high=entry_spot_swing_high,
+                entry_spot_swing_low=entry_spot_swing_low,
+                stoploss_spot_level=stoploss_spot_level,
+                target_spot_level=target_spot_level
             )
             logger.info(f"Breakout detected: type={breakout_type}, direction={direction}, strike={strike}, price={last_candle['close']}")
             return signal
@@ -485,14 +522,14 @@ class SwingHighLowBuyStrategy(StrategyBase):
             logger.error(f"Error in evaluate_signal: {e}", exc_info=True)
             return None
 
-    async def evaluate_price_exit(self, parent_order_id: int, last_price: float):
-        """
-        Exit based on price (stub for parity with option_buy.py).
-        """
-        return None
-
-    async def evaluate_candle_exit(self, parent_order_id: int, history: dict):
-        """
-        Exit based on candle history (stub for parity with option_buy.py).
-        """
-        return None
+#    async def evaluate_price_exit(self, parent_order_id: int, last_price: float):
+#        """
+#        Exit based on price (stub for parity with option_buy.py).
+#        """
+#        return None
+#
+#    async def evaluate_candle_exit(self, parent_order_id: int, history: dict):
+#        """
+#        Exit based on candle history (stub for parity with option_buy.py).
+#        """
+#        return None

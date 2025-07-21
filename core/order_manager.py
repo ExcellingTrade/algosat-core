@@ -316,6 +316,11 @@ class OrderManager:
                 "lot_qty": order_payload.extra.get("lot_qty"),
                 "side": order_payload.side.value if hasattr(order_payload.side, 'value') else str(order_payload.side),
                 "qty": order_payload.quantity,
+                "entry_spot_price": order_payload.extra.get("entry_spot_price"),
+                "entry_spot_swing_high": order_payload.extra.get("entry_spot_swing_high"),
+                "entry_spot_swing_low": order_payload.extra.get("entry_spot_swing_low"),
+                "stoploss_spot_level": order_payload.extra.get("stoploss_spot_level"),
+                "target_spot_level": order_payload.extra.get("target_spot_level"),
             }
             inserted = await insert_order(sess, order_data)
             return inserted["id"] if inserted else None
@@ -426,7 +431,6 @@ class OrderManager:
         )
         await session.execute(broker_executions.insert().values(**broker_exec_data))
 
-    async def exit_order(self, parent_order_id: int, exit_reason: str = None, ltp: float = None):
         """
         Standardized exit: For a logical order, fetch all broker_executions. For each FILLED row, call exit_order. For PARTIALLY_FILLED/PARTIAL, call exit_order then cancel_order. For AWAITING_ENTRY/PENDING, call cancel_order. For REJECTED/FAILED, do nothing.
         After exit/cancel, insert a new broker_executions row with side=EXIT, exit price as LTP (passed in), and update exit_time.
@@ -482,8 +486,15 @@ class OrderManager:
                     continue
                 try:
                     import datetime
+                    orig_side = (be.get('action') or '').upper()
                     exit_time = datetime.datetime.now(datetime.timezone.utc)
                     orig_side = (be.get('action') or '').upper()
+                    if orig_side == 'BUY':
+                        exit_action = 'SELL'
+                    elif orig_side == 'SELL':
+                        exit_action = 'BUY'
+                    else:
+                        exit_action = ''
                     if status == 'FILLED':
                         logger.info(f"OrderManager: Initiating exit for broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
                         await self.broker_manager.exit_order(
@@ -496,12 +507,7 @@ class OrderManager:
                         )
                         logger.info(f"OrderManager: Exit order sent to broker_id={broker_id} for broker_order_id={broker_order_id}")
                         # Determine opposite action for exit
-                        if orig_side == 'BUY':
-                            exit_action = 'SELL'
-                        elif orig_side == 'SELL':
-                            exit_action = 'BUY'
-                        else:
-                            exit_action = ''
+                        
                         await self._insert_exit_broker_execution(
                             session,
                             parent_order_id=parent_order_id,
@@ -535,6 +541,7 @@ class OrderManager:
                             broker_order_id,
                             symbol=symbol,
                             product_type=product_type,
+                            
                             exit_reason=f"Exit requested for PARTIALLY_FILLED order"
                         )
                         await self._insert_exit_broker_execution(
@@ -1208,6 +1215,7 @@ class OrderManager:
                     # continue
                 try:
                     import datetime
+                    orig_side = (be.get('action') or '').upper()
                     exit_time = datetime.datetime.now(datetime.timezone.utc)
                     if status == 'FILLED':
                         logger.info(f"OrderManager: Initiating exit for broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
@@ -1219,6 +1227,12 @@ class OrderManager:
                             exit_reason=exit_reason,
                             side=order_side
                         )
+                        if orig_side == 'BUY':
+                            exit_action = 'SELL'
+                        elif orig_side == 'SELL':
+                            exit_action = 'BUY'
+                        else:
+                            exit_action = ''
                         logger.info(f"OrderManager: Exit order sent to broker_id={broker_id} for broker_order_id={broker_order_id}. Response: {exit_resp}")
                         await self._insert_exit_broker_execution(
                             session,
@@ -1227,6 +1241,7 @@ class OrderManager:
                             broker_order_id=broker_order_id,
                             side='EXIT',
                             status='FILLED',
+                            exit_action = exit_action,
                             executed_quantity=be.get('executed_quantity', 0),
                             execution_price=ltp or 0.0,
                             product_type=product_type,
@@ -1327,3 +1342,83 @@ class OrderManager:
             
             await session.commit()
 
+
+
+    async def insert_broker_execution(
+        self,
+        parent_order_id: int,
+        broker_id: int,
+        side: str,
+        execution_price: float = 0.0,
+        executed_quantity: int = 0,
+        execution_time: datetime = None,
+        symbol: str = None,
+        product_type: str = None,
+        order_type: str = None,
+        notes: str = None,
+        status: str = "FILLED",
+        broker_order_id: str = None,
+        action: str = None,
+        order_messages: str = None,
+        raw_execution_data: dict = None
+    ):
+        """
+        Public method to insert an ENTRY or EXIT row in broker_executions.
+        This can be called from outside OrderManager (e.g., from OrderMonitor).
+        """
+        from algosat.core.dbschema import broker_executions
+        from algosat.core.db import AsyncSessionLocal
+        import datetime
+
+        execution_time = execution_time or datetime.datetime.utcnow()
+
+        # Ensure all required fields for broker_executions table are present
+        broker_exec_data = {
+            "parent_order_id": parent_order_id,
+            "broker_id": broker_id,
+            "broker_order_id": broker_order_id,
+            "side": side,
+            "status": status,
+            "executed_quantity": executed_quantity,
+            "execution_price": execution_price,
+            "product_type": product_type,
+            "order_type": order_type,
+            "order_messages": order_messages,
+            "raw_execution_data": raw_execution_data,
+            "symbol": symbol,
+            "execution_time": execution_time,
+            "notes": notes,
+            "action": action,
+        }
+        # Fill missing fields with defaults if necessary
+        if broker_exec_data["side"] is None:
+            broker_exec_data["side"] = "NA"
+        if broker_exec_data["status"] is None:
+            broker_exec_data["status"] = "UNKNOWN"
+        if broker_exec_data["executed_quantity"] is None:
+            broker_exec_data["executed_quantity"] = 0
+        if broker_exec_data["execution_price"] is None:
+            broker_exec_data["execution_price"] = 0.0
+        if broker_exec_data["execution_time"] is None:
+            broker_exec_data["execution_time"] = datetime.datetime.utcnow()
+        # Add any other required fields with defaults as needed
+        async with AsyncSessionLocal() as session:
+            await session.execute(broker_executions.insert().values(**broker_exec_data))
+            await session.commit()
+
+    async def update_broker_execution_price(self, broker_exec_id, execution_price):
+        """
+        Update only the execution_price for a broker_execution row.
+        """
+        try:
+            from algosat.core.db import AsyncSessionLocal, update_rows_in_table
+            from algosat.core.dbschema import broker_executions
+            async with AsyncSessionLocal() as session:
+                await update_rows_in_table(
+                    target_table=broker_executions,
+                    condition=broker_executions.c.id == broker_exec_id,
+                    new_values={"execution_price": execution_price}
+                )
+                await session.commit()
+        except Exception as e:
+            logger.error(f"OrderMonitor: Error updating execution_price for broker_execution id={broker_exec_id}: {e}")

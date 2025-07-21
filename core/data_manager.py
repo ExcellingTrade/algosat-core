@@ -429,7 +429,9 @@ class DataManager:
                     broker_id=be.get("broker_id"),
                     order_id=be.get("broker_order_id"),
                     status=std_status,
+                    broker_name=broker_name,
                     side=be.get("side"),
+                    symbol=be.get("symbol"),  # Use order symbol if available
                     raw_response=be.get("raw_response")
                 ))
             return OrderAggregate(

@@ -593,8 +593,10 @@ class BrokerManager:
         # All other fields go into 'extra'
         extra = {}
         for field in [
-            'candle_range', 'entry_price', 'stop_loss', 'target_price', 'profit', 'signal_time', 'exit_time','trigger_price_diff'
-            'exit_price', 'status', 'reason', 'atr', 'supertrend_signal', 'lot_qty', 'entry_time', 'order_ids', 'order_messages']:
+            'candle_range', 'entry_price', 'stop_loss', 'target_price', 'profit', 'signal_time', 'exit_time', 'trigger_price_diff',
+            'exit_price', 'status', 'reason', 'atr', 'supertrend_signal', 'lot_qty', 'entry_time', 'order_ids', 'order_messages',
+            'entry_spot_price', 'entry_spot_swing_high', 'entry_spot_swing_low', 'stoploss_spot_level', 'target_spot_level'
+        ]:
             val = getattr(signal, field, None)
             if val is not None:
                 extra[field] = val
@@ -661,6 +663,34 @@ class BrokerManager:
                 logger.error(f"BrokerManager: Failed to fetch orders for {broker_name}: {e}")
                 broker_orders[broker_name] = []
         return broker_orders
+
+    async def get_all_broker_positions(self) -> dict:
+        """
+        Fetch positions from all trade-enabled brokers.
+        Returns a dict: broker_name -> list of positions (empty list if error or not available).
+        """
+        enabled_brokers = await self.get_all_trade_enabled_brokers()
+        broker_positions = {}
+        for broker_name, broker in enabled_brokers.items():
+            try:
+                if broker is None or not hasattr(broker, "get_positions"):
+                    broker_positions[broker_name] = []
+                    continue
+                positions = broker.get_positions()
+                while asyncio.iscoroutine(positions):
+                    positions = await positions
+                    if broker_name == 'zerodha' and isinstance(positions, dict) and 'net' in positions:
+                        positions = positions.get('net', [])
+                    if broker_name == 'fyers' and isinstance(positions, dict) and 'netPositions' in positions:
+                        positions = positions.get('netPositions', [])
+                if not isinstance(positions, list):
+                    positions = []
+                broker_positions[broker_name] = positions
+            except Exception as e:
+                logger.error(f"BrokerManager: Failed to fetch positions for {broker_name}: {e}")
+                broker_positions[broker_name] = []
+        return broker_positions
+    
 
     async def get_broker_by_id(self, broker_id: int) -> Optional[object]:
         """

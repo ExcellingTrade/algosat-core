@@ -28,3 +28,8 @@ class TradeSignal:
     lot_qty: int = None
     side_value: int = None
     orig_target: float = None  # Optional: original target price for trailing stoploss logic
+    entry_spot_price: float = None
+    entry_spot_swing_high: float = None
+    entry_spot_swing_low: float = None
+    stoploss_spot_level: float = None
+    target_spot_level: float = None

@@ -24,6 +24,15 @@ from algosat.common.strategy_utils import (
     calculate_trade,
     get_max_premium_from_config,
 )
+# Import regime detection helpers (stub: as in option_buy)
+try:
+    from algosat.common.strategy_utils import detect_regime, get_regime_reference
+except ImportError:
+    # Stubs if not present
+    def detect_regime(entry_price, regime_reference, option_type, trade_mode):
+        return "sideways"
+    def get_regime_reference(symbol, timeframe, config):
+        return {}
 from algosat.utils.indicators import (
     calculate_atr_trial_stops,
     calculate_supertrend,
@@ -110,6 +119,8 @@ class OptionSellStrategy(StrategyBase):
         self.order_manager = execution_manager  # <-- Fix: store execution_manager as order_manager
         self._positions = {}       # Track open positions by strike
         self._last_signal_direction = {}  # Track last signal direction per strike
+        # Regime reference loaded at setup
+        self._regime_reference = None
 
     async def ensure_broker(self):
         # No longer needed for data fetches, but keep for order placement if required
@@ -167,6 +178,13 @@ class OptionSellStrategy(StrategyBase):
         else:
             self._setup_failed = False
             logger.info(f"Selected strikes for entry: {self._strikes}")
+        # Load regime reference once at setup (as in option_buy)
+        try:
+            self._regime_reference = get_regime_reference(self.symbol, self.timeframe, self.cfg)
+            logger.info(f"Loaded regime reference for {self.symbol}: {self._regime_reference}")
+        except Exception as e:
+            logger.error(f"Error loading regime reference: {e}")
+            self._regime_reference = None
 
     async def sync_open_positions(self):
         """
@@ -424,6 +442,7 @@ class OptionSellStrategy(StrategyBase):
         Entry logic: Only enter on SELL signal if not immediately after a BUY-to-SELL reversal.
         Skips entry if previous candle was BUY and current is SELL (fresh reversal).
         Prevents stacking same direction trades using last signal direction tracking.
+        Adds regime detection (as in option_buy) and adjusts trade params if sideways.
         """
         # Prevent duplicate entry signals for the same strike if a position is already open
         if self._positions.get(strike):
@@ -443,7 +462,6 @@ class OptionSellStrategy(StrategyBase):
             last_signal_direction = self._last_signal_direction.get(strike)
 
             # Reset last_signal_direction to None if signal flipped to BUY from SELL
-            # if curr_signal_direction != constants.TRADE_DIRECTION_SELL:
             if curr_signal_direction == constants.TRADE_DIRECTION_BUY and last_signal_direction == constants.TRADE_DIRECTION_SELL:
                 self._last_signal_direction[strike] = None
                 logger.info(
@@ -475,10 +493,52 @@ class OptionSellStrategy(StrategyBase):
                 and curr['close'] < curr['sma']
                 and curr['low'] > threshold_entry
             ):
+                # --- Begin regime detection logic (as in option_buy) ---
+                entry_price = curr['close']
+                option_type = constants.OPTION_TYPE_CALL if "CE" in strike else constants.OPTION_TYPE_PUT
+                # Use cached regime_reference if available
+                regime_reference = getattr(self, "_regime_reference", None)
+                if not regime_reference:
+                    try:
+                        regime_reference = get_regime_reference(self.symbol, self.timeframe, self.cfg)
+                        self._regime_reference = regime_reference
+                    except Exception as e:
+                        logger.error(f"Could not compute regime_reference: {e}")
+                        regime_reference = {}
+                regime = detect_regime(entry_price, regime_reference, option_type, "SELL")
+                logger.info(f"Regime detected for {strike}: {regime} (entry_price={entry_price}, option_type={option_type})")
+                # Adjust for sideways regime if enabled in config
+                sideways_trade_enabled = config.get("sideways_trade_enabled", False)
+                sideways_qty_pct = config.get("sideways_qty_percentage", 100)
+                sideways_target_atr_mult = config.get("sideways_target_atr_multiplier", 1.0)
+                orig_qty = config.get("quantity", 1)
+                orig_target_mult = config.get("atr_target_multiplier", 1)
+                adjusted_qty = orig_qty
+                adjusted_target_mult = orig_target_mult
+                # If sideways regime, adjust params
+                if regime == "sideways":
+                    if not sideways_trade_enabled or sideways_qty_pct == 0:
+                        logger.info(f"Skipping trade for {strike} due to sideways regime and config sideways_qty_percentage=0.")
+                        return None
+                    adjusted_qty = max(1, int(round(orig_qty * sideways_qty_pct / 100)))
+                    adjusted_target_mult = sideways_target_atr_mult
+                    logger.info(f"Sideways regime: adjusted lot_qty={adjusted_qty}, target_atr_multiplier={adjusted_target_mult}")
+                # --- End regime logic ---
+                # Calculate trade dict, passing adjusted_target_mult if needed
                 trade_dict = calculate_trade(curr, data, strike, config, side=Side.SELL)
                 orig_target = trade_dict.get(constants.TRADE_KEY_TARGET_PRICE)
-                # Trailing stoploss logic: update target if enabled
-                if config.get("trailing_stoploss", False):
+                # Overwrite lot_qty and target if regime is sideways
+                trade_dict[constants.TRADE_KEY_LOT_QTY] = adjusted_qty
+                if regime == "sideways":
+                    try:
+                        atr_value = data['atr'].iloc[-1].round(2)
+                        trade_dict[constants.TRADE_KEY_ACTUAL_TARGET] = orig_target  # Save the original target
+                        trade_dict[constants.TRADE_KEY_TARGET_PRICE] = trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE) - (atr_value * adjusted_target_mult)
+                        logger.debug(f"Sideways regime: updated target for {strike} to {trade_dict[constants.TRADE_KEY_TARGET_PRICE]}")
+                    except Exception as e:
+                        logger.error(f"Error updating sideways regime target for {strike}: {e}")
+                # Trailing stoploss logic: update target if enabled (for non-sideways regime or if config wants it)
+                if config.get("trailing_stoploss", False) and regime != "sideways":
                     try:
                         atr_value = data['atr'].iloc[-1].round(2)
                         atr_mult = config.get('atr_target_multiplier', 1)
@@ -493,8 +553,9 @@ class OptionSellStrategy(StrategyBase):
                     'timestamp': curr.get('timestamp')
                 }]
                 self._last_signal_direction[strike] = constants.TRADE_DIRECTION_SELL
-
-                logger.info(f"🔴 Signal formed for {strike} at {curr.get('timestamp')}: Entry at {trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE)} | Updated last_signal_direction to SELL.")
+                logger.info(
+                    f"🔴 Signal formed for {strike} at {curr.get('timestamp')}: Entry at {trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE)} | Updated last_signal_direction to SELL | regime={regime}, lot_qty={adjusted_qty}, target={trade_dict.get(constants.TRADE_KEY_TARGET_PRICE)}"
+                )
                 return TradeSignal(
                     symbol=strike,
                     side=Side.SELL,

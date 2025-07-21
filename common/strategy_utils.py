@@ -341,7 +341,7 @@ def get_dynamic_buffer(candle_range, threshold, small_buffer, large_buffer):
 
 
 # --- Utility: Calculate Trade Details ---
-def calculate_trade(candle, history_upto_candle, strike_symbol, trade_config, side):
+def calculate_trade(candle, history_upto_candle, strike_symbol, trade_config, side, target_atr_multiplier=None):
     """
     Calculate the trade details (entry, stop loss, target) based on the given side (buy/sell).
 
@@ -378,12 +378,18 @@ def calculate_trade(candle, history_upto_candle, strike_symbol, trade_config, si
     if side == Side.BUY:
         entry = candle[constants.COLUMN_HIGH] + entry_buffer
         sl = candle[constants.COLUMN_LOW] - stop_loss_buffer
-        target = entry + ((atr_value * trade_config['atr_target_multiplier']) - target_buffer)
+        if target_atr_multiplier is not None:
+            target = entry + (atr_value * target_atr_multiplier) - target_buffer
+        else:
+            target = entry + ((atr_value * trade_config['atr_target_multiplier']) - target_buffer)
         side_val = 1
     elif side == Side.SELL:
         entry = candle[constants.COLUMN_LOW] - entry_buffer
         sl = candle[constants.COLUMN_HIGH] + stop_loss_buffer
-        target = entry - ((atr_value * trade_config['atr_target_multiplier']) - target_buffer)
+        if target_atr_multiplier is not None:
+            target = entry - (atr_value * target_atr_multiplier) + target_buffer
+        else:
+            target = entry - ((atr_value * trade_config['atr_target_multiplier']) - target_buffer)
         side_val = -1
     else:
         raise ValueError("Invalid side. Use Side.BUY or Side.SELL.")

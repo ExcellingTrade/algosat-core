@@ -178,6 +178,12 @@ orders = Table(
     Column("side", String, nullable=True),
     Column("qty", Integer, nullable=True),
     Column("executed_quantity", Integer, nullable=False), 
+    # Spot and swing/level tracking fields
+    Column("entry_spot_price", Float, nullable=True),
+    Column("entry_spot_swing_high", Float, nullable=True),
+    Column("entry_spot_swing_low", Float, nullable=True),
+    Column("stoploss_spot_level", Float, nullable=True),
+    Column("target_spot_level", Float, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 )

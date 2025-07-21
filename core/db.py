@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from datetime import datetime, time, timezone, timedelta
+from algosat.core.dbschema import orders
 from typing import Optional
 # algosat/core/db.py
 
@@ -2089,5 +2090,23 @@ async def get_orders_by_strategy_id(session: AsyncSession, strategy_id: int, sta
     
     stmt = stmt.order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
     
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_open_orders_for_today(session):
+    """
+    Fetch all open orders for today (status OPEN, AWAITING_ENTRY, PENDING, PARTIALLY_FILLED).
+    Assumes orders table has 'created_at' and 'status' columns.
+    """
+    today = datetime.now(timezone.utc).date()
+    open_statuses = ["OPEN", "AWAITING_ENTRY", "PENDING", "PARTIALLY_FILLED"]
+    stmt = (
+        select(orders)
+        .where(
+            orders.c.status.in_(open_statuses),
+            orders.c.created_at >= datetime.combine(today, time(0, 0, 0, tzinfo=timezone.utc)),
+            orders.c.created_at < datetime.combine(today + timedelta(days=1), time(0, 0, 0, tzinfo=timezone.utc))
+        )
+    )
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
