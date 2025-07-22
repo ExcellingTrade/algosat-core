@@ -321,6 +321,7 @@ class OrderManager:
                 "entry_spot_swing_low": order_payload.extra.get("entry_spot_swing_low"),
                 "stoploss_spot_level": order_payload.extra.get("stoploss_spot_level"),
                 "target_spot_level": order_payload.extra.get("target_spot_level"),
+                "expiry_date": ensure_utc_aware(order_payload.extra.get("expiry_date")),
             }
             inserted = await insert_order(sess, order_data)
             return inserted["id"] if inserted else None
@@ -408,7 +409,7 @@ class OrderManager:
         except Exception as e:
             logger.error(f"_insert_broker_execution failed for broker_name={broker_name}, parent_order_id={parent_order_id}: {e}", exc_info=True)
 
-    async def _insert_exit_broker_execution(self, session, *, parent_order_id, broker_id, broker_order_id, side, status, executed_quantity, execution_price, product_type, order_type, order_messages, symbol, execution_time, notes):
+    async def _insert_exit_broker_execution(self, session, *, parent_order_id, broker_id, broker_order_id, side, status, executed_quantity, execution_price, product_type, order_type, order_messages, symbol, execution_time, notes, action=None, exit_reason=None):
         """
         Helper to build and insert a broker_executions row for EXIT/cancel actions.
         """
@@ -424,6 +425,7 @@ class OrderManager:
             product_type=product_type,
             order_type=order_type,
             order_messages=order_messages,
+            action=action,
             raw_execution_data=None,
             symbol=symbol,
             execution_time=execution_time,
@@ -431,192 +433,6 @@ class OrderManager:
         )
         await session.execute(broker_executions.insert().values(**broker_exec_data))
 
-        """
-        Standardized exit: For a logical order, fetch all broker_executions. For each FILLED row, call exit_order. For PARTIALLY_FILLED/PARTIAL, call exit_order then cancel_order. For AWAITING_ENTRY/PENDING, call cancel_order. For REJECTED/FAILED, do nothing.
-        After exit/cancel, insert a new broker_executions row with side=EXIT, exit price as LTP (passed in), and update exit_time.
-        ltp: If provided, use as exit price. If not provided, will fetch current LTP from the market.
-        """
-        from algosat.core.db import AsyncSessionLocal, get_broker_executions_for_order, get_order_by_id
-        async with AsyncSessionLocal() as session:
-            broker_execs = await get_broker_executions_for_order(session, parent_order_id)
-            order_row = await get_order_by_id(session, parent_order_id)
-            logical_symbol = order_row.get('strike_symbol') or order_row.get('symbol') if order_row else None
-            
-            # If LTP is not provided, fetch it from the market
-            if ltp is None and logical_symbol:
-                try:
-                    from algosat.core.data_manager import DataManager
-                    data_manager = DataManager(broker_manager=self.broker_manager)
-                    await data_manager.ensure_broker()
-                    
-                    ltp_response = await data_manager.get_ltp(logical_symbol)
-                    if isinstance(ltp_response, dict):
-                        ltp = ltp_response.get(logical_symbol)
-                    else:
-                        ltp = ltp_response
-                    
-                    if ltp is not None:
-                        logger.info(f"OrderManager: Fetched LTP for symbol {logical_symbol}: {ltp}")
-                    else:
-                        logger.warning(f"OrderManager: Could not fetch LTP for symbol {logical_symbol}")
-                        ltp = 0.0
-                except Exception as e:
-                    logger.error(f"OrderManager: Error fetching LTP for symbol {logical_symbol}: {e}")
-                    ltp = 0.0
-            elif ltp is None:
-                logger.warning(f"OrderManager: No LTP provided and no symbol available for order {parent_order_id}")
-                ltp = 0.0
-            
-            if not broker_execs:
-                logger.warning(f"OrderManager: No broker executions found for parent_order_id={parent_order_id} in exit_order.")
-                return
-            for be in broker_execs:
-                status = (be.get('status') or '').upper()
-                broker_id = be.get('broker_id')
-                broker_order_id = be.get('broker_order_id')
-                symbol = be.get('symbol') or logical_symbol
-                product_type = be.get('product_type')
-                self.validate_broker_fields(broker_id, symbol, context_msg=f"exit_order (parent_order_id={parent_order_id})")
-                if broker_id is None or broker_order_id is None:
-                    logger.error(f"OrderManager: Missing broker_id or broker_order_id in broker_execution for parent_order_id={parent_order_id}")
-                    continue
-                # Action based on status
-                if status in ('REJECTED', 'FAILED'):
-                    logger.info(f"OrderManager: Skipping broker_execution id={be.get('id')} with status={status} (no action needed).")
-                    continue
-                try:
-                    import datetime
-                    orig_side = (be.get('action') or '').upper()
-                    exit_time = datetime.datetime.now(datetime.timezone.utc)
-                    orig_side = (be.get('action') or '').upper()
-                    if orig_side == 'BUY':
-                        exit_action = 'SELL'
-                    elif orig_side == 'SELL':
-                        exit_action = 'BUY'
-                    else:
-                        exit_action = ''
-                    if status == 'FILLED':
-                        logger.info(f"OrderManager: Initiating exit for broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
-                        await self.broker_manager.exit_order(
-                            broker_id,
-                            broker_order_id,
-                            symbol=symbol,
-                            product_type=product_type,
-                            exit_reason=exit_reason,
-                            side=orig_side
-                        )
-                        logger.info(f"OrderManager: Exit order sent to broker_id={broker_id} for broker_order_id={broker_order_id}")
-                        # Determine opposite action for exit
-                        
-                        await self._insert_exit_broker_execution(
-                            session,
-                            parent_order_id=parent_order_id,
-                            broker_id=broker_id,
-                            broker_order_id=broker_order_id,
-                            action=exit_action,
-                            side='EXIT',
-                            status='FILLED',
-                            executed_quantity=be.get('executed_quantity', 0),
-                            execution_price=ltp or 0.0,
-                            product_type=product_type,
-                            order_type='MARKET',
-                            order_messages=f"Exit order placed. Reason: {exit_reason}",
-                            symbol=symbol,
-                            execution_time=exit_time,
-                            notes=f"Auto exit via OrderManager. Reason: {exit_reason}"
-                        )
-                    elif status in ('PARTIALLY_FILLED', 'PARTIAL'):
-                        logger.info(f"OrderManager: Initiating exit for PARTIALLY_FILLED broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
-                        await self.broker_manager.exit_order(
-                            broker_id,
-                            broker_order_id,
-                            symbol=symbol,
-                            product_type=product_type,
-                            exit_reason=exit_reason,
-                            side = orig_side
-                        )
-                        logger.info(f"OrderManager: Now also sending cancel for PARTIALLY_FILLED broker_execution id={be.get('id')}")
-                        await self.broker_manager.cancel_order(
-                            broker_id,
-                            broker_order_id,
-                            symbol=symbol,
-                            product_type=product_type,
-                            
-                            exit_reason=f"Exit requested for PARTIALLY_FILLED order"
-                        )
-                        await self._insert_exit_broker_execution(
-                            session,
-                            parent_order_id=parent_order_id,
-                            broker_id=broker_id,
-                            broker_order_id=broker_order_id,
-                            side='EXIT',
-                            action=exit_action,
-                            status='FILLED',
-                            executed_quantity=be.get('executed_quantity', 0),
-                            execution_price=ltp or 0.0,
-                            product_type=product_type,
-                            order_type='MARKET',
-                            order_messages=f"Exit and cancel placed for PARTIALLY_FILLED. Reason: {exit_reason}",
-                            symbol=symbol,
-                            execution_time=exit_time,
-                            notes=f"Auto exit+cancel via OrderManager. Reason: {exit_reason}"
-                        )
-                    elif status in ('AWAITING_ENTRY', 'PENDING'):
-                        logger.info(f"OrderManager: Initiating cancel for broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
-                        await self.broker_manager.cancel_order(
-                            broker_id,
-                            broker_order_id,
-                            symbol=symbol,
-                            product_type=product_type,
-                            cancel_reason=f"Exit requested but status was {status}"
-                        )
-                        logger.info(f"OrderManager: Cancel order sent to broker_id={broker_id} for broker_order_id={broker_order_id}")
-                        # Instead of inserting a new broker_executions row, update the status to CANCELLED
-                        await self.update_broker_exec_status_in_db(
-                            broker_exec_id=be.get('id'),
-                            status='CANCELLED'
-                        )
-                except Exception as e:
-                    logger.error(f"OrderManager: Error exiting/cancelling order for broker_id={broker_id}, broker_order_id={broker_order_id}: {e}")
-            
-            # After processing all broker executions, update the main order status to CLOSED
-            # and set exit_price and exit_time
-            try:
-                import datetime
-                exit_time = datetime.datetime.now(datetime.timezone.utc)
-                exit_price = ltp or 0.0
-                
-                # Calculate PnL if we have the necessary data
-                pnl = 0.0
-                if order_row:
-                    entry_price = order_row.get('entry_price')
-                    executed_quantity = order_row.get('executed_quantity')
-                    side = order_row.get('side')
-                    
-                    if all(x is not None for x in [entry_price, executed_quantity, side, exit_price]):
-                        if side == 'BUY':
-                            pnl = (exit_price - entry_price) * executed_quantity
-                        elif side == 'SELL':
-                            pnl = (entry_price - exit_price) * executed_quantity
-                        logger.info(f"OrderManager: Calculated PnL for order {parent_order_id}: {pnl}")
-                    else:
-                        logger.warning(f"OrderManager: Cannot calculate PnL for order {parent_order_id} - missing data")
-                
-                # Update the main order with exit details
-                await self.update_order_exit_details_in_db(
-                    order_id=parent_order_id,
-                    exit_price=exit_price,
-                    exit_time=exit_time,
-                    pnl=pnl,
-                    status="CLOSED"
-                )
-                
-                logger.info(f"OrderManager: Updated main order {parent_order_id} status to CLOSED with exit_price={exit_price}, exit_time={exit_time}, pnl={pnl}")
-                
-            except Exception as e:
-                logger.error(f"OrderManager: Error updating main order exit details for order {parent_order_id}: {e}")
-            
-            await session.commit()
 
     async def exit_all_orders(self, exit_reason: str = None, strategy_id: int = None):
         """
@@ -1305,42 +1121,42 @@ class OrderManager:
                 except Exception as e:
                     logger.error(f"OrderManager: Error exiting/cancelling order for broker_id={broker_id}, broker_order_id={broker_order_id}: {e}")
             
-            # After processing all broker executions, update the main order status to CLOSED
-            # and set exit_price and exit_time
-            try:
-                import datetime
-                exit_time = datetime.datetime.now(datetime.timezone.utc)
-                exit_price = ltp or 0.0
+            # # After processing all broker executions, update the main order status to CLOSED
+            # # and set exit_price and exit_time
+            # try:
+            #     import datetime
+            #     exit_time = datetime.datetime.now(datetime.timezone.utc)
+            #     exit_price = ltp or 0.0
                 
-                # Calculate PnL if we have the necessary data
-                pnl = 0.0
-                if order_row:
-                    entry_price = order_row.get('entry_price')
-                    executed_quantity = order_row.get('executed_quantity')
-                    side = order_row.get('side')
+            #     # Calculate PnL if we have the necessary data
+            #     pnl = 0.0
+            #     if order_row:
+            #         entry_price = order_row.get('entry_price')
+            #         executed_quantity = order_row.get('executed_quantity')
+            #         side = order_row.get('side')
                     
-                    if all(x is not None for x in [entry_price, executed_quantity, side, exit_price]):
-                        if side == 'BUY':
-                            pnl = (exit_price - entry_price) * executed_quantity
-                        elif side == 'SELL':
-                            pnl = (entry_price - exit_price) * executed_quantity
-                        logger.info(f"OrderManager: Calculated PnL for order {parent_order_id}: {pnl}")
-                    else:
-                        logger.warning(f"OrderManager: Cannot calculate PnL for order {parent_order_id} - missing data")
+            #         if all(x is not None for x in [entry_price, executed_quantity, side, exit_price]):
+            #             if side == 'BUY':
+            #                 pnl = (exit_price - entry_price) * executed_quantity
+            #             elif side == 'SELL':
+            #                 pnl = (entry_price - exit_price) * executed_quantity
+            #             logger.info(f"OrderManager: Calculated PnL for order {parent_order_id}: {pnl}")
+            #         else:
+            #             logger.warning(f"OrderManager: Cannot calculate PnL for order {parent_order_id} - missing data")
                 
-                # Update the main order with exit details
-                await self.update_order_exit_details_in_db(
-                    order_id=parent_order_id,
-                    exit_price=exit_price,
-                    exit_time=exit_time,
-                    pnl=pnl,
-                    status="CLOSED"
-                )
+            #     # Update the main order with exit details
+            #     await self.update_order_exit_details_in_db(
+            #         order_id=parent_order_id,
+            #         exit_price=exit_price,
+            #         exit_time=exit_time,
+            #         pnl=pnl,
+            #         status="CLOSED"
+            #     )
                 
-                logger.info(f"OrderManager: Updated main order {parent_order_id} status to CLOSED with exit_price={exit_price}, exit_time={exit_time}, pnl={pnl}")
+            #     logger.info(f"OrderManager: Updated main order {parent_order_id} status to CLOSED with exit_price={exit_price}, exit_time={exit_time}, pnl={pnl}")
                 
-            except Exception as e:
-                logger.error(f"OrderManager: Error updating main order exit details for order {parent_order_id}: {e}")
+            # except Exception as e:
+                # logger.error(f"OrderManager: Error updating main order exit details for order {parent_order_id}: {e}")
             
             await session.commit()
 

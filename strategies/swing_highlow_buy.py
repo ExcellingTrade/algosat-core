@@ -426,6 +426,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 try:
                     from algosat.core.time_utils import get_ist_datetime
                     from algosat.common.broker_utils import get_trade_day
+                    from datetime import datetime, timedelta
                     
                     # Get order entry date and current date
                     current_datetime = get_ist_datetime()
@@ -435,7 +436,6 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     order_timestamp = order_row.get("signal_time") or order_row.get("created_at") or order_row.get("timestamp")
                     if order_timestamp:
                         if isinstance(order_timestamp, str):
-                            from datetime import datetime, timedelta
                             order_datetime = datetime.fromisoformat(order_timestamp.replace('Z', '+00:00'))
                         else:
                             order_datetime = order_timestamp
@@ -459,11 +459,25 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                 first_candle_df = first_candle_history.get(str(spot_symbol))
                                 
                                 if first_candle_df is not None and len(first_candle_df) > 0:
-                                    # Get today's first candle (9:15 - first_candlxe_end_time)
+                                    # Get today's first candle (9:15 - first_candle_end_time)
+                                    first_candle_df = first_candle_df.copy()
                                     first_candle_df['timestamp'] = pd.to_datetime(first_candle_df['timestamp'])
+                                    
+                                    # Convert market_open_time and first_candle_end_time to pandas Timestamp, ensuring timezone compatibility
+                                    market_open_ts = pd.to_datetime(market_open_time)
+                                    first_candle_end_ts = pd.to_datetime(first_candle_end_time)
+                                    
+                                    # Ensure all timestamps are timezone-naive for comparison
+                                    if first_candle_df['timestamp'].dt.tz is not None:
+                                        first_candle_df['timestamp'] = first_candle_df['timestamp'].dt.tz_localize(None)
+                                    if market_open_ts.tz is not None:
+                                        market_open_ts = market_open_ts.tz_localize(None)
+                                    if first_candle_end_ts.tz is not None:
+                                        first_candle_end_ts = first_candle_end_ts.tz_localize(None)
+                                    
                                     today_candles = first_candle_df[
-                                        (first_candle_df['timestamp'] >= market_open_time) & 
-                                        (first_candle_df['timestamp'] <= first_candle_end_time)
+                                        (first_candle_df['timestamp'] >= market_open_ts) & 
+                                        (first_candle_df['timestamp'] <= first_candle_end_ts)
                                     ]
                                     
                                     if len(today_candles) > 0:
@@ -591,6 +605,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 try:
                     from algosat.core.time_utils import get_ist_datetime
                     from algosat.common.broker_utils import get_trade_day
+                    from datetime import datetime, timedelta
                     
                     # Get order entry date and current date
                     current_datetime = get_ist_datetime()
@@ -600,7 +615,6 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     order_timestamp = order_row.get("signal_time") or order_row.get("created_at") or order_row.get("timestamp")
                     if order_timestamp:
                         if isinstance(order_timestamp, str):
-                            from datetime import datetime, timedelta
                             order_datetime = datetime.fromisoformat(order_timestamp.replace('Z', '+00:00'))
                         else:
                             order_datetime = order_timestamp
@@ -621,9 +635,20 @@ class SwingHighLowBuyStrategy(StrategyBase):
                             
                             if post_first_candle_df is not None and len(post_first_candle_df) > 0:
                                 # Filter to get data after first candle end time
+                                post_first_candle_df = post_first_candle_df.copy()
                                 post_first_candle_df['timestamp'] = pd.to_datetime(post_first_candle_df['timestamp'])
+                                
+                                # Convert first_candle_end_time to pandas Timestamp, ensuring timezone compatibility
+                                first_candle_end_ts = pd.to_datetime(first_candle_end_time)
+                                
+                                # Ensure all timestamps are timezone-naive for comparison
+                                if post_first_candle_df['timestamp'].dt.tz is not None:
+                                    post_first_candle_df['timestamp'] = post_first_candle_df['timestamp'].dt.tz_localize(None)
+                                if first_candle_end_ts.tz is not None:
+                                    first_candle_end_ts = first_candle_end_ts.tz_localize(None)
+                                
                                 post_first_candle_df = post_first_candle_df[
-                                    post_first_candle_df['timestamp'] > first_candle_end_time
+                                    post_first_candle_df['timestamp'] > first_candle_end_ts
                                 ].copy()
                                 
                                 # Check if we have at least 2 candles post first candle
@@ -757,6 +782,44 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                 
                 except Exception as e:
                     logger.error(f"Error in RSI exit logic: {e}")
+            
+            # PRIORITY 8: EXPIRY EXIT CHECK
+            expiry_date = order_row.get("expiry_date")
+            expiry_exit_config = trade_config.get("expiry_exit", {})
+            if expiry_date is not None and expiry_exit_config.get("enabled", False):
+                try:
+                    from algosat.core.time_utils import get_ist_datetime
+                    from datetime import datetime
+                    import pandas as pd
+                    
+                    current_datetime = get_ist_datetime()
+                    
+                    # Convert expiry_date to pandas datetime if it's a string
+                    if isinstance(expiry_date, str):
+                        expiry_dt = pd.to_datetime(expiry_date)
+                    else:
+                        expiry_dt = expiry_date
+                    
+                    # Check if today is the expiry date
+                    if current_datetime.date() == expiry_dt.date():
+                        # Get expiry exit time from config (default to 15:15)
+                        expiry_exit_time = expiry_exit_config.get("expiry_exit_time", "15:15")
+                        
+                        try:
+                            # Parse expiry_exit_time (format: "HH:MM")
+                            exit_hour, exit_minute = map(int, expiry_exit_time.split(":"))
+                            exit_time = current_datetime.replace(
+                                hour=exit_hour, minute=exit_minute, second=0, microsecond=0
+                            )
+                            
+                            if current_datetime >= exit_time:
+                                logger.info(f"evaluate_exit: EXPIRY exit triggered. order_id={order_id}, expiry_date={expiry_date}, current_time={current_datetime.strftime('%H:%M')}, exit_time={expiry_exit_time}")
+                                return True
+                        except Exception as e:
+                            logger.error(f"Error parsing expiry exit time {expiry_exit_time}: {e}")
+                            
+                except Exception as e:
+                    logger.error(f"Error in expiry exit logic: {e}")
             
             # No exit condition met
             logger.debug(f"evaluate_exit: No exit condition met for order_id={order_id}")
@@ -918,7 +981,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
 
             # 4. Get spot price and ATM strike for option
             spot_price = last_candle["close"]  # Use last candle close as spot price
-            strike = swing_utils.get_atm_strike_symbol(self.cfg.symbol, spot_price, breakout_type, self.trade)
+            strike, expiry_date = swing_utils.get_atm_strike_symbol(self.cfg.symbol, spot_price, breakout_type, self.trade)
             qty = self.ce_lot_qty * self.lot_size if breakout_type == "CE" else self.trade.get("pe_lot_qty", 1) * self.lot_size
             if breakout_type == "CE":
                 lot_qty = config.get("ce_lot_qty", 1)
@@ -985,7 +1048,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             except Exception as e:
                 logger.error(f"Error calculating entry RSI: {e}")
 
-            logger.info(f"Breakout detected: type={breakout_type}, trend={trend}, direction={direction}, strike={strike}, price={last_candle['close']}, entry_spot_price={entry_spot_price}, entry_spot_swing_high={entry_spot_swing_high}, entry_spot_swing_low={entry_spot_swing_low}, stoploss_spot_level={stoploss_spot_level}, target_spot_level={target_spot_level}, entry_rsi={entry_rsi_value}, target_type={target_type}")
+            logger.info(f"Breakout detected: type={breakout_type}, trend={trend}, direction={direction}, strike={strike}, price={last_candle['close']}, entry_spot_price={entry_spot_price}, entry_spot_swing_high={entry_spot_swing_high}, entry_spot_swing_low={entry_spot_swing_low}, stoploss_spot_level={stoploss_spot_level}, target_spot_level={target_spot_level}, entry_rsi={entry_rsi_value}, target_type={target_type}, expiry_date={expiry_date}")
             from algosat.core.signal import Side
             signal = TradeSignal(
                 symbol=strike,
@@ -999,7 +1062,8 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 entry_spot_swing_low=entry_spot_swing_low,
                 stoploss_spot_level=stoploss_spot_level,
                 target_spot_level=target_spot_level,
-                entry_rsi=entry_rsi_value
+                entry_rsi=entry_rsi_value,
+                expiry_date=expiry_date
             )
             logger.info(f"Breakout detected: type={breakout_type}, direction={direction}, strike={strike}, price={last_candle['close']}")
             return signal

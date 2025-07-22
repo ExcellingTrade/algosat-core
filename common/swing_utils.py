@@ -473,6 +473,7 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
     expiry_conf = config.get("expiry_exit", {"enabled": True, "days_before_expiry": 0})
     entry_conf = config.get("entry", {})
     days_before_expiry = expiry_conf.get("days_before_expiry", 0)
+    expiry_exit_time = expiry_conf.get("expiry_exit_time", "15:15")  # Default to 15:15 if not specified
     monthly_map = {1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN", 7: "JUL",
                    8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC"}
 
@@ -489,9 +490,25 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
             days_ahead = 7
         expiry_date = today + timedelta(days=days_ahead)
         expiry_date -= timedelta(days=days_before_expiry)
+        
         # If already past expiry, pick next expiry
         if expiry_date.date() < today.date():
             expiry_date += timedelta(days=7)
+        
+        # Check if expiry_date is today and current time is past expiry_exit_time
+        if expiry_date.date() == today.date():
+            try:
+                # Parse expiry_exit_time (format: "HH:MM")
+                exit_hour, exit_minute = map(int, expiry_exit_time.split(":"))
+                exit_time = today.replace(hour=exit_hour, minute=exit_minute, second=0, microsecond=0)
+                
+                if today >= exit_time:
+                    # Move to next week's expiry
+                    expiry_date += timedelta(days=7)
+            except Exception as e:
+                # If parsing fails, use default behavior
+                pass
+                
     else:
         # Monthly expiry (last Thursday of the month), then subtract days_before_expiry, roll over if past
         month = today.month
@@ -501,6 +518,7 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
         while last_date.weekday() != 3:
             last_date -= timedelta(days=1)
         expiry_date = last_date - timedelta(days=days_before_expiry)
+        
         if expiry_date.date() < today.date():
             # Next month
             next_month = month + 1 if month < 12 else 1
@@ -510,6 +528,26 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
             while last_date.weekday() != 3:
                 last_date -= timedelta(days=1)
             expiry_date = last_date - timedelta(days=days_before_expiry)
+        
+        # Check if expiry_date is today and current time is past expiry_exit_time
+        if expiry_date.date() == today.date():
+            try:
+                # Parse expiry_exit_time (format: "HH:MM")
+                exit_hour, exit_minute = map(int, expiry_exit_time.split(":"))
+                exit_time = today.replace(hour=exit_hour, minute=exit_minute, second=0, microsecond=0)
+                
+                if today >= exit_time:
+                    # Move to next month's expiry
+                    next_month = month + 1 if month < 12 else 1
+                    next_year = year if month < 12 else year + 1
+                    last_day = calendar.monthrange(next_year, next_month)[1]
+                    last_date = datetime(next_year, next_month, last_day)
+                    while last_date.weekday() != 3:
+                        last_date -= timedelta(days=1)
+                    expiry_date = last_date - timedelta(days=days_before_expiry)
+            except Exception as e:
+                # If parsing fails, use default behavior
+                pass
 
     # --- Read offset and step from config as per strategy expectation ---
     if option_type.upper() == "CE":
@@ -537,4 +575,4 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
         mmm = monthly_map[month_num]
         symbol_str = f"NSE:{symbol}{yy}{mmm}{atm_strike}{option_type.upper()}"
 
-    return symbol_str
+    return symbol_str, expiry_date

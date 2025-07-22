@@ -34,3 +34,4 @@ class TradeSignal:
     stoploss_spot_level: float = None
     target_spot_level: float = None
     entry_rsi: float = None
+    expiry_date: str = None
