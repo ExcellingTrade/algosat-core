@@ -171,6 +171,75 @@ async def get_broker_by_id(session, broker_id):
     row = result.first()
     return dict(row._mapping) if row else None
 
+async def get_broker_risk_summary(session):
+    """
+    Get risk management summary for all brokers including max_loss and max_profit limits.
+    
+    Returns:
+        dict: {
+            'total_brokers': int,
+            'brokers': [
+                {
+                    'id': int,
+                    'broker_name': str,
+                    'is_enabled': bool,
+                    'trade_execution_enabled': bool,
+                    'is_data_provider': bool,
+                    'status': str,
+                    'max_loss': float,
+                    'max_profit': float,
+                    'last_auth_check': datetime,
+                    'notes': str
+                }
+            ],
+            'summary': {
+                'total_max_loss': float,
+                'total_max_profit': float,
+                'enabled_brokers': int,
+                'trade_enabled_brokers': int,
+                'connected_brokers': int
+            }
+        }
+    """
+    from algosat.core.dbschema import broker_credentials
+    
+    # Get all broker risk details
+    stmt = select(
+        broker_credentials.c.id,
+        broker_credentials.c.broker_name,
+        broker_credentials.c.is_enabled,
+        broker_credentials.c.trade_execution_enabled,
+        broker_credentials.c.is_data_provider,
+        broker_credentials.c.status,
+        broker_credentials.c.max_loss,
+        broker_credentials.c.max_profit,
+        broker_credentials.c.last_auth_check,
+        broker_credentials.c.notes
+    ).order_by(broker_credentials.c.id)
+    
+    result = await session.execute(stmt)
+    brokers_data = [dict(row._mapping) for row in result.fetchall()]
+    
+    # Calculate summary statistics
+    total_brokers = len(brokers_data)
+    total_max_loss = sum(float(broker.get('max_loss', 0)) for broker in brokers_data)
+    total_max_profit = sum(float(broker.get('max_profit', 0)) for broker in brokers_data)
+    enabled_brokers = sum(1 for broker in brokers_data if broker.get('is_enabled', False))
+    trade_enabled_brokers = sum(1 for broker in brokers_data if broker.get('trade_execution_enabled', False))
+    connected_brokers = sum(1 for broker in brokers_data if broker.get('status') == 'CONNECTED')
+    
+    return {
+        'total_brokers': total_brokers,
+        'brokers': brokers_data,
+        'summary': {
+            'total_max_loss': total_max_loss,
+            'total_max_profit': total_max_profit,
+            'enabled_brokers': enabled_brokers,
+            'trade_enabled_brokers': trade_enabled_brokers,
+            'connected_brokers': connected_brokers
+        }
+    }
+
 # --- Strategy Config CRUD ---
 async def get_all_strategy_configs(session):
     result = await session.execute(select(strategy_configs))

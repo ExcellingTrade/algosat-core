@@ -461,6 +461,7 @@ class OrderMonitor:
                                 pnl_val = float(matched_pos.get('pl', 0))
                                 if int(matched_pos.get('qty', 0)) == 0:
                                     closed = True
+                            
                             total_pnl += pnl_val
                             if closed:
                                 # --- Enhancement: Insert EXIT broker_execution before marking CLOSED ---
@@ -558,6 +559,50 @@ class OrderMonitor:
                         logger.debug(f"OrderMonitor: Updated PnL for order_id={self.order_id}: {total_pnl}")
                     except Exception as e:
                         logger.error(f"OrderMonitor: Error updating order PnL for order_id={self.order_id}: {e}")
+                    
+                    # 🚨 PER-TRADE LOSS VALIDATION 🚨
+                    try:
+                        # 1. Get trade enabled brokers count from risk summary
+                        from algosat.core.db import get_broker_risk_summary
+                        async with AsyncSessionLocal() as session:
+                            risk_data = await get_broker_risk_summary(session)
+                            trade_enabled_brokers = risk_data.get('summary', {}).get('trade_enabled_brokers', 0)
+                        
+                        # 2. Get lot_qty from current order
+                        current_order = await get_order_by_id(session, self.order_id)
+                        lot_qty = current_order.get('lot_qty', 0) if current_order else 0
+                        
+                        # 3. Get max_loss_per_lot from strategy config
+                        max_loss_per_lot = 0
+                        if strategy_config and strategy_config.get('trade'):
+                            import json
+                            try:
+                                trade_config = json.loads(strategy_config['trade']) if isinstance(strategy_config['trade'], str) else strategy_config['trade']
+                                max_loss_per_lot = trade_config.get('max_loss_per_lot', 0)
+                            except Exception as e:
+                                logger.error(f"OrderMonitor: Error parsing trade config for max_loss_per_lot: {e}")
+                        
+                        # 4. Calculate total risk exposure
+                        total_risk_exposure = lot_qty * trade_enabled_brokers * max_loss_per_lot
+                        
+                        # 5. Check if loss exceeds limit
+                        if total_risk_exposure > 0 and total_pnl < -abs(total_risk_exposure):
+                            logger.critical(f"🚨 PER-TRADE LOSS LIMIT EXCEEDED for order_id={self.order_id}! "
+                                          f"Current P&L: {total_pnl}, Max Loss: {total_risk_exposure} "
+                                          f"(lot_qty: {lot_qty} × brokers: {trade_enabled_brokers} × max_loss_per_lot: {max_loss_per_lot})")
+                            
+                            # 6. Exit the order immediately
+                            await self.order_manager.exit_order(self.order_id, reason="Per-trade loss limit exceeded")
+                            logger.critical(f"🚨 Exited order_id={self.order_id} due to per-trade loss limit breach")
+                            self.stop()
+                            return
+                        else:
+                            logger.debug(f"OrderMonitor: Per-trade risk check passed for order_id={self.order_id}. "
+                                       f"P&L: {total_pnl}, Risk exposure: {total_risk_exposure}")
+                            
+                    except Exception as e:
+                        logger.error(f"OrderMonitor: Error in per-trade loss validation for order_id={self.order_id}: {e}")
+                    
                     # If all positions are squared off, update status to CLOSED/EXITED
                     if all_closed and entry_broker_db_orders:
                         try:
@@ -647,8 +692,16 @@ class OrderMonitor:
         await self.data_manager.ensure_broker()
         while self._running:
             try:
-                # Fetch order, strategy_symbol, strategy_config, and strategy (cached)
-                order_row, strategy_symbol, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
+                # Use strategy instance if available, otherwise fetch from database
+                if self.strategy_instance is not None:
+                    # Use the passed strategy instance - still need order_row from database
+                    order_row, strategy_symbol, strategy_config, _ = await self._get_order_and_strategy(self.order_id)
+                    strategy = self.strategy_instance
+                    logger.debug(f"OrderMonitor: Using passed strategy instance for order_id={self.order_id}")
+                else:
+                    # Fallback to database strategy fetch
+                    order_row, strategy_symbol, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
+                    logger.debug(f"OrderMonitor: Using database strategy for order_id={self.order_id}")
             except Exception as e:
                 logger.error(f"OrderMonitor: Error in _get_order_and_strategy for order_id={self.order_id}: {e}", exc_info=True)
                 await asyncio.sleep(self.signal_monitor_seconds)
@@ -668,16 +721,33 @@ class OrderMonitor:
 
             logger.info(f"OrderMonitor: Calling evaluate_exit for order_id={self.order_id}, strategy_id={strategy_id}")
             try:
-                evaluate_exit_fn = getattr(strategy, "evaluate_exit", None)
-                if evaluate_exit_fn is None:
-                    logger.warning(f"OrderMonitor: Strategy missing evaluate_exit method for order_id={self.order_id}")
-                    await asyncio.sleep(self.signal_monitor_seconds)
-                    continue
-                result = evaluate_exit_fn(order_row)
-                if asyncio.iscoroutine(result):
-                    should_exit = await result
+                # Use call_strategy_method for consistency when strategy instance is available
+                if self.strategy_instance is not None:
+                    should_exit = await self.call_strategy_method("evaluate_exit", order_row)
+                    if should_exit is None:
+                        # Fallback to direct method call if call_strategy_method failed
+                        evaluate_exit_fn = getattr(strategy, "evaluate_exit", None)
+                        if evaluate_exit_fn is None:
+                            logger.warning(f"OrderMonitor: Strategy missing evaluate_exit method for order_id={self.order_id}")
+                            await asyncio.sleep(self.signal_monitor_seconds)
+                            continue
+                        result = evaluate_exit_fn(order_row)
+                        if asyncio.iscoroutine(result):
+                            should_exit = await result
+                        else:
+                            should_exit = result
                 else:
-                    should_exit = result
+                    # Direct method call for database strategy
+                    evaluate_exit_fn = getattr(strategy, "evaluate_exit", None)
+                    if evaluate_exit_fn is None:
+                        logger.warning(f"OrderMonitor: Strategy missing evaluate_exit method for order_id={self.order_id}")
+                        await asyncio.sleep(self.signal_monitor_seconds)
+                        continue
+                    result = evaluate_exit_fn(order_row)
+                    if asyncio.iscoroutine(result):
+                        should_exit = await result
+                    else:
+                        should_exit = result
             except Exception as e:
                 logger.error(f"OrderMonitor: Exception in evaluate_exit for order_id={self.order_id}: {e}", exc_info=True)
                 await asyncio.sleep(self.signal_monitor_seconds)
@@ -697,8 +767,17 @@ class OrderMonitor:
     async def start(self) -> None:
         # Fetch signal_monitor_seconds from strategy config if not set
         if self.signal_monitor_seconds is None:
-            # Use unified cache-based access for strategy_config and strategy
-            _, _, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
+            # Use strategy instance if available, otherwise fetch from database
+            if self.strategy_instance is not None:
+                strategy = self.strategy_instance
+                # Still need strategy_config from database
+                _, _, strategy_config, _ = await self._get_order_and_strategy(self.order_id)
+                logger.debug(f"OrderMonitor: Using passed strategy instance for signal_monitor_seconds calculation")
+            else:
+                # Use unified cache-based access for strategy_config and strategy
+                _, _, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
+                logger.debug(f"OrderMonitor: Using database strategy for signal_monitor_seconds calculation")
+                
             strategy_id = None
             if strategy:
                 # Try to get id from strategy object (dict or object)
@@ -755,7 +834,10 @@ class OrderMonitor:
     async def strategy(self):
         """
         Returns the strategy dict for this order_id (uses unified order/strategy cache).
+        If strategy instance is available, returns that; otherwise fetches from database.
         """
+        if self.strategy_instance is not None:
+            return self.strategy_instance
         _, _, _, strategy = await self._get_order_and_strategy(self.order_id)
         return strategy
 

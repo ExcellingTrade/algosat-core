@@ -1217,6 +1217,12 @@ class OrderManager:
                     import datetime
                     orig_side = (be.get('action') or '').upper()
                     exit_time = datetime.datetime.now(datetime.timezone.utc)
+                    if orig_side == 'BUY':
+                            exit_action = 'SELL'
+                    elif orig_side == 'SELL':
+                        exit_action = 'BUY'
+                    else:
+                        exit_action = ''
                     if status == 'FILLED':
                         logger.info(f"OrderManager: Initiating exit for broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
                         exit_resp = await self.broker_manager.exit_order(
@@ -1227,12 +1233,7 @@ class OrderManager:
                             exit_reason=exit_reason,
                             side=order_side
                         )
-                        if orig_side == 'BUY':
-                            exit_action = 'SELL'
-                        elif orig_side == 'SELL':
-                            exit_action = 'BUY'
-                        else:
-                            exit_action = ''
+                        
                         logger.info(f"OrderManager: Exit order sent to broker_id={broker_id} for broker_order_id={broker_order_id}. Response: {exit_resp}")
                         await self._insert_exit_broker_execution(
                             session,
@@ -1241,7 +1242,7 @@ class OrderManager:
                             broker_order_id=broker_order_id,
                             side='EXIT',
                             status='FILLED',
-                            exit_action = exit_action,
+                            action = exit_action,
                             executed_quantity=be.get('executed_quantity', 0),
                             execution_price=ltp or 0.0,
                             product_type=product_type,
@@ -1275,6 +1276,7 @@ class OrderManager:
                             parent_order_id=parent_order_id,
                             broker_id=broker_id,
                             broker_order_id=broker_order_id,
+                            action = exit_action,
                             side='EXIT',
                             status='FILLED',
                             executed_quantity=be.get('executed_quantity', 0),

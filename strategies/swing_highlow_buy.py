@@ -435,7 +435,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     order_timestamp = order_row.get("signal_time") or order_row.get("created_at") or order_row.get("timestamp")
                     if order_timestamp:
                         if isinstance(order_timestamp, str):
-                            from datetime import datetime
+                            from datetime import datetime, timedelta
                             order_datetime = datetime.fromisoformat(order_timestamp.replace('Z', '+00:00'))
                         else:
                             order_datetime = order_timestamp
@@ -459,7 +459,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                 first_candle_df = first_candle_history.get(str(spot_symbol))
                                 
                                 if first_candle_df is not None and len(first_candle_df) > 0:
-                                    # Get today's first candle (9:15 - first_candle_end_time)
+                                    # Get today's first candle (9:15 - first_candlxe_end_time)
                                     first_candle_df['timestamp'] = pd.to_datetime(first_candle_df['timestamp'])
                                     today_candles = first_candle_df[
                                         (first_candle_df['timestamp'] >= market_open_time) & 
@@ -600,7 +600,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     order_timestamp = order_row.get("signal_time") or order_row.get("created_at") or order_row.get("timestamp")
                     if order_timestamp:
                         if isinstance(order_timestamp, str):
-                            from datetime import datetime
+                            from datetime import datetime, timedelta
                             order_datetime = datetime.fromisoformat(order_timestamp.replace('Z', '+00:00'))
                         else:
                             order_datetime = order_timestamp
