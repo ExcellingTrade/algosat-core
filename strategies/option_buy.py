@@ -93,6 +93,7 @@ class OptionBuyStrategy(StrategyBase):
         super().__init__(config, data_manager, execution_manager)
         # All config access should use self.cfg (the StrategyConfig dataclass)
         self.symbol = self.cfg.symbol
+        self.name = "OptionBuy"
         self.exchange = self.cfg.exchange
         self.instrument = self.cfg.instrument
         self.trade = self.cfg.trade
@@ -159,6 +160,7 @@ class OptionBuyStrategy(StrategyBase):
         history_data = await fetch_option_chain_and_first_candle_history(
             self.dp, symbol, interval_minutes, max_strikes, from_date, to_date, bot_name="OptionBuy"
         )
+
         if not history_data or all(h is None for h in history_data):
             history_data = None
         ce_strike, pe_strike = identify_strike_price_combined(history_data=history_data, max_premium=max_premium)

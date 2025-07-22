@@ -369,6 +369,7 @@ class BrokerManager:
                             ).dict()
                             continue
                         if not margin_ok:
+                            logger.warning(f"Insufficient margin for {broker_name} on {order_payload.symbol}")
                             results[broker_name] = OrderResponse(
                                 status=OrderStatus.FAILED,
                                 order_id="",
