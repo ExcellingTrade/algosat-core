@@ -20,6 +20,7 @@ class OrderMonitor:
         data_manager: DataManager,
         order_manager: OrderManager,
         order_cache: OrderCache,  # new dependency
+        strategy_instance=None,  # strategy instance for shared usage
         price_order_monitor_seconds: float = 60.0,  # 1 minute default
         signal_monitor_seconds: int = None  # will be set from strategy config
     ):
@@ -27,6 +28,7 @@ class OrderMonitor:
         self.data_manager: DataManager = data_manager
         self.order_manager: OrderManager = order_manager
         self.order_cache: OrderCache = order_cache
+        self.strategy_instance = strategy_instance  # Store strategy instance
         self.price_order_monitor_seconds: float = price_order_monitor_seconds
         self.signal_monitor_seconds: int = signal_monitor_seconds
                 # --- Add position cache fields ---
@@ -40,6 +42,44 @@ class OrderMonitor:
         # Unified cache: order_id -> (order, strategy_symbol, strategy)
         self._order_strategy_cache = {}
         # self._db_session = None  # Will be set when needed
+
+    def get_strategy_instance(self):
+        """
+        Get the strategy instance if available, otherwise return None.
+        This allows methods to use the live strategy instance when available
+        for better performance and access to runtime state.
+        """
+        return self.strategy_instance
+
+    async def call_strategy_method(self, method_name, *args, **kwargs):
+        """
+        Call a method on the strategy instance if available, otherwise return None.
+        This provides a way to use live strategy methods when the instance is available.
+        
+        Args:
+            method_name: Name of the method to call on the strategy
+            *args, **kwargs: Arguments to pass to the method
+            
+        Returns:
+            The result of the method call, or None if strategy instance is not available
+        """
+        if self.strategy_instance is None:
+            logger.debug(f"OrderMonitor: No strategy instance available for method '{method_name}'")
+            return None
+            
+        if not hasattr(self.strategy_instance, method_name):
+            logger.warning(f"OrderMonitor: Strategy instance does not have method '{method_name}'")
+            return None
+            
+        try:
+            method = getattr(self.strategy_instance, method_name)
+            result = method(*args, **kwargs)
+            if asyncio.iscoroutine(result):
+                return await result
+            return result
+        except Exception as e:
+            logger.error(f"OrderMonitor: Error calling strategy method '{method_name}': {e}", exc_info=True)
+            return None
 
     async def _get_order_and_strategy(self, order_id: int):
         """
@@ -705,7 +745,8 @@ class OrderMonitor:
                 # fallback default
                 self.signal_monitor_seconds = 5 * 60
         logger.info(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_seconds}s)")
-        await asyncio.gather(self._price_order_monitor())  #, self._signal_monitor())
+        # await asyncio.gather(self._price_order_monitor())  #, self._signal_monitor())
+        await asyncio.gather( self._signal_monitor())
 
     def stop(self) -> None:
         self._running = False

@@ -33,3 +33,4 @@ class TradeSignal:
     entry_spot_swing_low: float = None
     stoploss_spot_level: float = None
     target_spot_level: float = None
+    entry_rsi: float = None

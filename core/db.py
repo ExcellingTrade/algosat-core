@@ -2110,3 +2110,41 @@ async def get_open_orders_for_today(session):
     )
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_order_with_strategy_config(session: AsyncSession, order_id: int):
+    """
+    Get order details along with strategy configuration information.
+    This is used to reconstruct strategy instances for existing orders.
+    """
+    from algosat.core.dbschema import orders, strategy_symbols, strategy_configs, strategies
+    
+    stmt = (
+        select(
+            orders.c.id.label('order_id'),
+            orders.c.strategy_symbol_id,
+            orders.c.strike_symbol,
+            orders.c.status,
+            strategy_symbols.c.id.label('symbol_id'),
+            strategy_symbols.c.symbol,
+            strategy_configs.c.exchange,
+            strategy_configs.c.instrument,
+            strategy_configs.c.id.label('config_id'),
+            strategy_configs.c.name.label('config_name'),
+            strategy_configs.c.description.label('config_description'),
+            strategy_configs.c.trade.label('trade_config'),
+            strategy_configs.c.indicators.label('indicators_config'),
+            strategies.c.id.label('strategy_id'),
+            strategies.c.name.label('strategy_name'),
+            strategies.c.key.label('strategy_key'),
+            strategies.c.order_type,
+            strategies.c.product_type
+        )
+        .join(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
+        .join(strategy_configs, strategy_symbols.c.config_id == strategy_configs.c.id)
+        .join(strategies, strategy_configs.c.strategy_id == strategies.c.id)
+        .where(orders.c.id == order_id)
+    )
+    
+    result = await session.execute(stmt)
+    row = result.first()
+    return dict(row._mapping) if row else None

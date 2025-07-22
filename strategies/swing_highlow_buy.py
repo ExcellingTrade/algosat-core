@@ -15,6 +15,33 @@ import asyncio
 
 logger = get_logger(__name__)
 
+def get_nse_holidays():
+    """Get NSE holiday list - fallback implementation"""
+    try:
+        # Try to import from the actual location first
+        from algosat.api.routes.nse_data import get_nse_holiday_list
+        return get_nse_holiday_list()
+    except ImportError:
+        # Fallback to basic weekend check
+        logger.warning("NSE holiday data not available, using basic weekend check")
+        return []
+
+def is_holiday_or_weekend(check_date):
+    """
+    Check if given date is a holiday or weekend.
+    """
+    try:
+        # Check weekend (Saturday = 5, Sunday = 6)
+        if check_date.weekday() >= 5:
+            return True
+        
+        # Check holidays
+        holidays = get_nse_holidays()
+        return check_date.date() if hasattr(check_date, 'date') else check_date in holidays
+    except Exception as e:
+        logger.error(f"Error checking holiday/weekend: {e}")
+        return False
+
 class SwingHighLowBuyStrategy(StrategyBase):
 
     async def sync_open_positions(self):
@@ -66,10 +93,11 @@ class SwingHighLowBuyStrategy(StrategyBase):
         self._confirm_cfg = self.trade.get("confirmation", {})
         self.entry_timeframe = self._entry_cfg.get("timeframe", "5m")
         self.entry_minutes = int(self.entry_timeframe.replace("m", "")) if self.entry_timeframe.endswith("m") else 5
+        self.stoploss_timeframe = self._stoploss_cfg.get("timeframe", "5m")
+        self.stoploss_minutes = int(self.stoploss_timeframe.replace("m", "")) if self.stoploss_timeframe.endswith("m") else 5
         self.entry_swing_left_bars = self._entry_cfg.get("swing_left_bars", 3)
         self.entry_swing_right_bars = self._entry_cfg.get("swing_right_bars", 3)
         self.entry_buffer = self._entry_cfg.get("entry_buffer", 0)
-        self.stop_timeframe = self._stoploss_cfg.get("timeframe", "5m")
         self.stop_percentage = self._stoploss_cfg.get("percentage", 0.05)
         self.confirm_timeframe = self._confirm_cfg.get("timeframe", "1m")
         self.confirm_minutes = int(self.confirm_timeframe.replace("m", "")) if self.confirm_timeframe.endswith("m") else 1
@@ -93,7 +121,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             # All config fields are set in __init__, nothing else to do.
             logger.info(
                 f"SwingHighLowBuyStrategy setup: symbol={self.symbol}, "
-                f"entry_timeframe={self.entry_timeframe}, stop_timeframe={self.stop_timeframe}, "
+                f"entry_timeframe={self.entry_timeframe}, stop_timeframe={self.stoploss_timeframe}, "
                 f"entry_swing_left_bars={self.entry_swing_left_bars}, entry_swing_right_bars={self.entry_swing_right_bars}, "
                 f"entry_buffer={self.entry_buffer}, confirm_timeframe={self.confirm_timeframe}, "
                 f"confirm_candles={self.confirm_candles}, ce_lot_qty={self.ce_lot_qty}, lot_size={self.lot_size}, "
@@ -342,12 +370,16 @@ class SwingHighLowBuyStrategy(StrategyBase):
             logger.debug(f"No signal for {strike}.")
             return None
 
-    # The dual timeframe breakout logic is now handled directly in process_cycle.
-    # The previous single-timeframe breakout evaluate_signal is obsolete and removed.
 
     async def evaluate_exit(self, order_row):
         """
-        Evaluate exit for a given order_row.
+        Evaluate exit for a given order_row with prioritized exit conditions:
+        1. Next Day Stoploss Update (first, but don't exit immediately)
+        2. Stop Loss Check (with potentially updated stoploss)
+        3. Target Achievement 
+        4. Swing High/Low Stoploss Update
+        5. Holiday Exit
+        
         Args:
             order_row: The order dict (from DB).
         Returns:
@@ -358,50 +390,470 @@ class SwingHighLowBuyStrategy(StrategyBase):
             if not strike_symbol:
                 logger.error("evaluate_exit: Missing strike_symbol in order_row.")
                 return False
-            # Use the spot symbol for spot-level stoploss checks
+                
+            order_id = order_row.get('id') or order_row.get('order_id')
+            logger.info(f"evaluate_exit: Checking exit conditions for order_id={order_id}, strike={strike_symbol}")
+            
+            # Use the spot symbol for spot-level checks
             spot_symbol = self.symbol
             trade_config = self.trade
-            # Fetch recent candle history for the strike symbol (option or spot)
-            from algosat.common.strategy_utils import fetch_instrument_history
-            # For swing_highlow_buy, the strike_symbol may be spot, so fetch accordingly
-            history_dict = await fetch_instrument_history(
-                self.dp,
-                [strike_symbol],
-                interval_minutes=self.entry_minutes,
-                ins_type="",
-                cache=False
+            
+            # Fetch recent candle history for spot price checks
+            history_dict = await self.fetch_history_data(
+                self.dp, [spot_symbol], self.stoploss_minutes
             )
-            history_df = history_dict.get(str(strike_symbol))
+            history_df = history_dict.get(str(spot_symbol))
             if history_df is None or len(history_df) < 2:
-                logger.warning(f"evaluate_exit: Not enough history for {strike_symbol}.")
+                logger.warning(f"evaluate_exit: Not enough history for {spot_symbol}.")
                 return False
-            # --- Trailing stoploss logic (stub for future extension) ---
-            if trade_config.get("trailing_stoploss_enabled", False):
-                # Implement future trailing stoploss logic here (see option_buy.py)
-                pass
-            # --- Price-based stoploss using spot-levels ---
-            # If order_row contains a stoploss_spot_level, compare with current spot LTP
+                
+            # Get current spot price
+            current_spot_price = history_df.iloc[-1].get("close") 
+            if current_spot_price is None:
+                logger.error(f"evaluate_exit: Could not get current spot price for {spot_symbol}")
+                return False
+            
+            logger.info(f"evaluate_exit: Current spot price={current_spot_price} for order_id={order_id}")
+            
+            # Initialize stoploss from order (will be updated if next day)
             stoploss_spot_level = order_row.get("stoploss_spot_level")
-            if stoploss_spot_level is not None:
-                # Fetch spot LTP (last close of spot symbol)
-                spot_history_dict = await fetch_instrument_history(
-                    self.dp,
-                    [spot_symbol],
-                    interval_minutes=1,
-                    ins_type="",
-                    cache=False
-                )
-                spot_df = spot_history_dict.get(str(spot_symbol))
-                if spot_df is not None and len(spot_df) > 0:
-                    spot_ltp = spot_df.iloc[-1].get("close") or spot_df.iloc[-1].get("ltp")
-                    if spot_ltp is not None and float(spot_ltp) <= float(stoploss_spot_level):
-                        logger.info(f"evaluate_exit: Spot stoploss triggered for {strike_symbol}. Spot LTP {spot_ltp} <= stoploss_spot_level {stoploss_spot_level}. Exit signal triggered.")
+            target_spot_level = order_row.get("target_spot_level")
+            signal_direction = order_row.get("signal_direction") or order_row.get("direction", "").upper()
+            
+            # PRIORITY 1: NEXT DAY STOPLOSS UPDATE (UPDATE ONLY, DON'T EXIT)
+            carry_forward_config = trade_config.get("carry_forward", {})
+            if carry_forward_config.get("enabled", False):
+                try:
+                    from algosat.core.time_utils import get_ist_datetime
+                    from algosat.common.broker_utils import get_trade_day
+                    
+                    # Get order entry date and current date
+                    current_datetime = get_ist_datetime()
+                    current_trade_day = get_trade_day(current_datetime)
+                    
+                    # Get order entry date
+                    order_timestamp = order_row.get("signal_time") or order_row.get("created_at") or order_row.get("timestamp")
+                    if order_timestamp:
+                        if isinstance(order_timestamp, str):
+                            from datetime import datetime
+                            order_datetime = datetime.fromisoformat(order_timestamp.replace('Z', '+00:00'))
+                        else:
+                            order_datetime = order_timestamp
+                        
+                        order_trade_day = get_trade_day(order_datetime)
+                        
+                        # Check if it's next trading day
+                        if current_trade_day > order_trade_day:
+                            # Calculate first candle completion time based on stoploss timeframe
+                            market_open_time = current_datetime.replace(hour=9, minute=15, second=0, microsecond=0)
+                            first_candle_end_time = market_open_time + timedelta(minutes=self.stoploss_minutes)
+                            
+                            logger.info(f"evaluate_exit: Next day detected - order_id={order_id}, entry_day={order_trade_day}, current_day={current_trade_day}, first_candle_end_time={first_candle_end_time}, current_time={current_datetime}")
+                            
+                            # Check if first candle of the day is completed
+                            if current_datetime >= first_candle_end_time:
+                                # Get first candle data to update stoploss
+                                first_candle_history = await self.fetch_history_data(
+                                    self.dp, [spot_symbol], self.stoploss_minutes
+                                )
+                                first_candle_df = first_candle_history.get(str(spot_symbol))
+                                
+                                if first_candle_df is not None and len(first_candle_df) > 0:
+                                    # Get today's first candle (9:15 - first_candle_end_time)
+                                    first_candle_df['timestamp'] = pd.to_datetime(first_candle_df['timestamp'])
+                                    today_candles = first_candle_df[
+                                        (first_candle_df['timestamp'] >= market_open_time) & 
+                                        (first_candle_df['timestamp'] <= first_candle_end_time)
+                                    ]
+                                    
+                                    if len(today_candles) > 0:
+                                        first_candle = today_candles.iloc[0]  # First candle of the day
+                                        first_candle_open = first_candle.get("open")
+                                        current_stoploss = stoploss_spot_level  # Current stoploss (could be swing low/high)
+                                        
+                                        # Check if market opened beyond current stoploss and update accordingly
+                                        should_update_stoploss = False
+                                        
+                                        if signal_direction == "UP":  # CE trade
+                                            # For CE: Update stoploss if market opened below current stoploss
+                                            if first_candle_open and current_stoploss and first_candle_open < float(current_stoploss):
+                                                should_update_stoploss = True
+                                                updated_stoploss = first_candle.get("low")
+                                                update_reason = f"market opened {first_candle_open} below stoploss {current_stoploss}"
+                                            
+                                        elif signal_direction == "DOWN":  # PE trade  
+                                            # For PE: Update stoploss if market opened above current stoploss
+                                            if first_candle_open and current_stoploss and first_candle_open > float(current_stoploss):
+                                                should_update_stoploss = True
+                                                updated_stoploss = first_candle.get("high")
+                                                update_reason = f"market opened {first_candle_open} above stoploss {current_stoploss}"
+                                        
+                                        if should_update_stoploss and updated_stoploss:
+                                            stoploss_spot_level = updated_stoploss  # Update for subsequent checks
+                                            logger.info(f"evaluate_exit: Next day {signal_direction} - UPDATED stoploss to first candle {'low' if signal_direction == 'UP' else 'high'} {updated_stoploss} (was {current_stoploss}) - {update_reason}")
+                                            # Update DB with new stoploss
+                                            await self.update_stoploss_in_db(order_id, updated_stoploss)
+                                        else:
+                                            logger.info(f"evaluate_exit: Next day - Stoploss NOT updated. Market opened at {first_candle_open}, current stoploss={current_stoploss}, direction={signal_direction}")
+                                else:
+                                    logger.warning(f"evaluate_exit: Could not get first candle data for next day stoploss update")
+                            else:
+                                logger.info(f"evaluate_exit: Waiting for first candle completion. Current: {current_datetime}, First candle ends: {first_candle_end_time}")
+                                
+                except Exception as e:
+                    logger.error(f"Error in next day stoploss update logic: {e}")
+            
+            # PRIORITY 2: TWO-CANDLE STOPLOSS CONFIRMATION CHECK
+            if stoploss_spot_level is not None and len(history_df) >= 2:
+                # Get last two candles for confirmation
+                last_two_candles = history_df.tail(2)
+                prev_candle = last_two_candles.iloc[0]
+                current_candle = last_two_candles.iloc[1]
+                
+                # Two-candle confirmation logic
+                if signal_direction == "UP":  # CE trade
+                    # Check: prev_candle below stoploss AND current_candle below prev_candle
+                    if (prev_candle.get("close", 0) < float(stoploss_spot_level) and 
+                        current_candle.get("close", 0) < prev_candle.get("close", 0)):
+                        
+                        logger.info(f"evaluate_exit: TWO-CANDLE STOPLOSS confirmed for CE trade. order_id={order_id}, "
+                                  f"prev_candle={prev_candle.get('close')} < stoploss={stoploss_spot_level}, "
+                                  f"current_candle={current_candle.get('close')} < prev_candle={prev_candle.get('close')}")
                         return True
-            # --- Other exit logic can be added here ---
+                        
+                elif signal_direction == "DOWN":  # PE trade
+                    # Check: prev_candle above stoploss AND current_candle above prev_candle
+                    if (prev_candle.get("close", 0) > float(stoploss_spot_level) and 
+                        current_candle.get("close", 0) > prev_candle.get("close", 0)):
+                        
+                        logger.info(f"evaluate_exit: TWO-CANDLE STOPLOSS confirmed for PE trade. order_id={order_id}, "
+                                  f"prev_candle={prev_candle.get('close')} > stoploss={stoploss_spot_level}, "
+                                  f"current_candle={current_candle.get('close')} > prev_candle={prev_candle.get('close')}")
+                        return True
+            
+            # PRIORITY 3: TARGET ACHIEVEMENT CHECK
+            if target_spot_level is not None:
+                # Check target based on trade direction
+                if signal_direction == "UP":  # CE trade
+                    if float(current_spot_price) >= float(target_spot_level):
+                        logger.info(f"evaluate_exit: TARGET achieved for CE trade. order_id={order_id}, spot_price={current_spot_price} >= target={target_spot_level}")
+                        return True
+                elif signal_direction == "DOWN":  # PE trade
+                    if float(current_spot_price) <= float(target_spot_level):
+                        logger.info(f"evaluate_exit: TARGET achieved for PE trade. order_id={order_id}, spot_price={current_spot_price} <= target={target_spot_level}")
+                        return True
+            
+            # PRIORITY 4: SWING HIGH/LOW STOPLOSS UPDATE
+            try:
+                # Calculate latest swing high/low from current history data
+                if len(history_df) >= 10:  # Need enough data for swing calculation
+                    swing_df = swing_utils.find_hhlh_pivots(
+                        history_df,
+                        left_bars=self.entry_swing_left_bars,
+                        right_bars=self.entry_swing_right_bars
+                    )
+                    latest_hh, latest_ll = swing_utils.get_latest_confirmed_high_low(swing_df)
+                    
+                    if latest_hh and latest_ll:
+                        new_stoploss = None
+                        if signal_direction == "UP":  # CE trade
+                            # New stoploss is latest swing low, but take max of current and new
+                            latest_swing_low = latest_ll["price"]
+                            if stoploss_spot_level:
+                                new_stoploss = max(float(stoploss_spot_level), float(latest_swing_low))
+                            else:
+                                new_stoploss = float(latest_swing_low)
+                                
+                            if new_stoploss != float(stoploss_spot_level):
+                                logger.info(f"evaluate_exit: CE - Updated stoploss from {stoploss_spot_level} to {new_stoploss} (latest swing low)")
+                                stoploss_spot_level = new_stoploss
+                                await self.update_stoploss_in_db(order_id, new_stoploss)
+                                
+                        elif signal_direction == "DOWN":  # PE trade
+                            # New stoploss is latest swing high, but take min of current and new
+                            latest_swing_high = latest_hh["price"]
+                            if stoploss_spot_level:
+                                new_stoploss = min(float(stoploss_spot_level), float(latest_swing_high))
+                            else:
+                                new_stoploss = float(latest_swing_high)
+                                
+                            if new_stoploss != float(stoploss_spot_level):
+                                logger.info(f"evaluate_exit: PE - Updated stoploss from {stoploss_spot_level} to {new_stoploss} (latest swing high)")
+                                stoploss_spot_level = new_stoploss
+                                await self.update_stoploss_in_db(order_id, new_stoploss)
+                                
+            except Exception as e:
+                logger.error(f"Error in swing high/low stoploss update: {e}")
+            
+            # PRIORITY 5: NEXT DAY SWING EXIT (Check last two candles for swing breach)
+            carry_forward_config = trade_config.get("carry_forward", {})
+            if carry_forward_config.get("enabled", False):
+                try:
+                    from algosat.core.time_utils import get_ist_datetime
+                    from algosat.common.broker_utils import get_trade_day
+                    
+                    # Get order entry date and current date
+                    current_datetime = get_ist_datetime()
+                    current_trade_day = get_trade_day(current_datetime)
+                    
+                    # Get order entry date
+                    order_timestamp = order_row.get("signal_time") or order_row.get("created_at") or order_row.get("timestamp")
+                    if order_timestamp:
+                        if isinstance(order_timestamp, str):
+                            from datetime import datetime
+                            order_datetime = datetime.fromisoformat(order_timestamp.replace('Z', '+00:00'))
+                        else:
+                            order_datetime = order_timestamp
+                        
+                        order_trade_day = get_trade_day(order_datetime)
+                        
+                        # Check if it's next trading day
+                        if current_trade_day > order_trade_day:
+                            # Calculate first candle completion time
+                            market_open_time = current_datetime.replace(hour=9, minute=15, second=0, microsecond=0)
+                            first_candle_end_time = market_open_time + timedelta(minutes=self.stoploss_minutes)
+                            
+                            # Get history data AFTER first candle completion time
+                            post_first_candle_history = await self.fetch_history_data(
+                                self.dp, [spot_symbol], self.stoploss_minutes
+                            )
+                            post_first_candle_df = post_first_candle_history.get(str(spot_symbol))
+                            
+                            if post_first_candle_df is not None and len(post_first_candle_df) > 0:
+                                # Filter to get data after first candle end time
+                                post_first_candle_df['timestamp'] = pd.to_datetime(post_first_candle_df['timestamp'])
+                                post_first_candle_df = post_first_candle_df[
+                                    post_first_candle_df['timestamp'] > first_candle_end_time
+                                ].copy()
+                                
+                                # Check if we have at least 2 candles post first candle
+                                if len(post_first_candle_df) >= 2:
+                                    # Check last two candles for stoploss breach confirmation
+                                    last_two_candles = post_first_candle_df.tail(2)
+                                    prev_candle = last_two_candles.iloc[0]
+                                    current_candle = last_two_candles.iloc[1]
+                                    
+                                    # Use current stoploss level (updated by PRIORITY 1 and 4)
+                                    current_stoploss = stoploss_spot_level
+                                    
+                                    if signal_direction == "UP":  # CE trade
+                                        # Two-candle confirmation: prev_candle below stoploss AND current_candle below prev_candle
+                                        if (current_stoploss and
+                                            prev_candle.get("close", 0) < float(current_stoploss) and 
+                                            current_candle.get("close", 0) < prev_candle.get("close", 0)):
+                                            
+                                            logger.info(f"evaluate_exit: NEXT DAY TWO-CANDLE STOPLOSS for CE trade. order_id={order_id}, "
+                                                      f"prev_candle={prev_candle.get('close')} < stoploss={current_stoploss}, "
+                                                      f"current_candle={current_candle.get('close')} < prev_candle={prev_candle.get('close')} (post-first-candle)")
+                                            return True
+                                            
+                                    elif signal_direction == "DOWN":  # PE trade
+                                        # Two-candle confirmation: prev_candle above stoploss AND current_candle above prev_candle
+                                        if (current_stoploss and
+                                            prev_candle.get("close", 0) > float(current_stoploss) and 
+                                            current_candle.get("close", 0) > prev_candle.get("close", 0)):
+                                            
+                                            logger.info(f"evaluate_exit: NEXT DAY TWO-CANDLE STOPLOSS for PE trade. order_id={order_id}, "
+                                                      f"prev_candle={prev_candle.get('close')} > stoploss={current_stoploss}, "
+                                                      f"current_candle={current_candle.get('close')} > prev_candle={prev_candle.get('close')} (post-first-candle)")
+                                            return True
+                                else:
+                                    logger.debug(f"evaluate_exit: Not enough post-first-candle data for swing exit check. Need 2, have {len(post_first_candle_df)}")
+                            else:
+                                logger.warning(f"evaluate_exit: Could not get post-first-candle history data for swing exit check")
+                                
+                except Exception as e:
+                    logger.error(f"Error in next day swing exit logic: {e}")
+            
+            # PRIORITY 6: HOLIDAY EXIT CHECK
+            holiday_exit_config = trade_config.get("holiday_exit", {})
+            if holiday_exit_config.get("enabled", False):
+                try:
+                    from algosat.core.time_utils import get_ist_datetime
+                    
+                    current_datetime = get_ist_datetime()
+                    exit_before_days = holiday_exit_config.get("exit_before_days", 0)
+                    
+                    # Check next few days for holidays
+                    from datetime import timedelta
+                    for i in range(1, exit_before_days + 2):  # Check tomorrow and day after
+                        check_date = current_datetime + timedelta(days=i)
+                        
+                        if is_holiday_or_weekend(check_date):
+                            # Check if current time is after exit time
+                            exit_time = holiday_exit_config.get("exit_time", "14:30")
+                            try:
+                                exit_hour, exit_minute = map(int, exit_time.split(":"))
+                                exit_datetime = current_datetime.replace(
+                                    hour=exit_hour, minute=exit_minute, second=0, microsecond=0
+                                )
+                                
+                                if current_datetime >= exit_datetime:
+                                    logger.info(f"evaluate_exit: HOLIDAY exit triggered. order_id={order_id}, upcoming_holiday={check_date.strftime('%Y-%m-%d')}, time={current_datetime.strftime('%H:%M')}")
+                                    return True
+                            except Exception as e:
+                                logger.error(f"Error parsing holiday exit time {exit_time}: {e}")
+                            break  # Exit on first holiday found
+                                
+                except Exception as e:
+                    logger.error(f"Error in holiday exit logic: {e}")
+            
+            # PRIORITY 7: RSI-based exit (optional)
+            target_cfg = trade_config.get("target", {})
+            rsi_exit_config = target_cfg.get("rsi_exit", {})
+            if rsi_exit_config.get("enabled", False):
+                try:
+                    from algosat.utils.indicators import calculate_rsi
+                    
+                    # Fetch fresh data using entry timeframe for RSI consistency
+                    rsi_history_dict = await self.fetch_history_data(
+                        self.dp, [spot_symbol], self.entry_minutes
+                    )
+                    rsi_history_df = rsi_history_dict.get(str(spot_symbol))
+                    
+                    if rsi_history_df is not None and len(rsi_history_df) > 0:
+                        # Calculate RSI on entry timeframe data
+                        rsi_period = rsi_exit_config.get("rsi_period", self.rsi_period or 14)
+                        rsi_df = calculate_rsi(rsi_history_df, rsi_period)
+                        
+                        if "rsi" in rsi_df.columns and len(rsi_df) > 0:
+                            current_rsi = rsi_df["rsi"].iloc[-1]
+                            entry_rsi = order_row.get("entry_rsi")
+                            
+                            logger.info(f"evaluate_exit: RSI check - current_rsi={current_rsi}, entry_rsi={entry_rsi}, direction={signal_direction}")
+                            
+                            # RSI exit logic with ignore conditions
+                            if signal_direction == "UP":  # CE trade
+                                target_level = rsi_exit_config.get("ce_target_level", 60)
+                                ignore_above = rsi_exit_config.get("ce_ignore_above", 80)
+                                
+                                # Check ignore condition: if entry RSI was above ignore threshold, skip RSI exit
+                                if entry_rsi is not None and float(entry_rsi) >= ignore_above:
+                                    logger.info(f"evaluate_exit: RSI exit IGNORED for CE trade - entry_rsi={entry_rsi} >= ignore_above={ignore_above}")
+                                    # Don't trigger RSI exit, continue to other checks
+                                else:
+                                    # Normal RSI exit logic
+                                    if current_rsi >= target_level:
+                                        logger.info(f"evaluate_exit: RSI exit for CE trade. order_id={order_id}, rsi={current_rsi} >= target_level={target_level}")
+                                        return True
+                                        
+                            elif signal_direction == "DOWN":  # PE trade
+                                target_level = rsi_exit_config.get("pe_target_level", 20)
+                                ignore_below = rsi_exit_config.get("pe_ignore_below", 10)
+                                
+                                # Check ignore condition: if entry RSI was below ignore threshold, skip RSI exit
+                                if entry_rsi is not None and float(entry_rsi) <= ignore_below:
+                                    logger.info(f"evaluate_exit: RSI exit IGNORED for PE trade - entry_rsi={entry_rsi} <= ignore_below={ignore_below}")
+                                    # Don't trigger RSI exit, continue to other checks
+                                else:
+                                    # Normal RSI exit logic
+                                    if current_rsi <= target_level:
+                                        logger.info(f"evaluate_exit: RSI exit for PE trade. order_id={order_id}, rsi={current_rsi} <= target_level={target_level}")
+                                        return True
+                        else:
+                            logger.warning(f"evaluate_exit: Could not calculate current RSI - missing RSI column")
+                    else:
+                        logger.warning(f"evaluate_exit: Could not fetch history data for RSI calculation")
+                                
+                except Exception as e:
+                    logger.error(f"Error in RSI exit logic: {e}")
+            
+            # No exit condition met
+            logger.debug(f"evaluate_exit: No exit condition met for order_id={order_id}")
             return False
+            
         except Exception as e:
             logger.error(f"Error in evaluate_exit for order_id={order_row.get('id')}: {e}", exc_info=True)
             return False
+    
+    def update_stoploss_in_db(self, order_id, new_stoploss):
+        """Update stoploss level in database"""
+        try:
+            from algosat.core.db import AsyncSessionLocal
+            with AsyncSessionLocal as session:
+                # Update orders table with new stoploss
+                query = "UPDATE orders SET stoploss_spot_level = %s WHERE id = %s"
+                session.execute(query, (float(new_stoploss), order_id))
+                session.commit()
+                logger.info(f"Updated stoploss in DB: order_id={order_id}, new_stoploss={new_stoploss}")
+        except Exception as e:
+            logger.error(f"Error updating stoploss in DB for order_id={order_id}: {e}")
+    
+    def update_target_in_db(self, order_id, new_target):
+        """Update target level in database"""
+        try:
+            from algosat.core.db import AsyncSessionLocal
+            with AsyncSessionLocal as session:
+                # Update orders table with new target
+                query = "UPDATE orders SET target_spot_level = %s WHERE id = %s"
+                session.execute(query, (float(new_target), order_id))
+                session.commit()
+                logger.info(f"Updated target in DB: order_id={order_id}, new_target={new_target}")
+        except Exception as e:
+            logger.error(f"Error updating target in DB for order_id={order_id}: {e}")
+    
+    def update_swing_levels_in_db(self, order_id, swing_high=None, swing_low=None):
+        """Update swing high/low levels in database"""
+        try:
+            from algosat.core.db import AsyncSessionLocal
+            with AsyncSessionLocal as session:
+                # Build dynamic query based on provided parameters
+                update_fields = []
+                params = []
+                
+                if swing_high is not None:
+                    update_fields.append("entry_spot_swing_high = %s")
+                    params.append(float(swing_high))
+                
+                if swing_low is not None:
+                    update_fields.append("entry_spot_swing_low = %s")
+                    params.append(float(swing_low))
+                
+                if update_fields:
+                    query = f"UPDATE orders SET {', '.join(update_fields)} WHERE id = %s"
+                    params.append(order_id)
+                    session.execute(query, params)
+                    session.commit()
+                    logger.info(f"Updated swing levels in DB: order_id={order_id}, swing_high={swing_high}, swing_low={swing_low}")
+        except Exception as e:
+            logger.error(f"Error updating swing levels in DB for order_id={order_id}: {e}")
+    
+    def update_entry_rsi_in_db(self, order_id, entry_rsi):
+        """Update entry RSI level in database"""
+        try:
+            from algosat.core.db import AsyncSessionLocal
+            with AsyncSessionLocal as session:
+                # Update orders table with entry RSI
+                query = "UPDATE orders SET entry_rsi = %s WHERE id = %s"
+                session.execute(query, (float(entry_rsi), order_id))
+                session.commit()
+                logger.info(f"Updated entry_rsi in DB: order_id={order_id}, entry_rsi={entry_rsi}")
+        except Exception as e:
+            logger.error(f"Error updating entry_rsi in DB for order_id={order_id}: {e}")
+    
+    async def update_exit_status_in_db(self, order_id, exit_result):
+        """
+        Update the order exit status in database when exit is triggered.
+        Args:
+            order_id: The order ID to update
+            exit_result: Dict containing exit information from evaluate_exit
+        """
+        try:
+            from algosat.core.db import AsyncSessionLocal
+            from algosat.core.db import update_order_exit_status
+            
+            async with AsyncSessionLocal() as session:
+                await update_order_exit_status(
+                    session, 
+                    order_id, 
+                    exit_reason=exit_result.get('exit_reason'),
+                    exit_price=exit_result.get('exit_price'),
+                    exit_metadata=exit_result
+                )
+                logger.info(f"Updated exit status in DB for order_id={order_id}, reason={exit_result.get('exit_reason')}")
+                
+        except Exception as e:
+            logger.error(f"Error updating exit status in DB for order_id={order_id}: {e}", exc_info=True)
         
     async def evaluate_signal(self, entry_df, confirm_df, config) -> Optional[TradeSignal]:
         """
@@ -483,9 +935,9 @@ class SwingHighLowBuyStrategy(StrategyBase):
             target_cfg = config.get("target", {})
             target_type = target_cfg.get("type", "ATR")
             if target_type == "ATR":
-                # Calculate ATR on 5m candle timeframe
+                # Calculate ATR on entry timeframe (5m default)
                 atr_period = target_cfg.get("atr_period", 14)
-                atr_multiplier = target_cfg.get("atr_multiplier", 1)
+                atr_multiplier = target_cfg.get("atr_multiplier", 3)  # Default to 3x ATR
                 # Defensive: ensure entry_df has enough data
                 atr_value = None
                 try:
@@ -495,13 +947,45 @@ class SwingHighLowBuyStrategy(StrategyBase):
                         atr_value = atr_df["atr"].iloc[-1]
                 except Exception as e:
                     logger.error(f"Error calculating ATR for target: {e}")
+                
                 if atr_value is not None:
-                    target_spot_level = float(entry_spot_price) + float(atr_value) * float(atr_multiplier)
+                    if breakout_type == "CE":
+                        # For CE: Target = swing_high + (ATR * multiplier)
+                        target_spot_level = float(entry_spot_swing_high) + (float(atr_value) * float(atr_multiplier))
+                    else:
+                        # For PE: Target = swing_low - (ATR * multiplier)
+                        target_spot_level = float(entry_spot_swing_low) - (float(atr_value) * float(atr_multiplier))
+                else:
+                    logger.warning("Could not calculate ATR for target, using fallback")
+                    target_spot_level = None
             elif target_type == "fixed":
                 fixed_points = target_cfg.get("fixed_points", 0)
-                target_spot_level = float(entry_spot_price) + float(fixed_points)
+                if breakout_type == "CE":
+                    # For CE: Target = swing_high + fixed_points
+                    target_spot_level = float(entry_spot_swing_high) + float(fixed_points)
+                else:
+                    # For PE: Target = swing_low - fixed_points  
+                    target_spot_level = float(entry_spot_swing_low) - float(fixed_points)
+            else:
+                target_spot_level = None
 
-            logger.info(f"Breakout detected: type={breakout_type}, trend={trend}, direction={direction}, strike={strike}, price={last_candle['close']}, entry_spot_price={entry_spot_price}, entry_spot_swing_high={entry_spot_swing_high}, entry_spot_swing_low={entry_spot_swing_low}, stoploss_spot_level={stoploss_spot_level}, target_spot_level={target_spot_level}")
+            # Calculate entry RSI using entry timeframe
+            entry_rsi_value = None
+            try:
+                from algosat.utils.indicators import calculate_rsi
+                rsi_period = self.rsi_period or 14
+                
+                # Use entry timeframe data for RSI calculation to ensure consistency
+                rsi_df = calculate_rsi(entry_df, rsi_period)
+                if "rsi" in rsi_df.columns and len(rsi_df) > 0:
+                    entry_rsi_value = rsi_df["rsi"].iloc[-1]
+                    logger.info(f"Entry RSI calculated: {entry_rsi_value} (period={rsi_period})")
+                else:
+                    logger.warning("Could not calculate entry RSI - missing RSI column")
+            except Exception as e:
+                logger.error(f"Error calculating entry RSI: {e}")
+
+            logger.info(f"Breakout detected: type={breakout_type}, trend={trend}, direction={direction}, strike={strike}, price={last_candle['close']}, entry_spot_price={entry_spot_price}, entry_spot_swing_high={entry_spot_swing_high}, entry_spot_swing_low={entry_spot_swing_low}, stoploss_spot_level={stoploss_spot_level}, target_spot_level={target_spot_level}, entry_rsi={entry_rsi_value}, target_type={target_type}")
             from algosat.core.signal import Side
             signal = TradeSignal(
                 symbol=strike,
@@ -514,7 +998,8 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 entry_spot_swing_high=entry_spot_swing_high,
                 entry_spot_swing_low=entry_spot_swing_low,
                 stoploss_spot_level=stoploss_spot_level,
-                target_spot_level=target_spot_level
+                target_spot_level=target_spot_level,
+                entry_rsi=entry_rsi_value
             )
             logger.info(f"Breakout detected: type={breakout_type}, direction={direction}, strike={strike}, price={last_candle['close']}")
             return signal

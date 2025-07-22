@@ -184,6 +184,7 @@ orders = Table(
     Column("entry_spot_swing_low", Float, nullable=True),
     Column("stoploss_spot_level", Float, nullable=True),
     Column("target_spot_level", Float, nullable=True),
+    Column("entry_rsi", Float, nullable=True),  # RSI level at the time of entry
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 )
