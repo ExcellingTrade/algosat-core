@@ -779,6 +779,10 @@ async def get_all_orders(session: AsyncSession):
             orders.c.created_at,
             orders.c.updated_at,
             orders.c.executed_quantity,  # Add this line to select executed_quantity
+            strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
+        )
+        .select_from(
+            orders.outerjoin(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
         )
         .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
     )
@@ -867,9 +871,14 @@ async def get_orders_by_broker(session: AsyncSession, broker_name: str):
             orders.c.qty,
             orders.c.created_at,
             orders.c.updated_at,
+            orders.c.executed_quantity,  # Add this field
             broker_credentials.c.broker_name,
+            strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
         )
-        .select_from(orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id))
+        .select_from(
+            orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id)
+            .outerjoin(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
+        )
         .where(broker_credentials.c.broker_name == broker_name)
         .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
     )
@@ -940,9 +949,14 @@ async def get_orders_by_broker_and_strategy(session: AsyncSession, broker_name: 
             orders.c.qty,
             orders.c.created_at,
             orders.c.updated_at,
+            orders.c.executed_quantity,  # Add this field
             broker_credentials.c.broker_name,
+            strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
         )
-        .select_from(orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id))
+        .select_from(
+            orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id)
+            .outerjoin(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
+        )
         .where(broker_credentials.c.broker_name == broker_name)
         .where(orders.c.strategy_config_id == strategy_config_id)
         .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
