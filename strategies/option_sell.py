@@ -142,7 +142,7 @@ class OptionSellStrategy(StrategyBase):
         # Dynamically select max_premium (expiry_type is auto-detected inside)
         max_premium = get_max_premium_from_config(trade, symbol, today_dt)
         # 1. Wait for first candle completion
-        # await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
+        await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
         # 2. Calculate first candle data using the correct trade day
         trade_day = get_trade_day(get_ist_datetime())
         # 3. Fetch option chain and identify strikes
