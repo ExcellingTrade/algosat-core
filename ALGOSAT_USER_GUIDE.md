@@ -264,8 +264,8 @@ pm2 status
 pm2 logs --lines 10
 
 # Check if services are responding
-curl http://localhost:8000/health    # API health
-curl http://localhost:3000           # UI health
+curl http://82.25.109.188:8000/health    # API health
+curl http://82.25.109.188:3000           # UI health
 ```
 
 #### **Common Issues**
@@ -278,8 +278,8 @@ curl http://localhost:3000           # UI health
 
 ## Access Information
 
-- **Web Dashboard**: `http://localhost:3000` (or your server IP:3000)
-- **API Endpoint**: `http://localhost:8000` (for advanced integrations)
+- **Web Dashboard**: `http://82.25.109.188:3000` (or your server IP:3000)
+- **API Endpoint**: `http://82.25.109.188:8000` (for advanced integrations)
 - **Default Market Hours**: 9:15 AM to 3:30 PM (Indian Stock Market)
 
 ---

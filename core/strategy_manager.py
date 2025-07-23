@@ -17,6 +17,8 @@ from algosat.models.strategy_config import StrategyConfig
 from algosat.core.order_cache import OrderCache
 from algosat.strategies.option_buy import OptionBuyStrategy
 from algosat.strategies.swing_highlow_buy import SwingHighLowBuyStrategy
+from algosat.strategies.option_sell import OptionSellStrategy
+from algosat.strategies.swing_highlow_sell import SwingHighLowSellStrategy
 
 logger = get_logger("strategy_manager")
 
@@ -80,6 +82,8 @@ class MarketHours:
 STRATEGY_MAP = {
     "OptionBuy": OptionBuyStrategy,
     "SwingHighLowBuy": SwingHighLowBuyStrategy,
+    "OptionSell": OptionSellStrategy,
+    "SwingHighLowSell": SwingHighLowSellStrategy,
 }
 
 # Strategy instance cache - indexed by symbol_id for sharing between components
