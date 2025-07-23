@@ -1070,15 +1070,3 @@ class SwingHighLowBuyStrategy(StrategyBase):
         except Exception as e:
             logger.error(f"Error in evaluate_signal: {e}", exc_info=True)
             return None
-
-#    async def evaluate_price_exit(self, parent_order_id: int, last_price: float):
-#        """
-#        Exit based on price (stub for parity with option_buy.py).
-#        """
-#        return None
-#
-#    async def evaluate_candle_exit(self, parent_order_id: int, history: dict):
-#        """
-#        Exit based on candle history (stub for parity with option_buy.py).
-#        """
-#        return None

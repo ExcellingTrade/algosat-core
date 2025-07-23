@@ -505,38 +505,27 @@ class OptionSellStrategy(StrategyBase):
                     except Exception as e:
                         logger.error(f"Could not compute regime_reference: {e}")
                         regime_reference = {}
+                sideways_enabled = config.get('sideways_trade_enabled', False)
+                sideways_qty_perc = config.get('sideways_qty_percentage', 0)
+                option_type = "CE" if strike.endswith("CE") else "PE"
+                trade_dict = calculate_trade(curr, data, strike, config, side=Side.BUY)
+                lot_qty = trade_dict.get(constants.TRADE_KEY_LOT_QTY, 0)
                 regime = detect_regime(entry_price, regime_reference, option_type, "SELL")
                 logger.info(f"Regime detected for {strike}: {regime} (entry_price={entry_price}, option_type={option_type})")
-                # Adjust for sideways regime if enabled in config
-                sideways_trade_enabled = config.get("sideways_trade_enabled", False)
-                sideways_qty_pct = config.get("sideways_qty_percentage", 100)
-                sideways_target_atr_mult = config.get("sideways_target_atr_multiplier", 1.0)
-                orig_qty = config.get("quantity", 1)
-                orig_target_mult = config.get("atr_target_multiplier", 1)
-                adjusted_qty = orig_qty
-                adjusted_target_mult = orig_target_mult
-                # If sideways regime, adjust params
-                if regime == "sideways":
-                    if not sideways_trade_enabled or sideways_qty_pct == 0:
-                        logger.info(f"Skipping trade for {strike} due to sideways regime and config sideways_qty_percentage=0.")
+                if sideways_enabled and regime == "Sideways":
+                    if sideways_qty_perc == 0:
+                        logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, sideways_qty_percentage is 0, skipping trade.")
                         return None
-                    adjusted_qty = max(1, int(round(orig_qty * sideways_qty_pct / 100)))
-                    adjusted_target_mult = sideways_target_atr_mult
-                    logger.info(f"Sideways regime: adjusted lot_qty={adjusted_qty}, target_atr_multiplier={adjusted_target_mult}")
-                # --- End regime logic ---
-                # Calculate trade dict, passing adjusted_target_mult if needed
-                trade_dict = calculate_trade(curr, data, strike, config, side=Side.SELL)
+                    new_lot_qty = int(round(lot_qty * sideways_qty_perc / 100))
+                    if new_lot_qty == 0:
+                        logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, computed lot_qty is 0, skipping trade.")
+                        return None
+                    # Call calculate_trade again with target_atr_multiplier=1 and new lot_qty
+                    trade_dict = calculate_trade(curr, data, strike, config, side=Side.SELL, target_atr_multiplier=1)
+                    trade_dict[constants.TRADE_KEY_LOT_QTY] = new_lot_qty
+                    logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, updating lot_qty to {new_lot_qty} ({sideways_qty_perc}% of {lot_qty}) and using target_atr_multiplier=1")
+                
                 orig_target = trade_dict.get(constants.TRADE_KEY_TARGET_PRICE)
-                # Overwrite lot_qty and target if regime is sideways
-                trade_dict[constants.TRADE_KEY_LOT_QTY] = adjusted_qty
-                if regime == "sideways":
-                    try:
-                        atr_value = data['atr'].iloc[-1].round(2)
-                        trade_dict[constants.TRADE_KEY_ACTUAL_TARGET] = orig_target  # Save the original target
-                        trade_dict[constants.TRADE_KEY_TARGET_PRICE] = trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE) - (atr_value * adjusted_target_mult)
-                        logger.debug(f"Sideways regime: updated target for {strike} to {trade_dict[constants.TRADE_KEY_TARGET_PRICE]}")
-                    except Exception as e:
-                        logger.error(f"Error updating sideways regime target for {strike}: {e}")
                 # Trailing stoploss logic: update target if enabled (for non-sideways regime or if config wants it)
                 if config.get("trailing_stoploss", False) and regime != "sideways":
                     try:

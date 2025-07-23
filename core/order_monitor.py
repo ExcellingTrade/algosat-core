@@ -162,10 +162,59 @@ class OrderMonitor:
             if last_main_status is None and order_row and order_row.get('status') is not None:
                 last_main_status = str(order_row.get('status'))
                 self._last_main_status = last_main_status
-            # --- Use live broker order data from order_cache for ENTRY side ---
+            # --- Time-based exit/stop logic before processing broker orders ---
+            # Get product_type and trade_config for time-based decisions
             product_type = None
+            trade_config = None
             if strategy:
                 product_type = strategy.get('product_type') or strategy.get('producttype')
+            if strategy_config:
+                import json
+                try:
+                    trade_param = strategy_config.get('trade')
+                    if trade_param:
+                        trade_config = json.loads(trade_param) if isinstance(trade_param, str) else trade_param
+                except Exception as e:
+                    logger.error(f"OrderMonitor: Error parsing trade config for time-based exit: {e}")
+            
+            # Time-based logic
+            from datetime import datetime, time as dt_time
+            import pytz
+            current_time = datetime.now(pytz.timezone('Asia/Kolkata'))
+            current_time_only = current_time.time()
+            
+            # For non-DELIVERY orders: check square_off_time
+            if product_type and product_type.upper() != 'DELIVERY':
+                square_off_time_str = None
+                if trade_config:
+                    square_off_time_str = trade_config.get('square_off_time')
+                
+                if square_off_time_str:
+                    try:
+                        # Parse square_off_time (e.g., "15:25" -> time(15, 25))
+                        hour, minute = map(int, square_off_time_str.split(':'))
+                        square_off_time = dt_time(hour, minute)
+                        
+                        if current_time_only >= square_off_time:
+                            logger.info(f"OrderMonitor: Square-off time {square_off_time_str} reached for non-DELIVERY order_id={self.order_id}. Exiting order.")
+                            try:
+                                await self.order_manager.exit_order(self.order_id, reason=f"Square-off time {square_off_time_str} reached")
+                                self.stop()
+                                return
+                            except Exception as e:
+                                logger.error(f"OrderMonitor: Failed to exit order {self.order_id} at square-off time: {e}")
+                    except Exception as e:
+                        logger.error(f"OrderMonitor: Error parsing square_off_time '{square_off_time_str}': {e}")
+            
+            # For DELIVERY orders: stop monitoring at 3:30 PM
+            elif product_type and product_type.upper() == 'DELIVERY':
+                market_close_time = dt_time(15, 30)  # 3:30 PM
+                if current_time_only >= market_close_time:
+                    logger.info(f"OrderMonitor: Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
+                    self.stop()
+                    return
+
+            # --- Use live broker order data from order_cache for ENTRY side ---
             entry_broker_db_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
             all_statuses = []
             status_set = set()

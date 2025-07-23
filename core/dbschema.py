@@ -176,6 +176,7 @@ orders = Table(
     Column("supertrend_signal", String, nullable=True),
     Column("lot_qty", Integer, nullable=True),
     Column("side", String, nullable=True),
+    Column("signal_direction", String, nullable=True),  # UP/DOWN direction of the signal
     Column("qty", Integer, nullable=True),
     Column("executed_quantity", Integer, nullable=False), 
     # Spot and swing/level tracking fields

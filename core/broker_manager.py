@@ -596,7 +596,8 @@ class BrokerManager:
         for field in [
             'candle_range', 'entry_price', 'stop_loss', 'target_price', 'profit', 'signal_time', 'exit_time', 'trigger_price_diff',
             'exit_price', 'status', 'reason', 'atr', 'supertrend_signal', 'lot_qty', 'entry_time', 'order_ids', 'order_messages',
-            'entry_spot_price', 'entry_spot_swing_high', 'entry_spot_swing_low', 'stoploss_spot_level', 'target_spot_level'
+            'entry_spot_price', 'entry_spot_swing_high', 'entry_spot_swing_low', 'stoploss_spot_level', 'target_spot_level',
+            'signal_direction', 'entry_rsi', 'expiry_date'
         ]:
             val = getattr(signal, field, None)
             if val is not None:

@@ -315,12 +315,14 @@ class OrderManager:
                 "supertrend_signal": order_payload.extra.get("supertrend_signal"),
                 "lot_qty": order_payload.extra.get("lot_qty"),
                 "side": order_payload.side.value if hasattr(order_payload.side, 'value') else str(order_payload.side),
+                "signal_direction": order_payload.extra.get("signal_direction"),
                 "qty": order_payload.quantity,
                 "entry_spot_price": order_payload.extra.get("entry_spot_price"),
                 "entry_spot_swing_high": order_payload.extra.get("entry_spot_swing_high"),
                 "entry_spot_swing_low": order_payload.extra.get("entry_spot_swing_low"),
                 "stoploss_spot_level": order_payload.extra.get("stoploss_spot_level"),
                 "target_spot_level": order_payload.extra.get("target_spot_level"),
+                "entry_rsi": order_payload.extra.get("entry_rsi"),
                 "expiry_date": ensure_utc_aware(order_payload.extra.get("expiry_date")),
             }
             inserted = await insert_order(sess, order_data)
