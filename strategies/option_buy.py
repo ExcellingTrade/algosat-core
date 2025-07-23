@@ -256,7 +256,7 @@ class OptionBuyStrategy(StrategyBase):
             return None
         trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
-        trade_day = get_trade_day(get_ist_datetime())  - timedelta(days=1)
+        trade_day = get_trade_day(get_ist_datetime())#  - timedelta(days=1)
         # 1. Fetch history for all strikes
         history_data = await self.fetch_history_data(
             self.dp, self._strikes, trade_day, trade_config
@@ -302,7 +302,7 @@ class OptionBuyStrategy(StrategyBase):
             # Make start_date and end_date IST-aware
             start_date = localize_to_ist(datetime.combine(trade_day, time(9, 15)))
             current_end_date = localize_to_ist(datetime.combine(current_date, get_ist_datetime().time()))
-            current_end_date = current_end_date.replace(day=18,hour=9, minute=45)
+            # current_end_date = current_end_date.replace(day=18,hour=9, minute=45)
             end_date = calculate_end_date(current_end_date, trade_config['interval_minutes'])
             # end_date = end_date.replace(hour=9, minute=45, second=0, microsecond=0)
             logger.debug(f"Fetching history for strike symbols {', '.join(str(strike) for strike in strike_symbols)}...")

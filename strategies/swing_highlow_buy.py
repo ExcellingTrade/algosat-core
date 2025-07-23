@@ -311,11 +311,11 @@ class SwingHighLowBuyStrategy(StrategyBase):
             trade_day = get_trade_day(current_date - timedelta(days=back_days))
             start_date = localize_to_ist(datetime.combine(trade_day, time(9, 15)))
             current_end_date = localize_to_ist(datetime.combine(current_date, get_ist_datetime().time()))
-            if interval_minutes == 1:
-                current_end_date = current_end_date.replace(hour=10, minute=15)  # Align to minute
-            elif interval_minutes == 5:
-                current_end_date = current_end_date.replace(hour=10, minute=20)
-            current_end_date = current_end_date.replace(day=18)
+            # if interval_minutes == 1:
+            #     current_end_date = current_end_date.replace(hour=10, minute=15)  # Align to minute
+            # elif interval_minutes == 5:
+            #     current_end_date = current_end_date.replace(hour=10, minute=20)
+            # current_end_date = current_end_date.replace(day=18)
             end_date = calculate_end_date(current_end_date, interval_minutes)
             # end_date = end_date.replace(day=15,hour=10, minute=48, second=0, microsecond=0)  # Market close time
             logger.info(f"Fetching history for {symbols} from {start_date} to {end_date} interval {interval_minutes}m")
