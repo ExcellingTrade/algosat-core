@@ -627,6 +627,11 @@ create_secured_router(orders.router, "/orders", ["Orders"]) # Added orders route
 create_secured_router(nse_data.router, "/nse", ["NSE Data"]) # Added NSE Data router
 create_secured_router(balance.router, "/api/v1", ["Balance Summary"]) # Added balance router
 create_secured_router(logs.router, "/logs", ["Log Management"]) # Added logs router
+
+# Import and include admin router
+from .routes import admin
+create_secured_router(admin.router, "/admin", ["Admin"]) # Added admin router
+
 app.include_router(livefeed_ws.router, tags=["WebSocket"])
 app.include_router(dashboard.router, prefix="/dashboard", tags=["Dashboard"])
 

@@ -177,6 +177,10 @@ app.include_router(strategies.router, prefix="/api/v1/strategies", tags=["strate
 app.include_router(brokers.router, prefix="/api/v1/brokers", tags=["brokers"])
 app.include_router(health.router, prefix="/api/v1/health", tags=["health"])
 
+# Import and include admin router
+from .routes import admin
+app.include_router(admin.router, prefix="/api/v1/admin", tags=["admin"])
+
 
 # System endpoints
 @app.get("/")

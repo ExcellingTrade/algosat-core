@@ -2233,3 +2233,36 @@ async def get_order_with_strategy_config(session: AsyncSession, order_id: int):
     result = await session.execute(stmt)
     row = result.first()
     return dict(row._mapping) if row else None
+
+
+async def reset_database_tables(session):
+    """
+    Reset the database by clearing entries from orders and broker_executions tables.
+    Deletes in proper sequence to handle foreign key dependencies.
+    
+    Returns:
+        dict: Summary of deleted records
+    """
+    from algosat.core.dbschema import broker_executions, orders
+    
+    # Count records before deletion
+    broker_executions_count_stmt = select(func.count()).select_from(broker_executions)
+    orders_count_stmt = select(func.count()).select_from(orders)
+    
+    broker_executions_count = await session.scalar(broker_executions_count_stmt)
+    orders_count = await session.scalar(orders_count_stmt)
+    
+    # Delete broker_executions first (due to foreign key dependency on orders)
+    await session.execute(delete(broker_executions))
+    
+    # Then delete orders
+    await session.execute(delete(orders))
+    
+    # Commit the transaction
+    await session.commit()
+    
+    return {
+        "deleted_broker_executions": broker_executions_count,
+        "deleted_orders": orders_count,
+        "total_deleted": broker_executions_count + orders_count
+    }

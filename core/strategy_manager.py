@@ -29,7 +29,7 @@ class MarketHours:
     @staticmethod
     def get_market_hours():
         """Get default market hours (can be made configurable later)"""
-        return datetime.time(9, 0), datetime.time(15, 30)  # 9:00 AM - 3:30 PM
+        return datetime.time(7, 0), datetime.time(15, 30)  # 9:00 AM - 3:30 PM
     
     @staticmethod
     def is_market_open(current_time: datetime.time = None) -> bool:

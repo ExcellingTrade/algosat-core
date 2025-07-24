@@ -21,7 +21,7 @@ class OrderMonitor:
         order_manager: OrderManager,
         order_cache: OrderCache,  # new dependency
         strategy_instance=None,  # strategy instance for shared usage
-        price_order_monitor_seconds: float = 60.0,  # 1 minute default
+        price_order_monitor_seconds: float = 30.0,  # 1 minute default
         signal_monitor_seconds: int = None  # will be set from strategy config
     ):
         self.order_id: int = order_id
@@ -873,8 +873,8 @@ class OrderMonitor:
                 # fallback default
                 self.signal_monitor_seconds = 5 * 60
         logger.info(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_seconds}s)")
-        # await asyncio.gather(self._price_order_monitor())  #, self._signal_monitor())
-        await asyncio.gather( self._signal_monitor())
+        await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
+        # await asyncio.gather( self._signal_monitor())
 
     def stop(self) -> None:
         self._running = False

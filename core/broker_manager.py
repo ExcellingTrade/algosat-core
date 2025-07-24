@@ -191,6 +191,8 @@ class BrokerManager:
                 if status == "AUTHENTICATING":
                     if wait_time >= max_wait:
                         logger.warning(f"Timeout waiting for {broker_key} to finish authenticating. Proceeding to authenticate.")
+                        reason = "Timeout waiting for authentication"
+                        await update_broker_status(broker_key, "ERROR", notes=f"Re-authentication failed ({reason})")
                         break
                     logger.info(f"{broker_key} is currently authenticating. Waiting...")
                     await asyncio.sleep(poll_interval)
@@ -203,7 +205,7 @@ class BrokerManager:
                         logger.info(f"{broker_key} is CONNECTED but {reason}. Proceeding to re-authenticate.")
                         await update_broker_status(broker_key, "AUTHENTICATING", notes=f"Re-authenticating ({reason})...")
                         success = await self._authenticate_broker(broker_key, force_reauth=True)
-                        status_final = "CONNECTED" if success else "FAILED"
+                        status_final = "CONNECTED" if success else "ERROR"
                         await update_broker_status(broker_key, status_final, notes="" if success else f"Re-authentication failed ({reason})")
                     else:
                         logger.info(f"{broker_key} is already CONNECTED and token is fresh. Re-instantiating and authenticating broker wrapper.")
@@ -235,7 +237,7 @@ class BrokerManager:
                     await update_broker_status(broker_key, "AUTHENTICATING", notes="Authenticating...")
                     success = await self._authenticate_broker(broker_key, force_reauth=force_auth)
                     # Update DB with authentication result for each broker
-                    status_final = "CONNECTED" if success else "FAILED"
+                    status_final = "CONNECTED" if success else "ERROR"
                     await update_broker_status(broker_key, status_final, notes="" if success else "Initial authentication failed")
                     break
         logger.info("🟢 BrokerManager setup complete.")
@@ -262,7 +264,7 @@ class BrokerManager:
                 logger.error(f"Reauthentication failed for {broker_key}: {e}")
                 success = False
         # Update status after re-auth
-        status = "CONNECTED" if success else "FAILED"
+        status = "CONNECTED" if success else "ERROR"
         await update_broker_status(broker_key, status, notes="" if success else "Re-authentication failed")
         if success:
             logger.info(f"🟢 Reauthentication successful for {broker_key}")

@@ -790,7 +790,6 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 try:
                     from algosat.core.time_utils import get_ist_datetime
                     from datetime import datetime
-                    import pandas as pd
                     
                     current_datetime = get_ist_datetime()
                     
