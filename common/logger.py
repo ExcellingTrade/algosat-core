@@ -38,39 +38,153 @@ from algosat.common import constants
 from algosat.core.time_utils import get_ist_now 
 
 
+class SafeRotatingFileHandler(RotatingFileHandler):
+    """
+    Custom RotatingFileHandler that keeps rollover files in the same date directory.
+    """
+    
+    def __init__(self, filename, mode='a', maxBytes=0, backupCount=0, encoding=None, delay=False):
+        """
+        Initialize with date directory support for rollovers.
+        """
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        super().__init__(filename, mode, maxBytes, backupCount, encoding, delay)
+    
+    def doRollover(self):
+        """
+        Override to keep rollover files in the same date directory.
+        """
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+        
+        # Get the directory and base name
+        log_dir = os.path.dirname(self.baseFilename)
+        base_name = os.path.basename(self.baseFilename)
+        
+        # Ensure directory exists
+        os.makedirs(log_dir, exist_ok=True)
+        
+        # Rotate existing backup files
+        if self.backupCount > 0:
+            for i in range(self.backupCount - 1, 0, -1):
+                sfn = os.path.join(log_dir, f"{base_name}.{i}")
+                dfn = os.path.join(log_dir, f"{base_name}.{i + 1}")
+                if os.path.exists(sfn):
+                    if os.path.exists(dfn):
+                        os.remove(dfn)
+                    os.rename(sfn, dfn)
+            
+            # Move current file to .1
+            dfn = os.path.join(log_dir, f"{base_name}.1")
+            if os.path.exists(dfn):
+                os.remove(dfn)
+            if os.path.exists(self.baseFilename):
+                os.rename(self.baseFilename, dfn)
+        
+        # Create new log file
+        if not self.delay:
+            self.stream = self._open()
+
+
 class SafeTimedRotatingFileHandler(TimedRotatingFileHandler):
     """
-    Custom TimedRotatingFileHandler that handles missing directories gracefully.
+    Custom TimedRotatingFileHandler that handles missing directories gracefully
+    and keeps all log files (including rollovers) in date-specific directories.
     
     This prevents FileNotFoundError when the log cleanup process removes
     date directories that the handler is trying to access during rollover.
     """
     
+    def __init__(self, filename, when='h', interval=1, backupCount=0, encoding=None, delay=False, utc=False, atTime=None):
+        """
+        Initialize with date directory support for rollovers.
+        """
+        # Ensure the directory exists
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        super().__init__(filename, when, interval, backupCount, encoding, delay, utc, atTime)
+    
     def getFilesToDelete(self):
         """
-        Override to handle missing directories gracefully.
+        Override to handle missing directories gracefully and only look in the same date directory.
         """
         try:
-            return super().getFilesToDelete()
+            # Get the directory of the current log file
+            log_dir = os.path.dirname(self.baseFilename)
+            if not os.path.exists(log_dir):
+                return []
+            
+            # Get base filename without path
+            base_name = os.path.basename(self.baseFilename)
+            
+            # Look for rollover files in the same date directory only
+            files_to_delete = []
+            if os.path.exists(log_dir):
+                for filename in os.listdir(log_dir):
+                    # Check if it's a rollover file of this log
+                    if filename.startswith(base_name) and filename != base_name:
+                        full_path = os.path.join(log_dir, filename)
+                        if os.path.isfile(full_path):
+                            files_to_delete.append(full_path)
+            
+            # Sort and keep only the ones beyond backupCount
+            files_to_delete.sort()
+            if len(files_to_delete) <= self.backupCount:
+                return []
+            
+            return files_to_delete[:-self.backupCount] if self.backupCount > 0 else files_to_delete
+            
         except (FileNotFoundError, OSError) as e:
             # If the directory doesn't exist, just return empty list
-            # This happens when cleanup removes date directories
             return []
     
     def doRollover(self):
         """
-        Override to handle missing directories during rollover.
+        Override to handle missing directories during rollover and keep files in date directories.
         """
         try:
-            super().doRollover()
+            # Ensure the directory exists before rollover
+            log_dir = os.path.dirname(self.baseFilename)
+            os.makedirs(log_dir, exist_ok=True)
+            
+            # Close the current file
+            if self.stream:
+                self.stream.close()
+                self.stream = None
+            
+            # Get current time for rollover
+            current_time = int(time.time())
+            dst_name = self.rotation_filename(self.baseFilename + "." + 
+                                            time.strftime(self.suffix, time.localtime(current_time)))
+            
+            # Ensure rollover file stays in the same date directory
+            dst_name = os.path.join(log_dir, os.path.basename(dst_name))
+            
+            # Rotate the file
+            if os.path.exists(self.baseFilename):
+                os.rename(self.baseFilename, dst_name)
+            
+            # Clean up old files
+            if self.backupCount > 0:
+                for s in self.getFilesToDelete():
+                    try:
+                        os.remove(s)
+                    except OSError:
+                        pass
+            
+            # Create new log file
+            if not self.delay:
+                self.stream = self._open()
+                
         except (FileNotFoundError, OSError) as e:
-            # If rollover fails due to missing directory, recreate the current log file
-            # directory and continue logging
+            # If rollover fails due to missing directory, recreate and continue
             try:
                 log_dir = os.path.dirname(self.baseFilename)
                 os.makedirs(log_dir, exist_ok=True)
                 # Reset the handler to use the current log file
-                self.stream = self._open()
+                if not self.delay:
+                    self.stream = self._open()
             except Exception as inner_e:
                 # If we still can't create the directory, fall back to console logging
                 print(f"Critical logging error: {inner_e}", file=sys.stderr) 
@@ -211,7 +325,7 @@ def configure_root_logger():
 
     # File handler: DEBUG level, daily file, rotation by size
     log_file = get_log_file()
-    file_handler = RotatingFileHandler(
+    file_handler = SafeRotatingFileHandler(
         log_file, maxBytes=MAX_LOG_FILE_SIZE, backupCount=BACKUP_COUNT, encoding="utf-8"
     )
     file_handler.setLevel(logging.DEBUG)
@@ -273,14 +387,13 @@ def get_logger(module_name: str) -> logging.Logger:
                     handler.close()
     
     if needs_new_handler:
-        # Use our custom SafeTimedRotatingFileHandler
-        file_handler = SafeTimedRotatingFileHandler(
-            expected_log_file, 
-            when="midnight", 
-            interval=1, 
-            backupCount=7, 
-            encoding="utf-8", 
-            utc=False
+        # Use SafeRotatingFileHandler for size-based rotation instead of time-based
+        # This keeps all rollover files in the same date directory with proper numbering
+        file_handler = SafeRotatingFileHandler(
+            expected_log_file,
+            maxBytes=MAX_LOG_FILE_SIZE,  # 2.3 MB
+            backupCount=7,
+            encoding="utf-8"
         )
         file_handler.setLevel(logging.DEBUG)
         file_formatter = ISTFormatter(

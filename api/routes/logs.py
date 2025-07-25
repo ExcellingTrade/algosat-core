@@ -28,10 +28,17 @@ router = APIRouter()
 LOGS_BASE_DIR = Path("/opt/algosat/logs")
 MAX_LOG_RETENTION_DAYS = 30  # Extended from 7 to 30 days
 LOG_PATTERNS = {
-    "rollover": r"(api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)",  # Check rollover first
+    "rollover": r"(api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)",  # Proper numeric rollover
+    "legacy_rollover": r"(api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d{4}-\d{2}-\d{2})",  # Legacy date rollover
     "api": r"api-(\d{4}-\d{2}-\d{2})\.log",
     "algosat": r"algosat-(\d{4}-\d{2}-\d{2})\.log",
     "broker-monitor": r"broker_monitor-(\d{4}-\d{2}-\d{2})\.log",
+}
+
+# Log type mappings for consistent UI filtering
+LOG_TYPE_MAPPINGS = {
+    "broker_monitor": "broker-monitor",  # Map internal name to UI name
+    "broker-monitor": "broker-monitor",  # Keep UI name consistent
 }
 
 # In-memory store for streaming sessions (in production, use Redis or similar)
@@ -108,12 +115,13 @@ def get_log_files_for_date(date: str) -> List[LogFile]:
                     try:
                         stat = log_file.stat()
                         # Determine log type from filename - only include application logs for UI
+                        log_type = None
                         if log_file.name.startswith("api-") and log_file.name.endswith(".log"):
                             log_type = "api"
                         elif log_file.name.startswith("algosat-") and log_file.name.endswith(".log"):
                             log_type = "algosat"
                         elif log_file.name.startswith("broker_monitor-") and log_file.name.endswith(".log"):
-                            log_type = "broker-monitor"
+                            log_type = "broker-monitor"  # Normalize to UI naming
                         else:
                             # Skip PM2 logs and other files - don't show in UI
                             continue
@@ -143,20 +151,23 @@ def get_log_files_for_date(date: str) -> List[LogFile]:
             for pattern_name, pattern in LOG_PATTERNS.items():
                 match = re.match(pattern, log_file.name)
                 if match:
-                    if pattern_name == "rollover":
-                        # For rollover files: (api|algosat)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)
-                        file_type = match.group(1)  # api or algosat
+                    if pattern_name == "rollover" or pattern_name == "legacy_rollover":
+                        # For rollover files: (api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)
+                        # Or legacy: (api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d{4}-\d{2}-\d{2})
+                        file_type = match.group(1)  # api, algosat, or broker_monitor
                         file_date = match.group(2)  # date
-                        rollover_num = match.group(3)  # rollover number
+                        rollover_id = match.group(3)  # rollover number or date
                         if file_date == date:
                             try:
                                 stat = log_file.stat()
+                                # Normalize broker_monitor to broker-monitor for UI
+                                normalized_type = LOG_TYPE_MAPPINGS.get(file_type, file_type)
                                 log_files.append(LogFile(
                                     name=log_file.name,
                                     path=str(log_file),
                                     size=stat.st_size,
                                     modified=datetime.fromtimestamp(stat.st_mtime),
-                                    type="rollover",
+                                    type=normalized_type,
                                     date=file_date
                                 ))
                                 file_matched = True
@@ -215,11 +226,12 @@ def get_available_log_dates() -> List[str]:
             for pattern_name, pattern in LOG_PATTERNS.items():
                 match = re.match(pattern, log_file.name)
                 if match:
-                    if pattern_name == "rollover":
-                        # For rollover files: (api|algosat)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)
+                    if pattern_name == "rollover" or pattern_name == "legacy_rollover":
+                        # For rollover files: (api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)
+                        # Or legacy: (api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d{4}-\d{2}-\d{2})
                         date_str = match.group(2)  # date is group 2 for rollover
                     else:
-                        # For regular files: (api|algosat)-(\d{4}-\d{2}-\d{2})\.log
+                        # For regular files: (api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log
                         date_str = match.group(1)  # date is group 1 for regular
                     
                     try:
@@ -396,10 +408,12 @@ async def get_log_content(
         
         if log_type == "all":
             target_files = log_files
-        elif log_type == "rollover":
-            target_files = [f for f in log_files if f.type == "rollover"]
         else:
-            target_files = [f for f in log_files if f.type == log_type or (f.type == "rollover" and log_type in f.name)]
+            # Handle both broker_monitor and broker-monitor naming
+            if log_type == "broker-monitor":
+                target_files = [f for f in log_files if f.type == "broker-monitor"]
+            else:
+                target_files = [f for f in log_files if f.type == log_type]
         
         if not target_files:
             available_types = list(set(f.type for f in log_files))
