@@ -209,6 +209,8 @@ class DataManager:
         self.cache = cache or _CacheManager()
         self.rate_limiter = rate_limiter or _RateLimiter(max_calls=10, interval_sec=1)
         self.rate_limiter_map = rate_limiter_map or {}
+        # Broker name cache with 24-hour TTL (broker names rarely change)
+        self._broker_name_cache = TTLCache(maxsize=100, ttl=24 * 60 * 60)
 
     def get_current_broker_name(self) -> Optional[str]:
         if self.broker_name:
@@ -444,12 +446,40 @@ class DataManager:
             )
 
     async def get_broker_name_by_id(self, broker_id: int) -> str:
+        """
+        Get broker name by ID with 24-hour caching.
+        Broker names rarely change, so we can cache them for a long time.
+        """
+        if broker_id is None:
+            return None
+            
+        # Check cache first
+        if broker_id in self._broker_name_cache:
+            return self._broker_name_cache[broker_id]
+        
+        # Cache miss - fetch from database
         try:
             from algosat.core.db import AsyncSessionLocal, get_broker_by_id
             async with AsyncSessionLocal() as session:
                 broker = await get_broker_by_id(session, broker_id)
-                return broker["broker_name"] if broker else None
+                broker_name = broker["broker_name"] if broker else None
+                
+                # Cache the result (TTLCache handles expiration automatically)
+                if broker_name is not None:
+                    self._broker_name_cache[broker_id] = broker_name
+                    
+                return broker_name
         except Exception as e:
             logger.error(f"Error in get_broker_name_by_id for broker_id={broker_id}: {e}", exc_info=True)
             raise
+
+    def clear_broker_name_cache(self, broker_id: int = None):
+        """
+        Clear broker name cache. If broker_id is specified, clear only that entry.
+        Otherwise, clear entire cache.
+        """
+        if broker_id is not None:
+            self._broker_name_cache.pop(broker_id, None)
+        else:
+            self._broker_name_cache.clear()
 

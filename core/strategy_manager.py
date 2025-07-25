@@ -594,15 +594,20 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
         market_info = MarketHours.get_market_status_info()
         logger.info(f"📈 Market is open ({market_info['current_time']}). Starting order monitors for existing open orders.")
         from algosat.core.db import get_all_open_orders
-        async with AsyncSessionLocal() as session:
-            open_orders = await get_all_open_orders(session)
-            for order in open_orders:
-                # Get strategy instance for existing orders
-                order_id = str(order["id"])
-                strategy_instance = await get_strategy_for_order(order_id, data_manager, order_manager)
-                order_info = {"order_id": order["id"], "strategy": strategy_instance}
-                await order_queue.put(order_info)
-        logger.info(f"📊 Queued {len(open_orders) if 'open_orders' in locals() else 0} existing orders for monitoring")
+        
+        # Use a dedicated session for startup order loading
+        async with AsyncSessionLocal() as startup_session:
+            try:
+                open_orders = await get_all_open_orders(startup_session)
+                for order in open_orders:
+                    # Get strategy instance for existing orders
+                    order_id = str(order["id"])
+                    strategy_instance = await get_strategy_for_order(order_id, data_manager, order_manager)
+                    order_info = {"order_id": order["id"], "strategy": strategy_instance}
+                    await order_queue.put(order_info)
+                logger.info(f"📊 Queued {len(open_orders)} existing orders for monitoring")
+            except Exception as e:
+                logger.error(f"Error loading existing orders: {e}")
     else:
         market_info = MarketHours.get_market_status_info()
         logger.info(f"🌙 Market is closed ({market_info['current_time']}). Skipping order monitor startup.")
@@ -611,51 +616,52 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
     asyncio.create_task(order_monitor_loop(order_queue, data_manager, order_manager))
     
     try:
-        async with AsyncSessionLocal() as session:
-            while True:
-                try:
-                    # Get current IST time for all time-based logic
-                    now = get_ist_datetime().time()
-                    
-                    # 🚨 MARKET HOURS CHECK: Skip all operations during market close
-                    if not MarketHours.is_market_open(now):
-                        # Market is closed - skip all strategy, order, and risk management operations
-                        market_info = MarketHours.get_market_status_info(now)
-                        logger.debug(f"🌙 Market closed (current: {now}, hours: {market_info['market_start']}-{market_info['market_end']}). Skipping all operations (strategies, orders, risk management).")
-                        
-                        # If any strategies are running, stop them during market close
-                        if running_tasks:
-                            logger.info(f"🛑 Market closed - stopping {len(running_tasks)} running strategies")
-                            for symbol_id in list(running_tasks):
-                                logger.debug(f"Stopping strategy for symbol {symbol_id} (market closed)")
-                                running_tasks[symbol_id].cancel()
-                                running_tasks.pop(symbol_id, None)
-                                remove_strategy_from_cache(symbol_id)
-                        
-                        # Sleep and continue to next iteration without any processing (no risk checks, no order management)
-                        logger.debug(f"⏳ Market closed - sleeping for {settings.poll_interval} seconds...")
-                        await asyncio.sleep(settings.poll_interval)
-                        continue
-                    
-                    # Market is open - proceed with normal operations
+        while True:
+            try:
+                # Get current IST time for all time-based logic
+                now = get_ist_datetime().time()
+                
+                # 🚨 MARKET HOURS CHECK: Skip all operations during market close
+                if not MarketHours.is_market_open(now):
+                    # Market is closed - skip all strategy, order, and risk management operations
                     market_info = MarketHours.get_market_status_info(now)
-                    logger.debug(f"📈 Market open (current: {now}, hours: {market_info['market_start']}-{market_info['market_end']}). Processing strategies, orders, and risk management.")
+                    logger.debug(f"🌙 Market closed (current: {now}, hours: {market_info['market_start']}-{market_info['market_end']}). Skipping all operations (strategies, orders, risk management).")
                     
-                    # Start OrderCache if not already started (when market opens)
-                    if order_cache and not hasattr(order_cache, '_started'):
-                        logger.info(f"📈 Market opened - starting OrderCache")
-                        await order_cache.start()
-                        order_cache._started = True
+                    # If any strategies are running, stop them during market close
+                    if running_tasks:
+                        logger.info(f"🛑 Market closed - stopping {len(running_tasks)} running strategies")
+                        for symbol_id in list(running_tasks):
+                            logger.debug(f"Stopping strategy for symbol {symbol_id} (market closed)")
+                            running_tasks[symbol_id].cancel()
+                            running_tasks.pop(symbol_id, None)
+                            remove_strategy_from_cache(symbol_id)
                     
-                    # 🚨 PRIORITY 1: Check risk limits before any strategy operations (only during market hours)
-                    risk_limit_exceeded = await risk_manager.check_broker_risk_limits()
-                    
-                    if risk_limit_exceeded and not risk_manager.is_emergency_stop_active():
-                        # Trigger emergency stop (only during market hours)
-                        await risk_manager.emergency_stop_all_strategies()
-                    
-                    # Continue normal strategy management (emergency stop disables strategies in DB)
-                    # The polling logic will naturally stop runners when no active symbols are found
+                    # Sleep and continue to next iteration without any processing (no risk checks, no order management)
+                    logger.debug(f"⏳ Market closed - sleeping for {settings.poll_interval} seconds...")
+                    await asyncio.sleep(settings.poll_interval)
+                    continue
+                
+                # Market is open - proceed with normal operations
+                market_info = MarketHours.get_market_status_info(now)
+                logger.debug(f"📈 Market open (current: {now}, hours: {market_info['market_start']}-{market_info['market_end']}). Processing strategies, orders, and risk management.")
+                
+                # Start OrderCache if not already started (when market opens)
+                if order_cache and not hasattr(order_cache, '_started'):
+                    logger.info(f"📈 Market opened - starting OrderCache")
+                    await order_cache.start()
+                    order_cache._started = True
+                
+                # 🚨 PRIORITY 1: Check risk limits before any strategy operations (only during market hours)
+                risk_limit_exceeded = await risk_manager.check_broker_risk_limits()
+                
+                if risk_limit_exceeded and not risk_manager.is_emergency_stop_active():
+                    # Trigger emergency stop (only during market hours)
+                    await risk_manager.emergency_stop_all_strategies()
+                
+                # Continue normal strategy management (emergency stop disables strategies in DB)
+                # The polling logic will naturally stop runners when no active symbols are found
+                # Use a fresh session for each iteration to prevent connection pool exhaustion
+                async with AsyncSessionLocal() as session:
                     active_symbols = await get_active_strategy_symbols_with_configs(session)
                     if active_symbols:
                         # Only print found symbols the first time
@@ -757,12 +763,12 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                                     remove_strategy_from_cache(symbol_id)
                     else:
                         logger.info("🟡 No active symbols found")
-                except ProgrammingError as pe:
-                    logger.warning(f"🟡 DB schema not ready: {pe}")
-                except Exception as e:
-                    logger.error(f"🔴 Unexpected DB error: {e}")
-                logger.debug(f"⏳ Sleeping for {settings.poll_interval} seconds...")
-                await asyncio.sleep(settings.poll_interval)
+            except ProgrammingError as pe:
+                logger.warning(f"🟡 DB schema not ready: {pe}")
+            except Exception as e:
+                logger.error(f"🔴 Unexpected DB error: {e}")
+            logger.debug(f"⏳ Sleeping for {settings.poll_interval} seconds...")
+            await asyncio.sleep(settings.poll_interval)
     except asyncio.CancelledError:
         logger.warning("🟡 Polling loop cancelled. Shutting down cleanly.")
         for task in running_tasks.values():

@@ -732,13 +732,17 @@ class OrderManager:
         """
         from algosat.core.db import AsyncSessionLocal, update_rows_in_table
         from algosat.core.dbschema import orders
-        async with AsyncSessionLocal() as session:
+        try:
+            logger.info(f"OrderManager: Starting PnL update for order_id={order_id}, pnl={pnl}")
             await update_rows_in_table(
                 target_table=orders,
                 condition=orders.c.id == order_id,
                 new_values={"pnl": pnl}
             )
-            logger.debug(f"Order {order_id} PnL updated to {pnl} in DB.")
+            logger.info(f"OrderManager: Successfully updated PnL for order_id={order_id} to {pnl} in DB")
+        except Exception as e:
+            logger.error(f"OrderManager: Error updating PnL for order_id={order_id}: {e}", exc_info=True)
+            raise
 
     async def update_order_exit_details_in_db(self, order_id: int, exit_price: float, exit_time, pnl: float, status: str):
         """

@@ -41,6 +41,9 @@ class OrderMonitor:
         self._last_broker_statuses = {}
         # Unified cache: order_id -> (order, strategy_symbol, strategy)
         self._order_strategy_cache = {}
+        # Broker name cache: broker_id -> broker_name (long-lived cache since broker names rarely change)
+        self._broker_name_cache = {}
+        self._broker_name_cache_time = {}
         # self._db_session = None  # Will be set when needed
 
     def get_strategy_instance(self):
@@ -154,7 +157,8 @@ class OrderMonitor:
                 return
             # Initialize last_broker_statuses from agg.broker_orders if empty (first run or after restart)
             if not last_broker_statuses:
-                for bro in agg.broker_orders:
+                current_entry_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
+                for bro in current_entry_orders:
                     broker_exec_id = getattr(bro, 'id', None)
                     status = getattr(bro, 'status', None)
                     if broker_exec_id is not None and status is not None:
@@ -227,7 +231,7 @@ class OrderMonitor:
                         broker_name = None
                         if broker_id is not None:
                             try:
-                                broker_name = await self.data_manager.get_broker_name_by_id(broker_id)
+                                broker_name = await self._get_broker_name_with_cache(broker_id)
                             except Exception as e:
                                 logger.error(f"OrderMonitor: Could not get broker name for broker_id={broker_id}: {e}")
                         # If broker_order_id is None or empty, order is not placed, set status to FAILED
@@ -297,6 +301,7 @@ class OrderMonitor:
                             from datetime import datetime, timezone
                             executed_quantity = broker_executed_quantity
                             quantity = broker_placed_quantity
+                            execution_price = None
                             symbol_val = None
                             # Prefer cache_order for execution details, fallback to bro
                             if cache_order:
@@ -313,8 +318,8 @@ class OrderMonitor:
                                 order_type = getattr(bro, "order_type", None)
                             if product_type_val is None:
                                 product_type_val = getattr(bro, "product_type", None)
-                            # if quantity is None:
-                            #     quantity = getattr(bro, "qty", None) or getattr(bro, "quantity", None)
+                            if quantity is None:
+                                quantity = getattr(bro, "qty", None) or getattr(bro, "quantity", None)
                             if symbol_val is None:
                                 symbol_val = getattr(bro, "symbol", None) or getattr(bro, "tradingsymbol", None)
                             execution_time = datetime.now(timezone.utc)
@@ -449,11 +454,12 @@ class OrderMonitor:
                     total_pnl = 0.0
                     all_closed = True
                     for bro in entry_broker_db_orders:
-                        broker_id = getattr(bro, 'broker_id', None)
+                        # broker_id = getattr(bro, 'broker_id', None)
+                        broker_id = bro.get('broker_id', None)
                         broker_name = None
                         if broker_id is not None:
                             try:
-                                broker_name = await self.data_manager.get_broker_name_by_id(broker_id)
+                                broker_name = await self._get_broker_name_with_cache(broker_id)
                             except Exception as e:
                                 logger.error(f"OrderMonitor: Could not get broker name for broker_id={broker_id}: {e}")
                         # broker_name = await self.data_manager.get_broker_name_by_id(bro.get("broker_id"))
@@ -464,7 +470,11 @@ class OrderMonitor:
                         # Find matching position for this broker
                         positions = broker_positions_map.get(broker_name.lower() if broker_name else "", None)
                         matched_pos = None
+                        logger.info(f"OrderMonitor: Looking for positions for broker_name={broker_name}, symbol={symbol_val}, qty={qty}, product={product}")
+                        logger.info(f"OrderMonitor: Available broker_positions_map keys: {list(broker_positions_map.keys()) if broker_positions_map else 'None'}")
+                        
                         if positions:
+                            logger.info(f"OrderMonitor: Found {len(positions)} positions for broker {broker_name}")
                             # Zerodha: positions is a dict with 'net' key
                             if broker_name and broker_name.lower() == "zerodha":
                                 for pos in positions:
@@ -480,6 +490,7 @@ class OrderMonitor:
                                             entry_price_match
                                         ):
                                             matched_pos = pos
+                                            logger.info(f"OrderMonitor: Matched Zerodha position for symbol={symbol_val}: {pos}")
                                             break
                                     except Exception as e:
                                         logger.error(f"OrderMonitor: Error matching Zerodha position: {e}")
@@ -493,11 +504,16 @@ class OrderMonitor:
                                         symbol_match = (pos.get('symbol') == symbol_val)
                                         if symbol_match and qty_match and product_match:
                                             matched_pos = pos
+                                            logger.info(f"OrderMonitor: Matched Fyers position for symbol={symbol_val}: {pos}")
                                             break
                                     except Exception as e:
                                         logger.error(f"OrderMonitor: Error matching Fyers position: {e}")
+                        else:
+                            logger.warning(f"OrderMonitor: No positions found for broker={broker_name} (positions data: {positions})")
+                        
                         # If match found, update order/broker_exec status and accumulate PnL
                         if matched_pos:
+                            logger.info(f"OrderMonitor: Processing matched position for broker={broker_name}: {matched_pos}")
                             # Zerodha: use 'pnl' field; Fyers: use 'pl' field
                             pnl_val = 0.0
                             closed = False
@@ -507,17 +523,33 @@ class OrderMonitor:
                                 if int(matched_pos.get('quantity', 0)) == 0:
                                     closed = True
                             elif broker_name and broker_name.lower() == "fyers":
-                                pnl_val = float(matched_pos.get('pl', 0))
+                                pnl_val = float(round(matched_pos.get('pl', 0),2))
                                 if int(matched_pos.get('qty', 0)) == 0:
                                     closed = True
                             
                             total_pnl += pnl_val
+                            logger.info(f"OrderMonitor: Added PnL {pnl_val} from {broker_name} position. Total PnL now: {total_pnl}")
                             if closed:
                                 # --- Enhancement: Insert EXIT broker_execution before marking CLOSED ---
                                 try:
                                     from datetime import datetime, timezone
                                     execution_time = datetime.now(timezone.utc)
-                                    orig_side = (bro.get('action') or '').upper()
+                                    orig_side_raw = bro.get('action') or ''
+                                    # Handle enum values like SIDE.BUY or string values like 'BUY'
+                                    if hasattr(orig_side_raw, 'value'):
+                                        # It's an enum, extract the value
+                                        orig_side = str(orig_side_raw.value).upper()
+                                    elif hasattr(orig_side_raw, 'name'):
+                                        # It's an enum, extract the name
+                                        orig_side = str(orig_side_raw.name).upper()
+                                    else:
+                                        # It's a string, use as is
+                                        orig_side = str(orig_side_raw).upper()
+                                    
+                                    # Remove any enum prefix like 'SIDE.' if present
+                                    if '.' in orig_side:
+                                        orig_side = orig_side.split('.')[-1]
+                                    
                                     if orig_side == 'BUY':
                                         exit_action = 'SELL'
                                     elif orig_side == 'SELL':
@@ -601,25 +633,34 @@ class OrderMonitor:
                             else:
                                 all_closed = False
                         else:
+                            logger.warning(f"OrderMonitor: No matching position found for broker={broker_name}, symbol={symbol_val}, qty={qty}, product={product}")
                             all_closed = False
                     # Update order PnL field in DB
                     try:
+                        logger.info(f"OrderMonitor: About to update PnL for order_id={self.order_id} with value={total_pnl}")
                         await self.order_manager.update_order_pnl_in_db(self.order_id, total_pnl)
-                        logger.debug(f"OrderMonitor: Updated PnL for order_id={self.order_id}: {total_pnl}")
+                        logger.info(f"OrderMonitor: Successfully called update_order_pnl_in_db for order_id={self.order_id}: {total_pnl}")
+                        
+                        # Verify the update by reading back from DB
+                        from algosat.core.db import AsyncSessionLocal, get_order_by_id
+                        async with AsyncSessionLocal() as session:
+                            updated_order = await get_order_by_id(session, self.order_id)
+                            current_pnl_in_db = updated_order.get('pnl') if updated_order else None
+                            logger.info(f"OrderMonitor: PnL verification for order_id={self.order_id} - Expected: {total_pnl}, Actual in DB: {current_pnl_in_db}")
                     except Exception as e:
                         logger.error(f"OrderMonitor: Error updating order PnL for order_id={self.order_id}: {e}")
                     
                     # 🚨 PER-TRADE LOSS VALIDATION 🚨
                     try:
-                        # 1. Get trade enabled brokers count from risk summary
+                        # 1. Get trade enabled brokers count from risk summary and current order data
                         from algosat.core.db import get_broker_risk_summary
                         async with AsyncSessionLocal() as session:
                             risk_data = await get_broker_risk_summary(session)
                             trade_enabled_brokers = risk_data.get('summary', {}).get('trade_enabled_brokers', 0)
-                        
-                        # 2. Get lot_qty from current order
-                        current_order = await get_order_by_id(session, self.order_id)
-                        lot_qty = current_order.get('lot_qty', 0) if current_order else 0
+                            
+                            # 2. Get lot_qty from current order (within same session)
+                            current_order = await get_order_by_id(session, self.order_id)
+                            lot_qty = current_order.get('lot_qty', 0) if current_order else 0
                         
                         # 3. Get max_loss_per_lot from strategy config
                         max_loss_per_lot = 0
@@ -718,9 +759,52 @@ class OrderMonitor:
             and broker_name
             and broker_name.lower() == 'fyers'
             and broker_order_id
+            and not broker_order_id.endswith('-BO-1')
         ):
             return f"{broker_order_id}-BO-1"
         return broker_order_id
+
+    async def _get_broker_name_with_cache(self, broker_id: int) -> str:
+        """
+        Get broker name by ID with long-lived caching (24 hours).
+        Broker names rarely change, so we can cache them for a long time.
+        """
+        if broker_id is None:
+            return None
+            
+        import time
+        now = time.time()
+        cache_duration = 24 * 60 * 60  # 24 hours in seconds
+        
+        # Check if we have a cached value that's still valid
+        if (broker_id in self._broker_name_cache and 
+            broker_id in self._broker_name_cache_time and
+            (now - self._broker_name_cache_time[broker_id]) < cache_duration):
+            return self._broker_name_cache[broker_id]
+        
+        # Cache miss or expired - fetch from database
+        try:
+            broker_name = await self.data_manager.get_broker_name_by_id(broker_id)
+            # Cache the result
+            self._broker_name_cache[broker_id] = broker_name
+            self._broker_name_cache_time[broker_id] = now
+            return broker_name
+        except Exception as e:
+            logger.error(f"OrderMonitor: Error fetching broker name for broker_id={broker_id}: {e}")
+            # Return cached value even if expired, as fallback
+            return self._broker_name_cache.get(broker_id, None)
+
+    def _clear_broker_name_cache(self, broker_id: int = None):
+        """
+        Clear broker name cache. If broker_id is specified, clear only that entry.
+        Otherwise, clear entire cache.
+        """
+        if broker_id is not None:
+            self._broker_name_cache.pop(broker_id, None)
+            self._broker_name_cache_time.pop(broker_id, None)
+        else:
+            self._broker_name_cache.clear()
+            self._broker_name_cache_time.clear()
 
     async def _get_normalized_broker_status(self, bro, broker_name, cache_lookup_order_id):
         """

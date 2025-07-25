@@ -18,6 +18,9 @@ from sqlalchemy import inspect, Table, MetaData, update, select, delete, func, t
 
 import os
 from datetime import datetime, timezone  # moved to top
+from algosat.common.logger import get_logger
+
+logger = get_logger(__name__)
 from algosat.common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
 from algosat.core.time_utils import get_ist_now
 
@@ -113,7 +116,11 @@ async def update_rows_in_table(
     """
     stmt = update(target_table).where(condition).values(new_values)
     async with engine.begin() as conn:
-        await conn.execute(stmt)
+        result = await conn.execute(stmt)
+        rows_affected = result.rowcount
+        logger.debug(f"update_rows_in_table: Updated {rows_affected} rows in table {target_table.name} with values {new_values}")
+        if rows_affected == 0:
+            logger.warning(f"update_rows_in_table: No rows were updated in table {target_table.name} with condition {condition}")
         # For information: result.rowcount would give the number of affected rows
 
 

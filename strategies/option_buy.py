@@ -598,13 +598,17 @@ class OptionBuyStrategy(StrategyBase):
             trade_config = self.trade
             # Fetch candle history for the strike
             # Use a short lookback (e.g., last 20 candles)
-            history_dict = await fetch_instrument_history(
-                self.dp,
-                [strike_symbol],
-                interval_minutes=trade_config.get('interval_minutes', 5),
-                ins_type="",
-                cache=False
-            )
+            # history_dict = await fetch_instrument_history(
+            #     self.dp,
+            #     [strike_symbol],
+            #     interval_minutes=trade_config.get('interval_minutes', 5),
+            #     ins_type="",
+            #     cache=False
+            # )
+            trade_day = get_trade_day(get_ist_datetime())#  - timedelta(days=1)
+            history_dict = await self.fetch_history_data(
+            self.dp, [strike_symbol], trade_day, trade_config
+             )
             history_df = history_dict.get(str(strike_symbol))
             if history_df is None or len(history_df) < 2:
                 logger.warning(f"evaluate_exit: Not enough history for {strike_symbol}.")

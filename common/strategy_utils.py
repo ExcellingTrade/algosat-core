@@ -229,7 +229,7 @@ def identify_strike_price_combined(option_chain_df=None, history_data=None, max_
 
 async def wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol=None):
     from datetime import datetime, timedelta
-    from core.time_utils import get_ist_datetime, localize_to_ist
+    from algosat.core.time_utils import get_ist_datetime, localize_to_ist
     from rich.progress import Progress, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
     import asyncio
     current_time = get_ist_datetime()

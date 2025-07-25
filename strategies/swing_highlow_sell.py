@@ -7,7 +7,7 @@ from algosat.common.broker_utils import calculate_backdate_days, get_trade_day
 from algosat.common.strategy_utils import calculate_end_date
 from algosat.core.data_manager import DataManager
 from algosat.core.order_manager import OrderManager
-from algosat.core.time_utils import localize_to_ist, get_ist_datetime
+from algosat.core.time_utils import localize_to_ist, get_ist_datetime, to_ist
 from algosat.strategies.base import StrategyBase
 from algosat.common.logger import get_logger
 from algosat.common import swing_utils
@@ -442,7 +442,10 @@ class SwingHighLowSellStrategy(StrategyBase):
                         else:
                             order_datetime = order_timestamp
                         
-                        order_trade_day = get_trade_day(order_datetime)
+                        # Convert order_datetime to IST for consistent trade day calculation
+                        # (database timestamps are typically in UTC)
+                        order_datetime_ist = to_ist(order_datetime)
+                        order_trade_day = get_trade_day(order_datetime_ist)
                         
                         # Check if it's next trading day
                         if current_trade_day > order_trade_day:
@@ -614,7 +617,10 @@ class SwingHighLowSellStrategy(StrategyBase):
                         else:
                             order_datetime = order_timestamp
                         
-                        order_trade_day = get_trade_day(order_datetime)
+                        # Convert order_datetime to IST for consistent trade day calculation
+                        # (database timestamps are typically in UTC)
+                        order_datetime_ist = to_ist(order_datetime)
+                        order_trade_day = get_trade_day(order_datetime_ist)
                         
                         # Check if it's next trading day
                         if current_trade_day > order_trade_day:
