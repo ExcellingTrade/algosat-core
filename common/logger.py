@@ -22,6 +22,7 @@ import logging
 import os
 import sys
 import time
+import re  # Add regex import
 import os
 # Ensure all logging and time functions use IST (Asia/Kolkata)
 os.environ['TZ'] = 'Asia/Kolkata'
@@ -355,8 +356,10 @@ def configure_root_logger():
 def get_logger(module_name: str) -> logging.Logger:
     """
     Get or configure a logger for the specified module.
-    - All loggers whose name starts with 'api.' will log to logs/api-YYYY-MM-DD.log (rotated daily)
-    - All others log to the main daily log file
+    - All loggers whose name starts with 'api.' will log to logs/YYYY-MM-DD/api-YYYY-MM-DD.log
+    - broker_monitor logs to logs/YYYY-MM-DD/broker_monitor-YYYY-MM-DD.log  
+    - All others log to logs/YYYY-MM-DD/algosat-YYYY-MM-DD.log
+    - NO SIZE-BASED ROLLOVER - Only daily file rotation based on date
     """
     logger = logging.getLogger(module_name)
     
@@ -377,22 +380,20 @@ def get_logger(module_name: str) -> logging.Logger:
     needs_new_handler = True
     if logger.handlers:
         for handler in logger.handlers:
-            if isinstance(handler, SafeTimedRotatingFileHandler):
-                if handler.baseFilename == expected_log_file:
-                    needs_new_handler = False
-                    break
-                else:
-                    # Remove old handler with wrong date
-                    logger.removeHandler(handler)
-                    handler.close()
+            # Check for any file handler pointing to the expected file
+            if hasattr(handler, 'baseFilename') and handler.baseFilename == expected_log_file:
+                needs_new_handler = False
+                break
+            else:
+                # Remove old handler with wrong date or wrong type
+                logger.removeHandler(handler)
+                handler.close()
     
     if needs_new_handler:
-        # Use SafeRotatingFileHandler for size-based rotation instead of time-based
-        # This keeps all rollover files in the same date directory with proper numbering
-        file_handler = SafeRotatingFileHandler(
+        # Use simple FileHandler with NO ROLLOVER - just daily files based on date
+        file_handler = logging.FileHandler(
             expected_log_file,
-            maxBytes=MAX_LOG_FILE_SIZE,  # 2.3 MB
-            backupCount=7,
+            mode='a',
             encoding="utf-8"
         )
         file_handler.setLevel(logging.DEBUG)
@@ -440,7 +441,7 @@ def cleanup_logs_and_cache():
                 os.remove(log_file)
                 logger.debug(f"Deleted old log file: {log_file}")
         
-        # Cleanup general logs (keep 7-day files)
+        # Cleanup general logs (keep 7-day files, but clean up old rollover files)
         for date_dir in os.listdir(log_dir):
             full_date_dir = os.path.join(log_dir, date_dir)
             if not os.path.isdir(full_date_dir):
@@ -449,10 +450,23 @@ def cleanup_logs_and_cache():
                 dir_date = datetime.strptime(date_dir, "%Y-%m-%d").date()
             except Exception:
                 continue  # skip non-date dirs
-            if (now.date() - dir_date).days > 1:
+            
+            # Keep logs for 7 days, but clean up old rollover files from bad implementation
+            if (now.date() - dir_date).days > 7:
                 import shutil
                 shutil.rmtree(full_date_dir)
                 logger.debug(f"Deleted old log directory: {full_date_dir}")
+            else:
+                # Clean up unnecessary rollover files in current directories
+                try:
+                    for log_file in os.listdir(full_date_dir):
+                        # Remove .1, .2, .3 etc rollover files that were created incorrectly
+                        if re.match(r'.*\.log\.\d+$', log_file):
+                            rollover_path = os.path.join(full_date_dir, log_file)
+                            os.remove(rollover_path)
+                            logger.debug(f"Cleaned up incorrect rollover file: {rollover_path}")
+                except Exception as cleanup_error:
+                    logger.warning(f"Error cleaning rollover files in {full_date_dir}: {cleanup_error}")
         
         # Cleanup cache files (keep 15-day files)
         for cache_file in glob.glob(os.path.join(constants.CACHE_DIR, "*")):
@@ -486,7 +500,7 @@ def clean_broker_monitor_logs():
                 if fname.startswith("broker_monitor-") and fname.endswith(".log"):
                     fpath = os.path.join(full_date_dir, fname)
                     file_time = datetime.fromtimestamp(os.path.getmtime(fpath)).astimezone(now.tzinfo)
-                    if (now - file_time).days > 1:
+                    if (now - file_time).days > 7:
                         os.remove(fpath)
                         print(f"Deleted old broker_monitor log: {fpath}")
     except Exception as e:
