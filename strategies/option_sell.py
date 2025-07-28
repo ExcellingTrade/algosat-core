@@ -646,6 +646,7 @@ class OptionSellStrategy(StrategyBase):
         """
         try:
             strike_symbol = order_row.get('strike_symbol')
+            order_id = order_row.get('id')
             if not strike_symbol:
                 logger.error("evaluate_exit: Missing strike_symbol in order_row.")
                 return False
@@ -668,6 +669,11 @@ class OptionSellStrategy(StrategyBase):
             # Check for supertrend reversal exit (SELL to BUY)
             last_candle = history_df.iloc[-1]
             if last_candle.get('supertrend_signal') == constants.TRADE_DIRECTION_BUY:
+                 # Update status to SUPERTREND_REVERSAL instead of exiting
+                await self.order_manager.update_order_status_in_db(
+                    order_id=order_id,
+                    status=constants.TRADE_STATUS_EXIT_REVERSAL
+                )
                 logger.info(f"evaluate_exit: Supertrend reversal (SELL to BUY) detected for {strike_symbol}. Exit signal triggered.")
                 return True
             return False

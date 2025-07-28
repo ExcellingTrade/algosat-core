@@ -245,6 +245,82 @@ class OptionBuyStrategy(StrategyBase):
             logger.debug(f"Synced positions for strategy {strategy_id}: {list(self._positions.keys())}")
             logger.debug(f"Synced last_signal_direction: {self._last_signal_direction}")
 
+    async def check_trade_limits(self) -> tuple[bool, str]:
+        """
+        Check if the strategy has exceeded maximum trades or maximum loss trades configured limits.
+        Returns (can_trade: bool, reason: str)
+        """
+        try:
+            trade_config = self.trade
+            max_trades = trade_config.get('max_trades', None)
+            max_loss_trades = trade_config.get('max_loss_trades', None)
+            
+            # If no limits are configured, allow trading
+            if max_trades is None and max_loss_trades is None:
+                return True, "No trade limits configured"
+            
+            strategy_id = getattr(self.cfg, 'strategy_id', None)
+            if not strategy_id:
+                logger.warning("No strategy_id found in config, cannot check trade limits")
+                return True, "No strategy_id found, allowing trade"
+            
+            trade_day = get_trade_day(get_ist_datetime())
+            
+            async with AsyncSessionLocal() as session:
+                from algosat.core.db import get_all_orders_for_strategy_and_tradeday
+                
+                # Get all orders for this strategy on the current trade day
+                all_orders = await get_all_orders_for_strategy_and_tradeday(session, strategy_id, trade_day)
+                
+                # Count completed trades (both profitable and loss trades)
+                completed_statuses = [
+                    constants.TRADE_STATUS_EXIT_TARGET,
+                    constants.TRADE_STATUS_EXIT_STOPLOSS,
+                    constants.TRADE_STATUS_EXIT_REVERSAL,
+                    constants.TRADE_STATUS_EXIT_EOD,
+                    constants.TRADE_STATUS_EXIT_MAX_LOSS,
+                    constants.TRADE_STATUS_ENTRY_CANCELLED,
+                    constants.TRADE_STATUS_EXIT_CLOSED
+                    
+                ]
+                
+                completed_trades = [order for order in all_orders if order.get('status') in completed_statuses]
+                total_completed_trades = len(completed_trades)
+                
+                # Count loss trades (excluding profitable trades)
+                loss_statuses = [
+                    constants.TRADE_STATUS_EXIT_STOPLOSS,
+                    constants.TRADE_STATUS_EXIT_MAX_LOSS,
+                    constants.TRADE_STATUS_ENTRY_CANCELLED
+                ]
+                
+                loss_trades = [order for order in completed_trades if order.get('status') in loss_statuses]
+                total_loss_trades = len(loss_trades)
+                
+                logger.debug(f"Trade limits check - Total completed trades: {total_completed_trades}, Loss trades: {total_loss_trades}")
+                logger.debug(f"Trade limits config - Max trades: {max_trades}, Max loss trades: {max_loss_trades}")
+                logger.debug(f"Completed trade statuses found: {[order.get('status') for order in completed_trades]}")
+                logger.debug(f"Loss trade statuses found: {[order.get('status') for order in loss_trades]}")
+                
+                # Check max_trades limit
+                if max_trades is not None and total_completed_trades >= max_trades:
+                    reason = f"Maximum trades limit reached: {total_completed_trades}/{max_trades}"
+                    logger.info(reason)
+                    return False, reason
+                
+                # Check max_loss_trades limit
+                if max_loss_trades is not None and total_loss_trades >= max_loss_trades:
+                    reason = f"Maximum loss trades limit reached: {total_loss_trades}/{max_loss_trades}"
+                    logger.info(reason)
+                    return False, reason
+                
+                return True, f"Trade limits OK - Completed: {total_completed_trades}/{max_trades or 'unlimited'}, Loss: {total_loss_trades}/{max_loss_trades or 'unlimited'}"
+                
+        except Exception as e:
+            logger.error(f"Error checking trade limits: {e}")
+            # On error, allow trading to avoid blocking legitimate trades
+            return True, f"Error checking trade limits, allowing trade: {e}"
+
     async def process_cycle(self) -> Optional[dict]:
         """
         Main signal evaluation cycle for OptionBuyStrategy.
@@ -254,6 +330,15 @@ class OptionBuyStrategy(StrategyBase):
         if getattr(self, '_setup_failed', False) or not self._strikes:
             logger.warning("process_cycle aborted: setup failed or no strikes available.")
             return None
+        
+        # Check trade limits before proceeding with any new trades
+        can_trade, limit_reason = await self.check_trade_limits()
+        if not can_trade:
+            logger.warning(f"process_cycle aborted: {limit_reason}")
+            return None
+        
+        logger.debug(f"Trade limits check passed: {limit_reason}")
+        
         trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
         trade_day = get_trade_day(get_ist_datetime())#  - timedelta(days=1)
@@ -271,6 +356,12 @@ class OptionBuyStrategy(StrategyBase):
             if data is not None and not getattr(data, 'empty', False)
         }
         await self.sync_open_positions()  # Sync in-memory with DB
+        
+        # If we already have open positions for all strikes, no need to check trade limits
+        if all(self._positions.get(strike) for strike in self._strikes):
+            logger.debug("All strikes have open positions, skipping trade limits check and signal evaluation")
+            return None
+        
         # 3. Evaluate trade signal for each strike
         for strike, data in indicator_data.items():
             try:
@@ -584,27 +675,19 @@ class OptionBuyStrategy(StrategyBase):
 
     async def evaluate_exit(self, order_row):
         """
-        Evaluate exit for a given order_row.
+        Evaluate exit conditions for a given order_row.
         Args:
             order_row: The order dict (from DB).
         Returns:
-            True if exit signal should be triggered, else False.
+            True if exit signal is detected and order should be exited, else False.
         """
         try:
             strike_symbol = order_row.get('strike_symbol')
+            order_id = order_row.get('id')
             if not strike_symbol:
                 logger.error("evaluate_exit: Missing strike_symbol in order_row.")
                 return False
             trade_config = self.trade
-            # Fetch candle history for the strike
-            # Use a short lookback (e.g., last 20 candles)
-            # history_dict = await fetch_instrument_history(
-            #     self.dp,
-            #     [strike_symbol],
-            #     interval_minutes=trade_config.get('interval_minutes', 5),
-            #     ins_type="",
-            #     cache=False
-            # )
             trade_day = get_trade_day(get_ist_datetime())#  - timedelta(days=1)
             history_dict = await self.fetch_history_data(
             self.dp, [strike_symbol], trade_day, trade_config
@@ -619,8 +702,15 @@ class OptionBuyStrategy(StrategyBase):
             # Check for supertrend reversal exit
             last_candle = history_df.iloc[-1]
             if last_candle.get('supertrend_signal') == constants.TRADE_DIRECTION_SELL:
-                logger.info(f"evaluate_exit: Supertrend reversal detected for {strike_symbol}. Exit signal triggered.")
+                # Update status to SUPERTREND_REVERSAL instead of exiting
+                await self.order_manager.update_order_status_in_db(
+                    order_id=order_id,
+                    status=constants.TRADE_STATUS_EXIT_REVERSAL
+                )
+                logger.info(f"evaluate_exit: Supertrend reversal detected for {strike_symbol}. Status updated to SUPERTREND_REVERSAL for order_id={order_id}.")
                 return True
+                    
+            logger.debug(f"evaluate_exit: No exit signal detected for {strike_symbol}, order_id={order_id}")
             return False
         except Exception as e:
             logger.error(f"Error in evaluate_exit for order_id={order_row.get('id')}: {e}")

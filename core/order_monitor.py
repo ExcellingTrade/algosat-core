@@ -1,7 +1,9 @@
 from __future__ import annotations
 from typing import Optional, Any
 import asyncio
+import time
 from datetime import datetime
+import pytz
 from algosat.common.logger import get_logger
 from algosat.models.order_aggregate import OrderAggregate
 
@@ -217,6 +219,9 @@ class OrderMonitor:
                     logger.info(f"OrderMonitor: Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
                     self.stop()
                     return
+
+            # --- Price-based exit logic for OptionBuy and OptionSell strategies ---
+            await self._check_price_based_exit(order_row, strategy, last_main_status)
 
             # --- Use live broker order data from order_cache for ENTRY side ---
             entry_broker_db_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
@@ -747,6 +752,124 @@ class OrderMonitor:
             await asyncio.sleep(self.price_order_monitor_seconds)
         logger.info(f"OrderMonitor: Stopping price monitor for order_id={self.order_id} (last status: {last_main_status})")
     
+    async def _check_price_based_exit(self, order_row, strategy, last_main_status):
+        """
+        Check price-based exit conditions for OptionBuy and OptionSell strategies.
+        Compare LTP with target_price and stop_loss to trigger exits.
+        """
+        try:
+            # Only check for OPEN orders
+            if last_main_status != 'OPEN':
+                return
+            
+            # Only for OptionBuy and OptionSell strategies
+            strategy_name = None
+            if isinstance(strategy, dict):
+                strategy_name = strategy.get('name', '').lower()
+            else:
+                strategy_name = getattr(strategy, 'name', '').lower()
+                
+            if strategy_name not in ['optionbuy', 'optionsell']:
+                return
+                
+            # Get required values from order
+            strike_symbol = order_row.get('strike_symbol')
+            target_price = order_row.get('target_price')
+            stop_loss = order_row.get('stop_loss')
+            side = order_row.get('side', '').upper()
+            
+            if not strike_symbol:
+                logger.debug(f"OrderMonitor: No strike_symbol for price-based exit check, order_id={self.order_id}")
+                return
+                
+            if target_price is None and stop_loss is None:
+                logger.debug(f"OrderMonitor: No target_price or stop_loss set for order_id={self.order_id}")
+                return
+                
+            # Get current LTP
+            try:
+                ltp_response = await self.data_manager.get_ltp(strike_symbol)
+                if isinstance(ltp_response, dict):
+                    ltp = ltp_response.get(strike_symbol)
+                else:
+                    ltp = ltp_response
+                    
+                if ltp is None:
+                    logger.debug(f"OrderMonitor: Could not get LTP for {strike_symbol}, order_id={self.order_id}")
+                    return
+                    
+                ltp = float(ltp)
+                logger.debug(f"OrderMonitor: Price check for order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}, target={target_price}, SL={stop_loss}, side={side}")
+                
+            except Exception as e:
+                logger.error(f"OrderMonitor: Error getting LTP for {strike_symbol}, order_id={self.order_id}: {e}")
+                return
+            
+            # Check exit conditions based on strategy and side
+            should_exit = False
+            exit_reason = None
+            exit_status = None
+            
+            if side == 'BUY':  # Long position
+                # Target hit: LTP >= target_price
+                if target_price is not None and ltp >= float(target_price):
+                    should_exit = True
+                    exit_reason = f"Target hit: LTP {ltp} >= Target {target_price}"
+                    exit_status = "EXIT_TARGET"
+                # Stoploss hit: LTP <= stop_loss
+                elif stop_loss is not None and ltp <= float(stop_loss):
+                    should_exit = True
+                    exit_reason = f"Stoploss hit: LTP {ltp} <= SL {stop_loss}"
+                    exit_status = "EXIT_STOPLOSS"
+                    
+            elif side == 'SELL':  # Short position
+                # Target hit: LTP <= target_price
+                if target_price is not None and ltp <= float(target_price):
+                    should_exit = True
+                    exit_reason = f"Target hit: LTP {ltp} <= Target {target_price}"
+                    exit_status = "EXIT_TARGET"
+                # Stoploss hit: LTP >= stop_loss
+                elif stop_loss is not None and ltp >= float(stop_loss):
+                    should_exit = True
+                    exit_reason = f"Stoploss hit: LTP {ltp} >= SL {stop_loss}"
+                    exit_status = "EXIT_STOPLOSS"
+            
+            if should_exit:
+                logger.info(f"OrderMonitor: Price-based exit triggered for order_id={self.order_id}. {exit_reason}")
+                
+                try:
+                    # Exit the order via OrderManager
+                    await self.order_manager.exit_order(
+                        parent_order_id=self.order_id,
+                        exit_reason=exit_reason,
+                        ltp=ltp
+                    )
+                    
+                    # Update order status with appropriate exit status
+                    from algosat.common import constants
+                    if exit_status == "EXIT_TARGET":
+                        status_constant = constants.TRADE_STATUS_EXIT_TARGET
+                    elif exit_status == "EXIT_STOPLOSS":
+                        status_constant = constants.TRADE_STATUS_EXIT_STOPLOSS
+                    else:
+                        status_constant = constants.TRADE_STATUS_EXIT_CLOSED
+                        
+                    await self.order_manager.update_order_status_in_db(
+                        order_id=self.order_id,
+                        status=status_constant
+                    )
+                    
+                    logger.info(f"OrderMonitor: Successfully exited order_id={self.order_id} due to price condition. Status updated to {status_constant}")
+                    
+                    # Stop monitoring this order
+                    self.stop()
+                    return
+                    
+                except Exception as e:
+                    logger.error(f"OrderMonitor: Error exiting order_id={self.order_id} due to price condition: {e}")
+                    
+        except Exception as e:
+            logger.error(f"OrderMonitor: Error in price-based exit check for order_id={self.order_id}: {e}")
 
 
     def _get_cache_lookup_order_id(self, broker_order_id, broker_name, product_type):
@@ -772,7 +895,6 @@ class OrderMonitor:
         if broker_id is None:
             return None
             
-        import time
         now = time.time()
         cache_duration = 24 * 60 * 60  # 24 hours in seconds
         

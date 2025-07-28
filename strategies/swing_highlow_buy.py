@@ -533,9 +533,15 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     if (prev_candle.get("close", 0) < float(stoploss_spot_level) and 
                         current_candle.get("close", 0) < prev_candle.get("close", 0)):
                         
+                        # Update order status to EXIT_STOPLOSS
+                        await self.order_manager.update_order_status_in_db(
+                            order_id=order_id,
+                            status=constants.TRADE_STATUS_EXIT_STOPLOSS
+                        )
+                        
                         logger.info(f"evaluate_exit: TWO-CANDLE STOPLOSS confirmed for CE trade. order_id={order_id}, "
                                   f"prev_candle={prev_candle.get('close')} < stoploss={stoploss_spot_level}, "
-                                  f"current_candle={current_candle.get('close')} < prev_candle={prev_candle.get('close')}")
+                                  f"current_candle={current_candle.get('close')} < prev_candle={prev_candle.get('close')} - Status updated to EXIT_STOPLOSS")
                         return True
                         
                 elif signal_direction == "DOWN":  # PE trade
@@ -543,9 +549,15 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     if (prev_candle.get("close", 0) > float(stoploss_spot_level) and 
                         current_candle.get("close", 0) > prev_candle.get("close", 0)):
                         
+                        # Update order status to EXIT_STOPLOSS
+                        await self.order_manager.update_order_status_in_db(
+                            order_id=order_id,
+                            status=constants.TRADE_STATUS_EXIT_STOPLOSS
+                        )
+                        
                         logger.info(f"evaluate_exit: TWO-CANDLE STOPLOSS confirmed for PE trade. order_id={order_id}, "
                                   f"prev_candle={prev_candle.get('close')} > stoploss={stoploss_spot_level}, "
-                                  f"current_candle={current_candle.get('close')} > prev_candle={prev_candle.get('close')}")
+                                  f"current_candle={current_candle.get('close')} > prev_candle={prev_candle.get('close')} - Status updated to EXIT_STOPLOSS")
                         return True
             
             # PRIORITY 3: TARGET ACHIEVEMENT CHECK
@@ -553,11 +565,21 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 # Check target based on trade direction
                 if signal_direction == "UP":  # CE trade
                     if float(current_spot_price) >= float(target_spot_level):
-                        logger.info(f"evaluate_exit: TARGET achieved for CE trade. order_id={order_id}, spot_price={current_spot_price} >= target={target_spot_level}")
+                        # Update order status to EXIT_TARGET
+                        await self.order_manager.update_order_status_in_db(
+                            order_id=order_id,
+                            status=constants.TRADE_STATUS_EXIT_TARGET
+                        )
+                        logger.info(f"evaluate_exit: TARGET achieved for CE trade. order_id={order_id}, spot_price={current_spot_price} >= target={target_spot_level} - Status updated to EXIT_TARGET")
                         return True
                 elif signal_direction == "DOWN":  # PE trade
                     if float(current_spot_price) <= float(target_spot_level):
-                        logger.info(f"evaluate_exit: TARGET achieved for PE trade. order_id={order_id}, spot_price={current_spot_price} <= target={target_spot_level}")
+                        # Update order status to EXIT_TARGET
+                        await self.order_manager.update_order_status_in_db(
+                            order_id=order_id,
+                            status=constants.TRADE_STATUS_EXIT_TARGET
+                        )
+                        logger.info(f"evaluate_exit: TARGET achieved for PE trade. order_id={order_id}, spot_price={current_spot_price} <= target={target_spot_level} - Status updated to EXIT_TARGET")
                         return True
             
             # PRIORITY 4: SWING HIGH/LOW STOPLOSS UPDATE
@@ -673,9 +695,15 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                             prev_candle.get("close", 0) < float(current_stoploss) and 
                                             current_candle.get("close", 0) < prev_candle.get("close", 0)):
                                             
+                                            # Update order status to EXIT_STOPLOSS
+                                            await self.order_manager.update_order_status_in_db(
+                                                order_id=order_id,
+                                                status=constants.TRADE_STATUS_EXIT_STOPLOSS
+                                            )
+                                            
                                             logger.info(f"evaluate_exit: NEXT DAY TWO-CANDLE STOPLOSS for CE trade. order_id={order_id}, "
                                                       f"prev_candle={prev_candle.get('close')} < stoploss={current_stoploss}, "
-                                                      f"current_candle={current_candle.get('close')} < prev_candle={prev_candle.get('close')} (post-first-candle)")
+                                                      f"current_candle={current_candle.get('close')} < prev_candle={prev_candle.get('close')} (post-first-candle) - Status updated to EXIT_STOPLOSS")
                                             return True
                                             
                                     elif signal_direction == "DOWN":  # PE trade
@@ -684,9 +712,15 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                             prev_candle.get("close", 0) > float(current_stoploss) and 
                                             current_candle.get("close", 0) > prev_candle.get("close", 0)):
                                             
+                                            # Update order status to EXIT_STOPLOSS
+                                            await self.order_manager.update_order_status_in_db(
+                                                order_id=order_id,
+                                                status=constants.TRADE_STATUS_EXIT_STOPLOSS
+                                            )
+                                            
                                             logger.info(f"evaluate_exit: NEXT DAY TWO-CANDLE STOPLOSS for PE trade. order_id={order_id}, "
                                                       f"prev_candle={prev_candle.get('close')} > stoploss={current_stoploss}, "
-                                                      f"current_candle={current_candle.get('close')} > prev_candle={prev_candle.get('close')} (post-first-candle)")
+                                                      f"current_candle={current_candle.get('close')} > prev_candle={prev_candle.get('close')} (post-first-candle) - Status updated to EXIT_STOPLOSS")
                                             return True
                                 else:
                                     logger.debug(f"evaluate_exit: Not enough post-first-candle data for swing exit check. Need 2, have {len(post_first_candle_df)}")
@@ -720,7 +754,12 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                 )
                                 
                                 if current_datetime >= exit_datetime:
-                                    logger.info(f"evaluate_exit: HOLIDAY exit triggered. order_id={order_id}, upcoming_holiday={check_date.strftime('%Y-%m-%d')}, time={current_datetime.strftime('%H:%M')}")
+                                    # Update order status to EXIT_EOD
+                                    await self.order_manager.update_order_status_in_db(
+                                        order_id=order_id,
+                                        status=constants.TRADE_STATUS_EXIT_EOD
+                                    )
+                                    logger.info(f"evaluate_exit: HOLIDAY exit triggered. order_id={order_id}, upcoming_holiday={check_date.strftime('%Y-%m-%d')}, time={current_datetime.strftime('%H:%M')} - Status updated to EXIT_EOD")
                                     return True
                             except Exception as e:
                                 logger.error(f"Error parsing holiday exit time {exit_time}: {e}")
@@ -765,7 +804,12 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                 else:
                                     # Normal RSI exit logic
                                     if current_rsi >= target_level:
-                                        logger.info(f"evaluate_exit: RSI exit for CE trade. order_id={order_id}, rsi={current_rsi} >= target_level={target_level}")
+                                        # Update order status to EXIT_TARGET
+                                        await self.order_manager.update_order_status_in_db(
+                                            order_id=order_id,
+                                            status=constants.TRADE_STATUS_EXIT_TARGET
+                                        )
+                                        logger.info(f"evaluate_exit: RSI exit for CE trade. order_id={order_id}, rsi={current_rsi} >= target_level={target_level} - Status updated to EXIT_TARGET")
                                         return True
                                         
                             elif signal_direction == "DOWN":  # PE trade
@@ -779,7 +823,12 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                 else:
                                     # Normal RSI exit logic
                                     if current_rsi <= target_level:
-                                        logger.info(f"evaluate_exit: RSI exit for PE trade. order_id={order_id}, rsi={current_rsi} <= target_level={target_level}")
+                                        # Update order status to EXIT_TARGET
+                                        await self.order_manager.update_order_status_in_db(
+                                            order_id=order_id,
+                                            status=constants.TRADE_STATUS_EXIT_TARGET
+                                        )
+                                        logger.info(f"evaluate_exit: RSI exit for PE trade. order_id={order_id}, rsi={current_rsi} <= target_level={target_level} - Status updated to EXIT_TARGET")
                                         return True
                         else:
                             logger.warning(f"evaluate_exit: Could not calculate current RSI - missing RSI column")
@@ -818,7 +867,12 @@ class SwingHighLowBuyStrategy(StrategyBase):
                             )
                             
                             if current_datetime >= exit_time:
-                                logger.info(f"evaluate_exit: EXPIRY exit triggered. order_id={order_id}, expiry_date={expiry_date}, current_time={current_datetime.strftime('%H:%M')}, exit_time={expiry_exit_time}")
+                                # Update order status to EXIT_EXPIRY
+                                await self.order_manager.update_order_status_in_db(
+                                    order_id=order_id,
+                                    status=constants.TRADE_STATUS_EXIT_EXPIRY
+                                )
+                                logger.info(f"evaluate_exit: EXPIRY exit triggered. order_id={order_id}, expiry_date={expiry_date}, current_time={current_datetime.strftime('%H:%M')}, exit_time={expiry_exit_time} - Status updated to EXIT_EXPIRY")
                                 return True
                         except Exception as e:
                             logger.error(f"Error parsing expiry exit time {expiry_exit_time}: {e}")
