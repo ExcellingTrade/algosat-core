@@ -448,6 +448,7 @@ class OrderMonitor:
                 try:
                     # Use new helper to get all broker positions (with cache)
                     all_positions = await self._get_all_broker_positions_with_cache()
+                    logger.info(f"OrderMonitor: Fetched all broker positions for order_id={self.order_id}: {all_positions}")
                     # Map broker_id to positions
                     broker_positions_map = {}
                     if all_positions and isinstance(all_positions, dict):
@@ -459,6 +460,20 @@ class OrderMonitor:
                     total_pnl = 0.0
                     all_closed = True
                     for bro in entry_broker_db_orders:
+                        # Skip processing if broker execution is invalid or failed
+                        broker_status = bro.get('status', '').upper()
+                        symbol_val = bro.get('symbol', None) or bro.get('tradingsymbol', None)
+                        qty = bro.get('quantity', None)
+                        
+                        # Simple validation checks: skip if status is FAILED or missing essential data
+                        if (broker_status == 'FAILED' or 
+                            symbol_val is None or 
+                            qty is None or 
+                            qty == 0):
+                            logger.debug(f"OrderMonitor: Skipping position matching for order_id={self.order_id} - "
+                                       f"invalid broker execution: status={broker_status}, symbol={symbol_val}, qty={qty}")
+                            continue
+                        
                         # broker_id = getattr(bro, 'broker_id', None)
                         broker_id = bro.get('broker_id', None)
                         broker_name = None
@@ -468,8 +483,6 @@ class OrderMonitor:
                             except Exception as e:
                                 logger.error(f"OrderMonitor: Could not get broker name for broker_id={broker_id}: {e}")
                         # broker_name = await self.data_manager.get_broker_name_by_id(bro.get("broker_id"))
-                        symbol_val = bro.get('symbol', None) or bro.get('tradingsymbol', None)
-                        qty = bro.get('quantity', None)
                         product = bro.get('product_type', None) or bro.get('product', None)
                         exec_price = bro.get('execution_price', None)
                         # Find matching position for this broker

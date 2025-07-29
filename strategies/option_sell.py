@@ -14,6 +14,8 @@ from algosat.core.db import AsyncSessionLocal, get_order_by_id
 from algosat.core.signal import TradeSignal, SignalType
 from algosat.common.strategy_utils import (
     calculate_end_date,
+    detect_regime,
+    get_regime_reference_points,
     wait_for_first_candle_completion,
     calculate_first_candle_details,
     fetch_option_chain_and_first_candle_history,
@@ -24,15 +26,7 @@ from algosat.common.strategy_utils import (
     calculate_trade,
     get_max_premium_from_config,
 )
-# Import regime detection helpers (stub: as in option_buy)
-try:
-    from algosat.common.strategy_utils import detect_regime, get_regime_reference
-except ImportError:
-    # Stubs if not present
-    def detect_regime(entry_price, regime_reference, option_type, trade_mode):
-        return "sideways"
-    def get_regime_reference(symbol, timeframe, config):
-        return {}
+# Import regime detection helpers
 from algosat.utils.indicators import (
     calculate_atr_trial_stops,
     calculate_supertrend,
@@ -120,7 +114,7 @@ class OptionSellStrategy(StrategyBase):
         self._positions = {}       # Track open positions by strike
         self._last_signal_direction = {}  # Track last signal direction per strike
         # Regime reference loaded at setup
-        self._regime_reference = None
+        self.regime_reference = None
 
     async def ensure_broker(self):
         # No longer needed for data fetches, but keep for order placement if required
@@ -178,13 +172,22 @@ class OptionSellStrategy(StrategyBase):
         else:
             self._setup_failed = False
             logger.info(f"Selected strikes for entry: {self._strikes}")
-        # Load regime reference once at setup (as in option_buy)
+        # Load regime reference once at setup (similar to option_buy)
         try:
-            self._regime_reference = get_regime_reference(self.symbol, self.timeframe, self.cfg)
-            logger.info(f"Loaded regime reference for {self.symbol}: {self._regime_reference}")
+            today_dt = get_ist_datetime()
+            interval_minutes = trade.get("interval_minutes", 5)
+            first_candle_time = trade.get("first_candle_time", "09:15")
+            self.regime_reference = await get_regime_reference_points(
+                self.dp,
+                self.symbol,
+                first_candle_time,
+                interval_minutes,
+                today_dt
+            )
+            logger.info(f"Regime reference points for {symbol}: {self.regime_reference}")
         except Exception as e:
             logger.error(f"Error loading regime reference: {e}")
-            self._regime_reference = None
+            self.regime_reference = None
 
     async def sync_open_positions(self):
         """
@@ -285,7 +288,7 @@ class OptionSellStrategy(StrategyBase):
                 if self._positions.get(strike):
                     logger.info(f"DB: Position already open for {strike}, skipping signal evaluation and order placement.")
                     continue
-                signal_payload = self.evaluate_trade_signal(data, trade_config, strike)
+                signal_payload = await self.evaluate_trade_signal(data, trade_config, strike)
                 # 4. Place order if signal
                 order_info = await self.process_order(signal_payload, data, strike)
                 if order_info:
@@ -437,7 +440,7 @@ class OptionSellStrategy(StrategyBase):
             logger.debug(f"No signal for {strike} at {data.iloc[-1].get('timestamp', 'N/A')}")
             return None
 
-    def evaluate_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
+    async def evaluate_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
         """
         Entry logic: Only enter on SELL signal if not immediately after a BUY-to-SELL reversal.
         Skips entry if previous candle was BUY and current is SELL (fresh reversal).
@@ -493,25 +496,41 @@ class OptionSellStrategy(StrategyBase):
                 and curr['close'] < curr['sma']
                 and curr['low'] > threshold_entry
             ):
-                # --- Begin regime detection logic (as in option_buy) ---
-                entry_price = curr['close']
-                option_type = constants.OPTION_TYPE_CALL if "CE" in strike else constants.OPTION_TYPE_PUT
-                # Use cached regime_reference if available
-                regime_reference = getattr(self, "_regime_reference", None)
-                if not regime_reference:
-                    try:
-                        regime_reference = get_regime_reference(self.symbol, self.timeframe, self.cfg)
-                        self._regime_reference = regime_reference
-                    except Exception as e:
-                        logger.error(f"Could not compute regime_reference: {e}")
-                        regime_reference = {}
+                # --- Sideways regime logic ---
                 sideways_enabled = config.get('sideways_trade_enabled', False)
                 sideways_qty_perc = config.get('sideways_qty_percentage', 0)
                 option_type = "CE" if strike.endswith("CE") else "PE"
-                trade_dict = calculate_trade(curr, data, strike, config, side=Side.BUY)
+                trade_dict = calculate_trade(curr, data, strike, config, side=Side.SELL)
                 lot_qty = trade_dict.get(constants.TRADE_KEY_LOT_QTY, 0)
-                regime = detect_regime(entry_price, regime_reference, option_type, "SELL")
-                logger.info(f"Regime detected for {strike}: {regime} (entry_price={entry_price}, option_type={option_type})")
+                
+                # Check if regime_reference is available, if not try to get it
+                if not getattr(self, 'regime_reference', None):
+                    logger.warning("regime_reference is empty, attempting to fetch regime reference points")
+                    interval_minutes = config.get("interval_minutes", 5)
+                    first_candle_time = config.get("first_candle_time", "09:15")
+                    today_dt = get_ist_datetime()
+                    self.regime_reference = await get_regime_reference_points(
+                        self.dp,
+                        self.symbol,
+                        first_candle_time,
+                        interval_minutes,
+                        today_dt
+                    )
+                    logger.info(f"Regime reference points for {self.symbol}: {self.regime_reference}")
+                
+                # If regime_reference is still empty, skip sideways calculation
+                if not getattr(self, 'regime_reference', None):
+                    logger.error("regime_reference is still empty after retry, skipping sideways regime detection")
+                    regime = "Unknown"
+                else:
+                    regime = detect_regime(
+                        entry_price=trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
+                        regime_ref=getattr(self, 'regime_reference', None),
+                        option_type=option_type,
+                        strategy="SELL"
+                    )
+                
+                logger.info(f"Regime detected for {strike}: {regime} (entry_price={trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE)}, option_type={option_type})")
                 if sideways_enabled and regime == "Sideways":
                     if sideways_qty_perc == 0:
                         logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, sideways_qty_percentage is 0, skipping trade.")
@@ -543,7 +562,7 @@ class OptionSellStrategy(StrategyBase):
                 }]
                 self._last_signal_direction[strike] = constants.TRADE_DIRECTION_SELL
                 logger.info(
-                    f"🔴 Signal formed for {strike} at {curr.get('timestamp')}: Entry at {trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE)} | Updated last_signal_direction to SELL | regime={regime}, lot_qty={adjusted_qty}, target={trade_dict.get(constants.TRADE_KEY_TARGET_PRICE)}"
+                    f"🔴 Signal formed for {strike} at {curr.get('timestamp')}: Entry at {trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE)} | Updated last_signal_direction to SELL | regime={regime}, lot_qty={trade_dict.get(constants.TRADE_KEY_LOT_QTY)}, target={trade_dict.get(constants.TRADE_KEY_TARGET_PRICE)}"
                 )
                 return TradeSignal(
                     symbol=strike,
@@ -574,7 +593,7 @@ class OptionSellStrategy(StrategyBase):
         return None
 
 
-    def evaluate_trade_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
+    async def evaluate_trade_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
         """
         Decide whether to enter or do nothing based on the latest candle.
         Returns a TradeSignal when a signal is generated, otherwise None.
@@ -582,7 +601,7 @@ class OptionSellStrategy(StrategyBase):
         Uses last signal direction to prevent stacking same direction trades.
         """
         if not self._positions.get(strike):
-            result = self.evaluate_signal(data, config, strike)
+            result = await self.evaluate_signal(data, config, strike)
             if result:
                 logger.info(f"Accepted trade signal for {strike}: {result.side}")
             else:

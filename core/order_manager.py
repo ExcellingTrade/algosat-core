@@ -341,6 +341,11 @@ class OrderManager:
         """
         Utility to build the broker execution data dict for DB insert.
         """
+        # Additional safety check for boolean status values
+        if isinstance(status, bool):
+            status = "FAILED" if status is False else "PENDING"
+            logger.warning(f"OrderManager: build_broker_exec_data converted boolean status to string: {status}")
+        
         return dict(
             parent_order_id=parent_order_id,
             broker_id=broker_id,
@@ -388,6 +393,12 @@ class OrderManager:
             order_id = response.get("order_id")
             order_message = response.get("order_message")
             status_val = response.get("status", "FAILED")
+            
+            # Convert boolean status to proper string status
+            if isinstance(status_val, bool):
+                status_val = "FAILED" if status_val is False else "PENDING"
+                logger.warning(f"OrderManager: Converted boolean status to string: {response.get('status')} -> {status_val} for broker_name={broker_name}")
+            
             product_type = response.get("product_type")
             order_type = response.get("order_type")
             exec_price = response.get("execPrice", 0.0)

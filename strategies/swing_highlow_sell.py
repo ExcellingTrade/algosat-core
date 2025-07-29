@@ -4,7 +4,11 @@ from algosat.core.signal import TradeSignal
 import pandas as pd
 from algosat.common import constants, strategy_utils
 from algosat.common.broker_utils import calculate_backdate_days, get_trade_day
-from algosat.common.strategy_utils import calculate_end_date
+from algosat.common.strategy_utils import (
+    calculate_end_date,
+    detect_regime,
+    get_regime_reference_points
+)
 from algosat.core.data_manager import DataManager
 from algosat.core.order_manager import OrderManager
 from algosat.core.time_utils import localize_to_ist, get_ist_datetime, to_ist
@@ -107,6 +111,8 @@ class SwingHighLowSellStrategy(StrategyBase):
         self.lot_size = self.trade.get("lot_size", 75)
         self.rsi_ignore_above = self._entry_cfg.get("rsi_ignore_above", 80)
         self.rsi_period = self.indicators.get("rsi_period", 14)
+        # Regime reference for sideways detection
+        self.regime_reference = None
         logger.info(f"SwingHighLowSellStrategy config: {self.trade}")
     
     async def ensure_broker(self):
@@ -128,6 +134,18 @@ class SwingHighLowSellStrategy(StrategyBase):
                 f"confirm_candles={self.confirm_candles}, pe_lot_qty={self.pe_lot_qty}, lot_size={self.lot_size}, "
                 f"rsi_ignore_above={self.rsi_ignore_above}, rsi_period={self.rsi_period}, stop_percentage={self.stop_percentage}"
             )
+            
+            # Setup regime reference for sideways detection
+            today_dt = get_ist_datetime()
+            first_candle_time = self.trade.get("first_candle_time", "09:15")
+            self.regime_reference = await get_regime_reference_points(
+                self.dp,
+                self.symbol,
+                first_candle_time,
+                self.entry_minutes,
+                today_dt
+            )
+            logger.info(f"Regime reference points for {self.symbol}: {self.regime_reference}")
         except Exception as e:
             logger.error(f"SwingHighLowSellStrategy setup failed: {e}", exc_info=True)
             self._setup_failed = True
@@ -990,7 +1008,7 @@ class SwingHighLowSellStrategy(StrategyBase):
                 right_bars=entry_right
             )
             last_hh, last_ll, last_hl, last_lh = swing_utils.get_last_swing_points(swing_df)
-            logger.info(f"Latest swing points: HH={last_hh}, LL={last_ll}, HL={last_hl}, LH={last_lh}")
+            logger.info(f"{self.cfg.symbol}'s Latest swing points: HH={last_hh}, LL={last_ll}, HL={last_hl}, LH={last_lh}")
             last_hh, last_ll = swing_utils.get_latest_confirmed_high_low(swing_df)
             if not last_hh or not last_ll:
                 logger.info("No HH/LL pivot available for breakout evaluation.")
@@ -1050,6 +1068,52 @@ class SwingHighLowSellStrategy(StrategyBase):
             entry_spot_swing_high = last_hh["price"]
             entry_spot_swing_low = last_ll["price"]
 
+            # --- Regime detection and quantity adjustment logic ---
+            # Check if regime_reference is available, if not try to get it
+            if not getattr(self, 'regime_reference', None):
+                logger.warning("regime_reference is empty, attempting to fetch regime reference points")
+                interval_minutes = self.entry_minutes
+                first_candle_time = config.get("first_candle_time", "09:15")
+                today_dt = get_ist_datetime()
+                self.regime_reference = await get_regime_reference_points(
+                    self.dp,
+                    self.symbol,
+                    first_candle_time,
+                    interval_minutes,
+                    today_dt
+                )
+                logger.info(f"Regime reference points for {self.symbol}: {self.regime_reference}")
+            
+            # If regime_reference is still empty, skip sideways calculation
+            if not getattr(self, 'regime_reference', None):
+                logger.error("regime_reference is still empty after retry, skipping sideways regime detection")
+                regime = "Unknown"
+            else:
+                regime = detect_regime(
+                    entry_price=entry_spot_price,
+                    regime_ref=getattr(self, 'regime_reference', None),
+                    option_type=breakout_type,
+                    strategy="SELL"
+                )
+            
+            logger.info(f"Regime detected for {self.symbol}: {regime} (entry_price={entry_spot_price}, option_type={breakout_type})")
+            
+            # Adjust quantity for sideways regime if enabled
+            sideways_enabled = config.get('sideways_trade_enabled', False)
+            sideways_qty_perc = config.get('sideways_qty_percentage', 0)
+            original_lot_qty = lot_qty
+            
+            if sideways_enabled and regime == "Sideways":
+                if sideways_qty_perc == 0:
+                    logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, sideways_qty_percentage is 0, skipping trade.")
+                    return None
+                new_lot_qty = int(round(lot_qty * sideways_qty_perc / 100))
+                if new_lot_qty == 0:
+                    logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, computed lot_qty is 0, skipping trade.")
+                    return None
+                lot_qty = new_lot_qty
+                logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, updating lot_qty to {lot_qty} ({sideways_qty_perc}% of {original_lot_qty})")
+
             # Target calculation
             target_cfg = config.get("target", {})
             target_type = target_cfg.get("type", "ATR")
@@ -1104,7 +1168,7 @@ class SwingHighLowSellStrategy(StrategyBase):
             except Exception as e:
                 logger.error(f"Error calculating entry RSI: {e}")
 
-            logger.info(f"Breakout detected: type={breakout_type}, trend={trend}, direction={direction}, strike={strike}, price={last_candle['close']}, entry_spot_price={entry_spot_price}, entry_spot_swing_high={entry_spot_swing_high}, entry_spot_swing_low={entry_spot_swing_low}, stoploss_spot_level={stoploss_spot_level}, target_spot_level={target_spot_level}, entry_rsi={entry_rsi_value}, target_type={target_type}, expiry_date={expiry_date}")
+            logger.info(f"Breakout detected: type={breakout_type}, trend={trend}, direction={direction}, strike={strike}, price={last_candle['close']}, entry_spot_price={entry_spot_price}, entry_spot_swing_high={entry_spot_swing_high}, entry_spot_swing_low={entry_spot_swing_low}, stoploss_spot_level={stoploss_spot_level}, target_spot_level={target_spot_level}, entry_rsi={entry_rsi_value}, target_type={target_type}, expiry_date={expiry_date}, regime={regime}, lot_qty={lot_qty}")
             from algosat.core.signal import Side
             signal = TradeSignal(
                 symbol=strike,
@@ -1121,7 +1185,7 @@ class SwingHighLowSellStrategy(StrategyBase):
                 entry_rsi=entry_rsi_value,
                 expiry_date=expiry_date
             )
-            logger.info(f"Breakout detected: type={breakout_type}, direction={direction}, strike={strike}, price={last_candle['close']}")
+            logger.info(f"🔴 Swing breakout signal formed for {self.symbol}: type={breakout_type}, direction={direction}, strike={strike}, price={last_candle['close']}, regime={regime}, lot_qty={lot_qty} (original: {original_lot_qty})")
             return signal
         except Exception as e:
             logger.error(f"Error in evaluate_signal: {e}", exc_info=True)

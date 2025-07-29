@@ -369,7 +369,7 @@ class OptionBuyStrategy(StrategyBase):
                 if self._positions.get(strike):
                     logger.info(f"DB: Position already open for {strike}, skipping signal evaluation and order placement.")
                     continue
-                signal_payload = self.evaluate_trade_signal(data, trade_config, strike)
+                signal_payload = await self.evaluate_trade_signal(data, trade_config, strike)
                 # 4. Place order if signal
                 order_info = await self.process_order(signal_payload, data, strike)
                 if order_info:
@@ -475,7 +475,7 @@ class OptionBuyStrategy(StrategyBase):
             logger.debug(f"No signal for {strike} at {data.iloc[-1].get('timestamp', 'N/A')}")
             return None
 
-    def evaluate_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
+    async def evaluate_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
         """
         Entry logic: Only enter on BUY signal if not immediately after a SELL-to-BUY reversal.
         Skips entry if previous candle was SELL and current is BUY (fresh reversal).
@@ -539,12 +539,33 @@ class OptionBuyStrategy(StrategyBase):
                 option_type = "CE" if strike.endswith("CE") else "PE"
                 trade_dict = calculate_trade(curr, data, strike, config, side=Side.BUY)
                 lot_qty = trade_dict.get(constants.TRADE_KEY_LOT_QTY, 0)
-                regime = detect_regime(
-                    entry_price=trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
-                    regime_ref=getattr(self, 'regime_reference', None),
-                    option_type=option_type,
-                    strategy="BUY"
-                )
+                
+                # Check if regime_reference is available, if not try to get it
+                if not getattr(self, 'regime_reference', None):
+                    logger.warning("regime_reference is empty, attempting to fetch regime reference points")
+                    interval_minutes = config.get("interval_minutes", 5)
+                    first_candle_time = config.get("first_candle_time", "09:15")
+                    today_dt = get_ist_datetime()
+                    self.regime_reference = await get_regime_reference_points(
+                        self.dp,
+                        self.symbol,
+                        first_candle_time,
+                        interval_minutes,
+                        today_dt
+                    )
+                    logger.info(f"Regime reference points for {self.symbol}: {self.regime_reference}")
+                
+                # If regime_reference is still empty, skip sideways calculation
+                if not getattr(self, 'regime_reference', None):
+                    logger.error("regime_reference is still empty after retry, skipping sideways regime detection")
+                    regime = "Unknown"
+                else:
+                    regime = detect_regime(
+                        entry_price=trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
+                        regime_ref=getattr(self, 'regime_reference', None),
+                        option_type=option_type,
+                        strategy="BUY"
+                    )
                 if sideways_enabled and regime == "Sideways":
                     if sideways_qty_perc == 0:
                         logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, sideways_qty_percentage is 0, skipping trade.")
@@ -605,7 +626,7 @@ class OptionBuyStrategy(StrategyBase):
         return None
 
 
-    def evaluate_trade_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
+    async def evaluate_trade_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
         """
         Decide whether to enter or do nothing based on the latest candle.
         Returns a TradeSignal when a signal is generated, otherwise None.
@@ -613,7 +634,7 @@ class OptionBuyStrategy(StrategyBase):
         Uses last signal direction to prevent stacking same direction trades.
         """
         if not self._positions.get(strike):
-            result = self.evaluate_signal(data, config, strike)
+            result = await self.evaluate_signal(data, config, strike)
             if result:
                 logger.info(f"Accepted trade signal for {strike}: {result.side}")
             else:
