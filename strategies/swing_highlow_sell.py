@@ -1101,6 +1101,7 @@ class SwingHighLowSellStrategy(StrategyBase):
             # Adjust quantity for sideways regime if enabled
             sideways_enabled = config.get('sideways_trade_enabled', False)
             sideways_qty_perc = config.get('sideways_qty_percentage', 0)
+            sideways_target_atr_multiplier = config.get("sideways_target_atr_multiplier", 1)
             original_lot_qty = lot_qty
             
             if sideways_enabled and regime == "Sideways":
@@ -1112,7 +1113,7 @@ class SwingHighLowSellStrategy(StrategyBase):
                     logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, computed lot_qty is 0, skipping trade.")
                     return None
                 lot_qty = new_lot_qty
-                logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, updating lot_qty to {lot_qty} ({sideways_qty_perc}% of {original_lot_qty})")
+                logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, updating lot_qty to {lot_qty} ({sideways_qty_perc}% of {original_lot_qty}) and using target_atr_multiplier={sideways_target_atr_multiplier}")
 
             # Target calculation
             target_cfg = config.get("target", {})
@@ -1121,6 +1122,14 @@ class SwingHighLowSellStrategy(StrategyBase):
                 # Calculate ATR on entry timeframe (5m default)
                 atr_period = target_cfg.get("atr_period", 14)
                 atr_multiplier = target_cfg.get("atr_multiplier", 3)  # Default to 3x ATR
+                
+                # Use sideways_target_atr_multiplier if in sideways regime
+                if sideways_enabled and regime == "Sideways":
+                    effective_atr_multiplier = sideways_target_atr_multiplier
+                    logger.info(f"Using sideways target ATR multiplier: {effective_atr_multiplier} for {self.symbol}")
+                else:
+                    effective_atr_multiplier = atr_multiplier
+                
                 # Defensive: ensure entry_df has enough data
                 atr_value = None
                 try:
@@ -1133,11 +1142,11 @@ class SwingHighLowSellStrategy(StrategyBase):
                 
                 if atr_value is not None:
                     if breakout_type == "CE":
-                        # For CE: Target = swing_high + (ATR * multiplier)
-                        target_spot_level = float(entry_spot_swing_high) + (float(atr_value) * float(atr_multiplier))
+                        # For CE: Target = swing_high + (ATR * effective_multiplier)
+                        target_spot_level = float(entry_spot_swing_high) + (float(atr_value) * float(effective_atr_multiplier))
                     else:
-                        # For PE: Target = swing_low - (ATR * multiplier)
-                        target_spot_level = float(entry_spot_swing_low) - (float(atr_value) * float(atr_multiplier))
+                        # For PE: Target = swing_low - (ATR * effective_multiplier)
+                        target_spot_level = float(entry_spot_swing_low) - (float(atr_value) * float(effective_atr_multiplier))
                 else:
                     logger.warning("Could not calculate ATR for target, using fallback")
                     target_spot_level = None

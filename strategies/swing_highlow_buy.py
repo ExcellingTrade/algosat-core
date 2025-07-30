@@ -906,67 +906,71 @@ class SwingHighLowBuyStrategy(StrategyBase):
             logger.error(f"Error in evaluate_exit for order_id={order_row.get('id')}: {e}", exc_info=True)
             return False
     
-    def update_stoploss_in_db(self, order_id, new_stoploss):
+    async def update_stoploss_in_db(self, order_id, new_stoploss):
         """Update stoploss level in database"""
         try:
             from algosat.core.db import AsyncSessionLocal
-            with AsyncSessionLocal as session:
+            from algosat.core.dbschema import orders
+            async with AsyncSessionLocal() as session:
                 # Update orders table with new stoploss
-                query = "UPDATE orders SET stoploss_spot_level = %s WHERE id = %s"
-                session.execute(query, (float(new_stoploss), order_id))
-                session.commit()
+                await session.execute(
+                    orders.update().where(orders.c.id == order_id).values(stoploss_spot_level=float(new_stoploss))
+                )
+                await session.commit()
                 logger.info(f"Updated stoploss in DB: order_id={order_id}, new_stoploss={new_stoploss}")
         except Exception as e:
             logger.error(f"Error updating stoploss in DB for order_id={order_id}: {e}")
     
-    def update_target_in_db(self, order_id, new_target):
+    async def update_target_in_db(self, order_id, new_target):
         """Update target level in database"""
         try:
             from algosat.core.db import AsyncSessionLocal
-            with AsyncSessionLocal as session:
+            from algosat.core.dbschema import orders
+            async with AsyncSessionLocal() as session:
                 # Update orders table with new target
-                query = "UPDATE orders SET target_spot_level = %s WHERE id = %s"
-                session.execute(query, (float(new_target), order_id))
-                session.commit()
+                await session.execute(
+                    orders.update().where(orders.c.id == order_id).values(target_spot_level=float(new_target))
+                )
+                await session.commit()
                 logger.info(f"Updated target in DB: order_id={order_id}, new_target={new_target}")
         except Exception as e:
             logger.error(f"Error updating target in DB for order_id={order_id}: {e}")
     
-    def update_swing_levels_in_db(self, order_id, swing_high=None, swing_low=None):
+    async def update_swing_levels_in_db(self, order_id, swing_high=None, swing_low=None):
         """Update swing high/low levels in database"""
         try:
             from algosat.core.db import AsyncSessionLocal
-            with AsyncSessionLocal as session:
-                # Build dynamic query based on provided parameters
-                update_fields = []
-                params = []
+            from algosat.core.dbschema import orders
+            async with AsyncSessionLocal() as session:
+                # Build dynamic update values based on provided parameters
+                update_values = {}
                 
                 if swing_high is not None:
-                    update_fields.append("entry_spot_swing_high = %s")
-                    params.append(float(swing_high))
+                    update_values["entry_spot_swing_high"] = float(swing_high)
                 
                 if swing_low is not None:
-                    update_fields.append("entry_spot_swing_low = %s")
-                    params.append(float(swing_low))
+                    update_values["entry_spot_swing_low"] = float(swing_low)
                 
-                if update_fields:
-                    query = f"UPDATE orders SET {', '.join(update_fields)} WHERE id = %s"
-                    params.append(order_id)
-                    session.execute(query, params)
-                    session.commit()
+                if update_values:
+                    await session.execute(
+                        orders.update().where(orders.c.id == order_id).values(**update_values)
+                    )
+                    await session.commit()
                     logger.info(f"Updated swing levels in DB: order_id={order_id}, swing_high={swing_high}, swing_low={swing_low}")
         except Exception as e:
             logger.error(f"Error updating swing levels in DB for order_id={order_id}: {e}")
     
-    def update_entry_rsi_in_db(self, order_id, entry_rsi):
+    async def update_entry_rsi_in_db(self, order_id, entry_rsi):
         """Update entry RSI level in database"""
         try:
             from algosat.core.db import AsyncSessionLocal
-            with AsyncSessionLocal as session:
+            from algosat.core.dbschema import orders
+            async with AsyncSessionLocal() as session:
                 # Update orders table with entry RSI
-                query = "UPDATE orders SET entry_rsi = %s WHERE id = %s"
-                session.execute(query, (float(entry_rsi), order_id))
-                session.commit()
+                await session.execute(
+                    orders.update().where(orders.c.id == order_id).values(entry_rsi=float(entry_rsi))
+                )
+                await session.commit()
                 logger.info(f"Updated entry_rsi in DB: order_id={order_id}, entry_rsi={entry_rsi}")
         except Exception as e:
             logger.error(f"Error updating entry_rsi in DB for order_id={order_id}: {e}")
@@ -1105,6 +1109,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             # Adjust quantity for sideways regime if enabled
             sideways_enabled = config.get('sideways_trade_enabled', False)
             sideways_qty_perc = config.get('sideways_qty_percentage', 0)
+            sideways_target_atr_multiplier = config.get("sideways_target_atr_multiplier", 1)
             original_lot_qty = lot_qty
             
             if sideways_enabled and regime == "Sideways":
@@ -1116,7 +1121,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, computed lot_qty is 0, skipping trade.")
                     return None
                 lot_qty = new_lot_qty
-                logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, updating lot_qty to {lot_qty} ({sideways_qty_perc}% of {original_lot_qty})")
+                logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, updating lot_qty to {lot_qty} ({sideways_qty_perc}% of {original_lot_qty}) and using target_atr_multiplier={sideways_target_atr_multiplier}")
 
             # Target calculation
             target_cfg = config.get("target", {})
@@ -1125,6 +1130,14 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 # Calculate ATR on entry timeframe (5m default)
                 atr_period = target_cfg.get("atr_period", 14)
                 atr_multiplier = target_cfg.get("atr_multiplier", 3)  # Default to 3x ATR
+                
+                # Use sideways_target_atr_multiplier if in sideways regime
+                if sideways_enabled and regime == "Sideways":
+                    effective_atr_multiplier = sideways_target_atr_multiplier
+                    logger.info(f"Using sideways target ATR multiplier: {effective_atr_multiplier} for {self.symbol}")
+                else:
+                    effective_atr_multiplier = atr_multiplier
+                
                 # Defensive: ensure entry_df has enough data
                 atr_value = None
                 try:
@@ -1137,11 +1150,11 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 
                 if atr_value is not None:
                     if breakout_type == "CE":
-                        # For CE: Target = swing_high + (ATR * multiplier)
-                        target_spot_level = float(entry_spot_swing_high) + (float(atr_value) * float(atr_multiplier))
+                        # For CE: Target = swing_high + (ATR * effective_multiplier)
+                        target_spot_level = float(entry_spot_swing_high) + (float(atr_value) * float(effective_atr_multiplier))
                     else:
-                        # For PE: Target = swing_low - (ATR * multiplier)
-                        target_spot_level = float(entry_spot_swing_low) - (float(atr_value) * float(atr_multiplier))
+                        # For PE: Target = swing_low - (ATR * effective_multiplier)
+                        target_spot_level = float(entry_spot_swing_low) - (float(atr_value) * float(effective_atr_multiplier))
                 else:
                     logger.warning("Could not calculate ATR for target, using fallback")
                     target_spot_level = None

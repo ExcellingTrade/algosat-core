@@ -217,8 +217,8 @@ class OrderMonitor:
                 market_close_time = dt_time(15, 30)  # 3:30 PM
                 if current_time_only >= market_close_time:
                     logger.info(f"OrderMonitor: Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
-                    self.stop()
-                    return
+                    # self.stop()
+                    # return
 
             # --- Price-based exit logic for OptionBuy and OptionSell strategies ---
             await self._check_price_based_exit(order_row, strategy, last_main_status)
@@ -251,6 +251,7 @@ class OrderMonitor:
                             if broker_name and cache_lookup_order_id:
                                 try:
                                     cache_order = await self.order_cache.get_order_by_id(broker_name, cache_lookup_order_id)
+                                    logger.debug(f"OrderMonitor: Fetched order from cache for broker_name={broker_name}, order_id={cache_lookup_order_id}: {cache_order}")  
                                 except Exception as e:
                                     logger.error(f"OrderMonitor: Error fetching order from cache for broker_name={broker_name}, order_id={cache_lookup_order_id}: {e}")
                             # Use status from cache_order if available, else fallback to DB
@@ -778,9 +779,9 @@ class OrderMonitor:
             # Only for OptionBuy and OptionSell strategies
             strategy_name = None
             if isinstance(strategy, dict):
-                strategy_name = strategy.get('name', '').lower()
+                strategy_name = strategy.get('strategy_key', '').lower()
             else:
-                strategy_name = getattr(strategy, 'name', '').lower()
+                strategy_name = getattr(strategy, 'strategy_key', '').lower()
                 
             if strategy_name not in ['optionbuy', 'optionsell']:
                 return
@@ -1092,8 +1093,8 @@ class OrderMonitor:
                 # fallback default
                 self.signal_monitor_seconds = 5 * 60
         logger.info(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_seconds}s)")
-        await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
-        # await asyncio.gather( self._signal_monitor())
+        # await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
+        await asyncio.gather( self._signal_monitor())
 
     def stop(self) -> None:
         self._running = False

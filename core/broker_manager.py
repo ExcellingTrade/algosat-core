@@ -355,7 +355,7 @@ class BrokerManager:
                             ).dict()
                             continue
                         try:
-                            margin_ok = await broker.check_margin_availability(broker_order_payload)
+                            margin_ok = await async_retry(broker.check_margin_availability, broker_order_payload, retries=retries, delay=delay)
                         except Exception as e:
                             logger.error(f"Error checking margin: {e}")
                             results[broker_name] = OrderResponse(
@@ -646,7 +646,7 @@ class BrokerManager:
         order_kwargs['extra'] = extra
         return OrderRequest(**order_kwargs)
 
-    async def get_all_broker_order_details(self) -> dict:
+    async def get_all_broker_order_details(self, retries=3, delay=1) -> dict:
         """
         Fetch order details from all trade-enabled brokers.
         Returns a dict: broker_name -> list of order dicts (empty list if no orders).
@@ -655,9 +655,10 @@ class BrokerManager:
         broker_orders = {}
         for broker_name, broker in enabled_brokers.items():
             try:
-                orders = broker.get_order_details()
-                while asyncio.iscoroutine(orders):
-                    orders = await orders
+                if broker is None or not hasattr(broker, "get_order_details"):
+                    broker_orders[broker_name] = []
+                    continue
+                orders = await async_retry(broker.get_order_details, retries=retries, delay=delay)
                 if not isinstance(orders, list):
                     orders = []
                 broker_orders[broker_name] = orders
@@ -668,7 +669,7 @@ class BrokerManager:
                 broker_orders[broker_name] = []
         return broker_orders
 
-    async def get_all_broker_positions(self) -> dict:
+    async def get_all_broker_positions(self, retries=3, delay=1) -> dict:
         """
         Fetch positions from all trade-enabled brokers.
         Returns a dict: broker_name -> list of positions (empty list if error or not available).
@@ -680,13 +681,12 @@ class BrokerManager:
                 if broker is None or not hasattr(broker, "get_positions"):
                     broker_positions[broker_name] = []
                     continue
-                positions = broker.get_positions()
-                while asyncio.iscoroutine(positions):
-                    positions = await positions
-                    if broker_name == 'zerodha' and isinstance(positions, dict) and 'net' in positions:
-                        positions = positions.get('net', [])
-                    if broker_name == 'fyers' and isinstance(positions, dict) and 'netPositions' in positions:
-                        positions = positions.get('netPositions', [])
+                positions = await async_retry(broker.get_positions, retries=retries, delay=delay)
+                # Handle broker-specific response formats
+                if broker_name == 'zerodha' and isinstance(positions, dict) and 'net' in positions:
+                    positions = positions.get('net', [])
+                if broker_name == 'fyers' and isinstance(positions, dict) and 'netPositions' in positions:
+                    positions = positions.get('netPositions', [])
                 if not isinstance(positions, list):
                     positions = []
                 broker_positions[broker_name] = positions
@@ -712,7 +712,7 @@ class BrokerManager:
             logger.error(f"BrokerManager: Broker name {broker_name} not found in self.brokers for broker_id={broker_id}")
             return None
 
-    async def exit_order(self, broker_id, broker_order_id, symbol=None, product_type=None, exit_reason=None,side=None):
+    async def exit_order(self, broker_id, broker_order_id, symbol=None, product_type=None, exit_reason=None, side=None, retries=3, delay=1):
         """
         Route exit order to the correct broker by broker_id.
         """
@@ -730,9 +730,9 @@ class BrokerManager:
             if broker_name:
                 symbol_info = await self.get_symbol_info(broker_name, symbol, instrument_type='NFO')
                 normalized_symbol = symbol_info.get('symbol', symbol)
-        return await broker.exit_order(broker_order_id, symbol=normalized_symbol, product_type=product_type, exit_reason=exit_reason,side=side )
+        return await async_retry(broker.exit_order, broker_order_id, symbol=normalized_symbol, product_type=product_type, exit_reason=exit_reason, side=side, retries=retries, delay=delay)
 
-    async def cancel_order(self, broker_id, broker_order_id, symbol=None, product_type=None, variety=None, cancel_reason=None, **kwargs):
+    async def cancel_order(self, broker_id, broker_order_id, symbol=None, product_type=None, variety=None, cancel_reason=None, retries=3, delay=1, **kwargs):
         """
         Cancel an order for the given broker. Routes to the correct broker's cancel_order implementation.
         For Fyers: pass broker_order_id (with -BO-1 if needed).
@@ -744,4 +744,4 @@ class BrokerManager:
             logger.error(f"BrokerManager: Could not find broker for id: {broker_id}")
             return None
         # Route to broker's cancel_order
-        return await broker.cancel_order(broker_order_id, symbol=symbol, product_type=product_type, variety=variety, cancel_reason=cancel_reason, **kwargs)
+        return await async_retry(broker.cancel_order, broker_order_id, symbol=symbol, product_type=product_type, variety=variety, cancel_reason=cancel_reason, retries=retries, delay=delay, **kwargs)

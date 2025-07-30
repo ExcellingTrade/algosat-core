@@ -32,6 +32,7 @@ class ProductType(str, Enum):
     CNC = "CNC"
     OPTION_STRATEGY = "OPTION_STRATEGY"  # Accept logical value for validation
     BO = "BO"  # Accept broker-specific value for validation
+    CO = "CO"  # Cover Order product type
 
 class OrderStatus(str, Enum):
     AWAITING_ENTRY = "AWAITING_ENTRY"  # Order placed but not yet executed (all broker orders in trigger pending state)
@@ -101,19 +102,52 @@ class OrderRequest(BaseModel):
             product_type = "BO"
         elif product_type == ProductType.DELIVERY or (isinstance(product_type, str) and product_type.upper() == "DELIVERY"):
             product_type = "MARGIN"
+        
+        # Get base values
+        limit_price = float(self.price) if self.price is not None else 0
+        stop_loss_raw = getattr(self, 'stop_loss', None) or self.extra.get("stopLoss") or self.extra.get("stoploss") or self.extra.get("stop_loss") or 0
+        take_profit_raw = self.extra.get("takeProfit", 0)
+        
+        # Calculate stopLoss and takeProfit for BO/CO product types
+        final_product_type = PRODUCT_TYPE_MAP.get(product_type, "INTRADAY") if isinstance(product_type, str) else PRODUCT_TYPE_MAP.get(product_type.value, "INTRADAY")
+        
+        if final_product_type in ["BO", "CO"]:
+            # For BO/CO: stopLoss and takeProfit are denominated in rupees from trade price
+            # Handle directional logic based on BUY/SELL side
+            if self.side == Side.BUY:
+                # BUY: stop is below entry, target is above entry
+                stop_loss_raw_value = abs(limit_price - float(stop_loss_raw)) if stop_loss_raw else 0
+                take_profit_raw_value = abs(float(take_profit_raw) - limit_price) if take_profit_raw else 0
+            else:  # SELL
+                # SELL: stop is above entry, target is below entry
+                stop_loss_raw_value = abs(float(stop_loss_raw) - limit_price) if stop_loss_raw else 0
+                take_profit_raw_value = abs(limit_price - float(take_profit_raw)) if take_profit_raw else 0
+            
+            # Round to nearest 0.05 with 2 decimal places
+            stop_loss_value = round(round(stop_loss_raw_value / 0.05) * 0.05, 2) if stop_loss_raw_value > 0 else 0
+            take_profit_value = round(round(take_profit_raw_value / 0.05) * 0.05, 2) if take_profit_raw_value > 0 else 0
+        else:
+            # For other product types: use raw values and round them too
+            stop_loss_raw_value = float(stop_loss_raw) if stop_loss_raw else 0
+            take_profit_raw_value = float(take_profit_raw) if take_profit_raw else 0
+            
+            # Round to nearest 0.05 with 2 decimal places
+            stop_loss_value = round(round(stop_loss_raw_value / 0.05) * 0.05, 2) if stop_loss_raw_value > 0 else 0
+            take_profit_value = round(round(take_profit_raw_value / 0.05) * 0.05, 2) if take_profit_raw_value > 0 else 0
+        
         fyers_dict = {
             "symbol": self.symbol,
             "qty": self.quantity,
             "type": ORDER_TYPE_MAP.get(order_type, 2) if isinstance(order_type, OrderType) else ORDER_TYPE_MAP.get(OrderType(order_type), 2),
             "side": self.side.to_fyers(),
-            "productType": PRODUCT_TYPE_MAP.get(product_type, "INTRADAY") if isinstance(product_type, str) else PRODUCT_TYPE_MAP.get(product_type.value, "INTRADAY"),
-            "limitPrice": float(self.price) if self.price is not None else 0,
+            "productType": final_product_type,
+            "limitPrice": limit_price,
             "stopPrice": float(self.trigger_price) if self.trigger_price is not None else 0,
             "disclosedQty": self.extra.get("disclosedQty", 0),
             "validity": self.validity or "DAY",
             "offlineOrder": self.extra.get("offlineOrder", False),
-            "stopLoss": getattr(self, 'stop_loss', None) or self.extra.get("stopLoss") or self.extra.get("stoploss") or self.extra.get("stop_loss") or 0,
-            "takeProfit": self.extra.get("takeProfit", 0),
+            "stopLoss": stop_loss_value,
+            "takeProfit": take_profit_value,
             "orderTag": self.tag or ""
         }
         # Optionally include lot_qty and lot_size for downstream broker logic
@@ -166,7 +200,7 @@ PRODUCT_TYPE_MAP = {
     "MIS": "INTRADAY",
     "CNC": "CNC",
     "BO": "BO",  # Accept broker-specific value for validation
-    
+    "CO": "CO",  # Cover Order product type
 }
 
 class OrderResponse(BaseModel):

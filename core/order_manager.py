@@ -1123,7 +1123,7 @@ class OrderManager:
                         )
                     elif status in ('AWAITING_ENTRY', 'PENDING'):
                         logger.info(f"OrderManager: Initiating cancel for broker_execution id={be.get('id')} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, exit_reason={exit_reason})")
-                        await self.broker_manager.cancel_order(
+                        cancel_resp = await self.broker_manager.cancel_order(
                             broker_id,
                             broker_order_id,
                             symbol=symbol,

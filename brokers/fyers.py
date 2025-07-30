@@ -723,7 +723,7 @@ class FyersWrapper(BrokerInterface):
         """
         fyers_payload = order_request.to_fyers_dict()
         fyers_payload = {k: v for k, v in fyers_payload.items() if v is not None}
-        logger.info(fyers_payload)
+        logger.debug(f"Placing Fyers order with payload: {fyers_payload}")
         from algosat.core.order_request import OrderResponse, OrderStatus
         try:
             if self.is_async:
@@ -733,13 +733,6 @@ class FyersWrapper(BrokerInterface):
                     response = await response
             else:
                 response = self.fyers.place_order(fyers_payload)
-            # Example response for reference:
-            # response = {
-            #   "s": "ok",
-            #   "code": 1101,
-            #   "message": "Order submitted successfully. Your Order Ref. No.25070400129405",
-            #   "id": "25070400129405"
-            # }
             logger.info(f"Fyers order placed: {response}")
             order_id = None
             order_message = None

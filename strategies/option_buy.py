@@ -393,7 +393,7 @@ class OptionBuyStrategy(StrategyBase):
             # Make start_date and end_date IST-aware
             start_date = localize_to_ist(datetime.combine(trade_day, time(9, 15)))
             current_end_date = localize_to_ist(datetime.combine(current_date, get_ist_datetime().time()))
-            # current_end_date = current_end_date.replace(day=18,hour=9, minute=45)
+            # current_end_date = current_end_date.replace(day=29,hour=10, minute=20)
             end_date = calculate_end_date(current_end_date, trade_config['interval_minutes'])
             # end_date = end_date.replace(hour=9, minute=45, second=0, microsecond=0)
             logger.debug(f"Fetching history for strike symbols {', '.join(str(strike) for strike in strike_symbols)}...")
@@ -536,6 +536,7 @@ class OptionBuyStrategy(StrategyBase):
                 # --- Sideways regime logic ---
                 sideways_enabled = config.get('sideways_trade_enabled', False)
                 sideways_qty_perc = config.get('sideways_qty_percentage', 0)
+                sideways_target_atr_multiplier = config.get("sideways_target_atr_multiplier", 1)
                 option_type = "CE" if strike.endswith("CE") else "PE"
                 trade_dict = calculate_trade(curr, data, strike, config, side=Side.BUY)
                 lot_qty = trade_dict.get(constants.TRADE_KEY_LOT_QTY, 0)
@@ -574,10 +575,11 @@ class OptionBuyStrategy(StrategyBase):
                     if new_lot_qty == 0:
                         logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, computed lot_qty is 0, skipping trade.")
                         return None
-                    # Call calculate_trade again with target_atr_multiplier=1 and new lot_qty
-                    trade_dict = calculate_trade(curr, data, strike, config, side=Side.BUY, target_atr_multiplier=1)
+                    # Call calculate_trade again with the configured sideways_target_atr_multiplier and new lot_qty
+                    logger.debug(f"Calculating trade for {strike} with new lot_qty={new_lot_qty} and sideways_target_atr_multiplier={sideways_target_atr_multiplier}")
+                    trade_dict = calculate_trade(curr, data, strike, config, side=Side.BUY, target_atr_multiplier=sideways_target_atr_multiplier)
                     trade_dict[constants.TRADE_KEY_LOT_QTY] = new_lot_qty
-                    logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, updating lot_qty to {new_lot_qty} ({sideways_qty_perc}% of {lot_qty}) and using target_atr_multiplier=1")
+                    logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, updating lot_qty to {new_lot_qty} ({sideways_qty_perc}% of {lot_qty}) and using target_atr_multiplier={sideways_target_atr_multiplier}")
                 orig_target = trade_dict.get(constants.TRADE_KEY_TARGET_PRICE)
 
                 # Trailing stoploss logic: update target if enabled
@@ -714,6 +716,10 @@ class OptionBuyStrategy(StrategyBase):
             self.dp, [strike_symbol], trade_day, trade_config
              )
             history_df = history_dict.get(str(strike_symbol))
+            entry_conf = self.indicators.get('entry', {})
+            supertrend_period = entry_conf.get('supertrend_period', 10)
+            supertrend_multiplier = entry_conf.get('supertrend_multiplier', 2)
+            history_df = calculate_supertrend(history_df, supertrend_period, supertrend_multiplier)
             if history_df is None or len(history_df) < 2:
                 logger.warning(f"evaluate_exit: Not enough history for {strike_symbol}.")
                 return False
