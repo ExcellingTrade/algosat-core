@@ -1,13 +1,15 @@
 from .exceptions import DataFetchError
-from brokers.factory import get_broker
-from core.db import AsyncSessionLocal
-from core.dbschema import broker_credentials
+from algosat.brokers.factory import get_broker
+from algosat.core.db import AsyncSessionLocal
+from algosat.core.dbschema import broker_credentials
+from algosat.core.rate_limiter import get_rate_limiter, RateConfig
+from algosat.core.async_retry import async_retry_with_rate_limit, RetryConfig, get_retry_config
 from sqlalchemy import select
 import inspect
 import asyncio
 import random
 from typing import Dict
-from common.logger import get_logger
+from algosat.common.logger import get_logger
 
 logger = get_logger("data_provider")
 
@@ -15,10 +17,11 @@ logger = get_logger("data_provider")
 _RATE_LIMITS = {
     "fyers": 10,
     "angel": 5,
-    "zerodha": 5,
+    "zerodha": 5,  # More conservative for Zerodha
 }
 
 async def _async_retry(coro_func, *args, max_attempts=3, initial_delay=1, backoff=2, exceptions=(Exception,), **kwargs):
+    """Legacy async retry function - DEPRECATED, use async_retry_with_rate_limit instead."""
     attempt = 0
     delay = initial_delay
     while attempt < max_attempts:
@@ -61,20 +64,26 @@ class DataProvider:
     """
     Abstracts all data fetching; determines which broker to use for market data.
     Fetches the broker dynamically from DB (where is_data_provider=True).
-    Optionally caches the broker to avoid repeated lookups.
+    Uses global rate limiter for coordinated API throttling across components.
     """
 
     def __init__(self, cache_manager=None):
         self.cache = cache_manager
         self._broker = None  # Cache the broker instance after first lookup
-        self._limiters: Dict[str, asyncio.Semaphore] = {}
+        self._rate_limiter = None  # Will be initialized async
 
     async def _ensure_broker(self):
         """
         Ensures self._broker is set to the enabled data provider broker.
+        Also initializes rate limiter if needed.
         """
         if self._broker:
             return
+            
+        # Initialize rate limiter if not already done
+        if self._rate_limiter is None:
+            self._rate_limiter = await get_rate_limiter()
+        
         # Optionally cache broker_name itself for X seconds in process memory
         broker_name = None
         if self.cache:
@@ -92,28 +101,40 @@ class DataProvider:
                 raise RuntimeError("No broker is configured as data provider (is_data_provider=True)!")
             if self.cache:
                 self.cache.set("data_provider_broker_name", broker_name, ttl=60)
+        
         self._broker = get_broker(broker_name)
         # Ensure the broker instance has a .name attribute for logging/rate limiting
         self._broker.name = broker_name
-        # Initialize semaphore for this broker if not already done
-        if broker_name not in self._limiters:
-            rps = _RATE_LIMITS.get(broker_name, 1)
-            self._limiters[broker_name] = asyncio.Semaphore(rps)
+        
+        # Configure rate limiter for this broker if not already configured
+        if broker_name in _RATE_LIMITS:
+            rate_config = RateConfig(
+                rps=_RATE_LIMITS[broker_name],
+                burst=_RATE_LIMITS[broker_name] + 2,  # Allow small burst
+                window=1.0
+            )
+            self._rate_limiter.configure_broker(broker_name, rate_config)
+            logger.info(f"Configured data provider rate limits for {broker_name}: {_RATE_LIMITS[broker_name]} rps")
 
     async def get_option_chain(self, symbol: str, strike_count: int = 20):
         """Fetch the option chain for a given symbol asynchronously from the data provider broker."""
         await self._ensure_broker()
         broker_name = self._broker.name
-        limiter = self._limiters.get(broker_name)
+        
         async def _fetch():
-            async with limiter:
+            async with self._rate_limiter.acquire(broker_name, tokens=1):
                 result = self._broker.get_option_chain(symbol, strike_count)
                 option_chain = await result if inspect.isawaitable(result) else result
                 validate_broker_response(option_chain, expected_type="option_chain", symbol=symbol)
-                await asyncio.sleep(1 / _RATE_LIMITS.get(broker_name, 1))
                 return option_chain
+        
+        # Use enhanced retry with rate limiting
+        retry_config = get_retry_config("data_fetch")
+        retry_config.rate_limit_broker = broker_name
+        retry_config.rate_limit_tokens = 1
+        
         try:
-            return await _async_retry(_fetch, max_attempts=3, initial_delay=1, backoff=2)
+            return await async_retry_with_rate_limit(_fetch, config=retry_config)
         except Exception as e:
             logger.error(f"Failed to fetch option chain for '{symbol}': {e}")
             raise DataFetchError(f"Failed to fetch option chain for '{symbol}': {e}") from e
@@ -122,9 +143,9 @@ class DataProvider:
         """Fetch historical data for a given symbol and parameters asynchronously from the data provider broker."""
         await self._ensure_broker()
         broker_name = self._broker.name
-        limiter = self._limiters.get(broker_name)
+        
         async def _fetch():
-            async with limiter:
+            async with self._rate_limiter.acquire(broker_name, tokens=1):
                 result = self._broker.get_history(
                     symbol,
                     from_date,
@@ -134,10 +155,15 @@ class DataProvider:
                 )
                 history = await result if inspect.isawaitable(result) else result
                 validate_broker_response(history, expected_type="history", symbol=symbol)
-                await asyncio.sleep(1 / _RATE_LIMITS.get(broker_name, 1))
                 return history
+        
+        # Use enhanced retry with rate limiting
+        retry_config = get_retry_config("data_fetch")
+        retry_config.rate_limit_broker = broker_name
+        retry_config.rate_limit_tokens = 1
+        
         try:
-            return await _async_retry(_fetch, max_attempts=3, initial_delay=1, backoff=2)
+            return await async_retry_with_rate_limit(_fetch, config=retry_config)
         except Exception as e:
             logger.debug(f"Failed to fetch history for symbol='{symbol}', from_date={from_date}, to_date={to_date}, ohlc_interval={ohlc_interval}, ins_type={ins_type}: {e}")
             raise DataFetchError(

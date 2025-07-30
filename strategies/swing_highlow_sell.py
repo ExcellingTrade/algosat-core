@@ -79,6 +79,7 @@ class SwingHighLowSellStrategy(StrategyBase):
         super().__init__(config, data_manager, execution_manager)
         # Standardized config/state
         self.symbol = self.cfg.symbol
+        self.name = "SwingHighLowSell"
         self.exchange = self.cfg.exchange
         self.instrument = self.cfg.instrument
         self.trade = self.cfg.trade

@@ -7,6 +7,8 @@ from algosat.common.broker_utils import get_broker_credentials, upsert_broker_cr
 from algosat.common.default_broker_configs import DEFAULT_BROKER_CONFIGS
 from algosat.common.logger import get_logger
 from algosat.core.time_utils import get_ist_now
+from algosat.core.rate_limiter import get_rate_limiter, RateConfig
+from algosat.core.async_retry import async_retry_with_rate_limit, RetryConfig, get_retry_config, broker_retry
 from algosat.core.db import AsyncSessionLocal, get_strategy_by_id, get_trade_enabled_brokers as db_get_trade_enabled_brokers
 from datetime import datetime, time as dt_time
 from algosat.core.order_request import OrderRequest, OrderType, Side
@@ -15,6 +17,13 @@ from algosat.core.order_defaults import ORDER_DEFAULTS
 from algosat.models.strategy_config import StrategyConfig
 
 logger = get_logger("BrokerManager")
+
+# Broker-specific rate limits for trading operations (more conservative than data operations)
+_BROKER_TRADING_RATE_LIMITS = {
+    "fyers": 10,      # Slightly lower than data limits for trading
+    "angel": 4,      # Conservative for trading operations
+    "zerodha": 5,    # Very conservative for Zerodha trading
+}
 
 def is_retryable_exception(exc):
     # Customize this as needed: don't retry on 4xx errors (e.g., BadRequest), retry on network/server errors
@@ -28,6 +37,7 @@ def is_retryable_exception(exc):
     return True
 
 async def async_retry(func: Callable, *args, retries=3, delay=1, **kwargs):
+    """Legacy async retry function - DEPRECATED, use async_retry_with_rate_limit instead."""
     last_exc = None
     for attempt in range(retries):
         try:
@@ -95,6 +105,22 @@ class BrokerManager:
         self.brokers: Dict[str, object] = {}
         # --- Symbol/Instrument resolution for all brokers ---
         self._instrument_cache = {}
+        self._rate_limiter = None  # Will be initialized async
+
+    async def _ensure_rate_limiter(self):
+        """Initialize rate limiter if not already done."""
+        if self._rate_limiter is None:
+            self._rate_limiter = await get_rate_limiter()
+            
+            # Configure trading-specific rate limits for all known brokers
+            for broker_name, rps in _BROKER_TRADING_RATE_LIMITS.items():
+                rate_config = RateConfig(
+                    rps=rps,
+                    burst=rps + 1,  # Small burst allowance for trading
+                    window=1.0
+                )
+                self._rate_limiter.configure_broker(broker_name, rate_config)
+                logger.info(f"Configured trading rate limits for {broker_name}: {rps} rps")
 
     async def _discover_enabled_brokers(self) -> List[str]:
         # Discover all brokers that have credentials or default configs
@@ -355,7 +381,18 @@ class BrokerManager:
                             ).dict()
                             continue
                         try:
-                            margin_ok = await async_retry(broker.check_margin_availability, broker_order_payload, retries=retries, delay=delay)
+                            # Use enhanced retry with rate limiting for margin check
+                            await self._ensure_rate_limiter()
+                            retry_config = get_retry_config("default")
+                            retry_config.rate_limit_broker = broker_name
+                            retry_config.rate_limit_tokens = 1
+                            retry_config.max_attempts = retries
+                            retry_config.initial_delay = delay
+                            
+                            async def _check_margin():
+                                return await broker.check_margin_availability(broker_order_payload)
+                            
+                            margin_ok = await async_retry_with_rate_limit(_check_margin, config=retry_config)
                         except Exception as e:
                             logger.error(f"Error checking margin: {e}")
                             results[broker_name] = OrderResponse(
@@ -385,7 +422,18 @@ class BrokerManager:
                             ).dict()
                             continue
 
-                    result = await async_retry(broker.place_order, broker_order_payload, retries=retries, delay=delay)
+                    # Place order with enhanced retry and rate limiting
+                    await self._ensure_rate_limiter()
+                    retry_config = get_retry_config("order_critical")  # Use critical config for orders
+                    retry_config.rate_limit_broker = broker_name
+                    retry_config.rate_limit_tokens = 1
+                    retry_config.max_attempts = retries
+                    retry_config.initial_delay = delay
+                    
+                    async def _place_order():
+                        return await broker.place_order(broker_order_payload)
+                    
+                    result = await async_retry_with_rate_limit(_place_order, config=retry_config)
                     broker_row = await get_broker_by_name(session, broker_name)
                     broker_id = broker_row["id"] if broker_row else None
                     result["broker_id"] = broker_id
@@ -648,40 +696,67 @@ class BrokerManager:
 
     async def get_all_broker_order_details(self, retries=3, delay=1) -> dict:
         """
-        Fetch order details from all trade-enabled brokers.
+        Fetch order details from all trade-enabled brokers with rate limiting.
         Returns a dict: broker_name -> list of order dicts (empty list if no orders).
         """
+        await self._ensure_rate_limiter()
         enabled_brokers = await self.get_all_trade_enabled_brokers()
         broker_orders = {}
+        
         for broker_name, broker in enabled_brokers.items():
             try:
                 if broker is None or not hasattr(broker, "get_order_details"):
                     broker_orders[broker_name] = []
                     continue
-                orders = await async_retry(broker.get_order_details, retries=retries, delay=delay)
+                
+                # Create retry config with rate limiting
+                retry_config = get_retry_config("default")
+                retry_config.rate_limit_broker = broker_name
+                retry_config.rate_limit_tokens = 1
+                retry_config.max_attempts = retries
+                retry_config.initial_delay = delay
+                
+                async def _fetch_orders():
+                    return await broker.get_order_details()
+                
+                orders = await async_retry_with_rate_limit(_fetch_orders, config=retry_config)
                 if not isinstance(orders, list):
                     orders = []
                 broker_orders[broker_name] = orders
+                
             except Exception as e:
-                from algosat.common.logger import get_logger
-                logger = get_logger("BrokerManager")
                 logger.error(f"BrokerManager: Failed to fetch orders for {broker_name}: {e}")
                 broker_orders[broker_name] = []
+        
         return broker_orders
 
     async def get_all_broker_positions(self, retries=3, delay=1) -> dict:
         """
-        Fetch positions from all trade-enabled brokers.
+        Fetch positions from all trade-enabled brokers with rate limiting.
         Returns a dict: broker_name -> list of positions (empty list if error or not available).
         """
+        await self._ensure_rate_limiter()
         enabled_brokers = await self.get_all_trade_enabled_brokers()
         broker_positions = {}
+        
         for broker_name, broker in enabled_brokers.items():
             try:
                 if broker is None or not hasattr(broker, "get_positions"):
                     broker_positions[broker_name] = []
                     continue
-                positions = await async_retry(broker.get_positions, retries=retries, delay=delay)
+                
+                # Create retry config with rate limiting
+                retry_config = get_retry_config("default")
+                retry_config.rate_limit_broker = broker_name
+                retry_config.rate_limit_tokens = 1
+                retry_config.max_attempts = retries
+                retry_config.initial_delay = delay
+                
+                async def _fetch_positions():
+                    return await broker.get_positions()
+                
+                positions = await async_retry_with_rate_limit(_fetch_positions, config=retry_config)
+                
                 # Handle broker-specific response formats
                 if broker_name == 'zerodha' and isinstance(positions, dict) and 'net' in positions:
                     positions = positions.get('net', [])
@@ -689,10 +764,13 @@ class BrokerManager:
                     positions = positions.get('netPositions', [])
                 if not isinstance(positions, list):
                     positions = []
+                
                 broker_positions[broker_name] = positions
+                
             except Exception as e:
                 logger.error(f"BrokerManager: Failed to fetch positions for {broker_name}: {e}")
                 broker_positions[broker_name] = []
+        
         return broker_positions
     
 
@@ -714,34 +792,71 @@ class BrokerManager:
 
     async def exit_order(self, broker_id, broker_order_id, symbol=None, product_type=None, exit_reason=None, side=None, retries=3, delay=1):
         """
-        Route exit order to the correct broker by broker_id.
+        Route exit order to the correct broker by broker_id with rate limiting.
         """
+        await self._ensure_rate_limiter()
         broker = await self.get_broker_by_id(broker_id)
         if not broker:
             raise RuntimeError(f"No broker found for broker_id={broker_id}")
+        
+        # Get broker_name for rate limiting
+        from algosat.core.db import AsyncSessionLocal, get_broker_by_id as db_get_broker_by_id
+        async with AsyncSessionLocal() as session:
+            broker_row = await db_get_broker_by_id(session, broker_id)
+            broker_name = broker_row.get("broker_name") if broker_row else None
+        
+        if not broker_name:
+            raise RuntimeError(f"No broker_name found for broker_id={broker_id}")
+        
         # If symbol is provided, normalize it for the broker
         normalized_symbol = symbol
         if symbol:
-            # Need broker_name for get_symbol_info
-            from algosat.core.db import AsyncSessionLocal, get_broker_by_id as db_get_broker_by_id
-            async with AsyncSessionLocal() as session:
-                broker_row = await db_get_broker_by_id(session, broker_id)
-                broker_name = broker_row.get("broker_name") if broker_row else None
-            if broker_name:
-                symbol_info = await self.get_symbol_info(broker_name, symbol, instrument_type='NFO')
-                normalized_symbol = symbol_info.get('symbol', symbol)
-        return await async_retry(broker.exit_order, broker_order_id, symbol=normalized_symbol, product_type=product_type, exit_reason=exit_reason, side=side, retries=retries, delay=delay)
+            symbol_info = await self.get_symbol_info(broker_name, symbol, instrument_type='NFO')
+            normalized_symbol = symbol_info.get('symbol', symbol)
+        
+        # Create retry config with rate limiting
+        retry_config = get_retry_config("order_critical")
+        retry_config.rate_limit_broker = broker_name
+        retry_config.rate_limit_tokens = 1
+        retry_config.max_attempts = retries
+        retry_config.initial_delay = delay
+        
+        async def _exit_order():
+            return await broker.exit_order(broker_order_id, symbol=normalized_symbol, product_type=product_type, exit_reason=exit_reason, side=side)
+        
+        return await async_retry_with_rate_limit(_exit_order, config=retry_config)
 
     async def cancel_order(self, broker_id, broker_order_id, symbol=None, product_type=None, variety=None, cancel_reason=None, retries=3, delay=1, **kwargs):
         """
-        Cancel an order for the given broker. Routes to the correct broker's cancel_order implementation.
+        Cancel an order for the given broker with rate limiting.
+        Routes to the correct broker's cancel_order implementation.
         For Fyers: pass broker_order_id (with -BO-1 if needed).
         For Zerodha: pass variety and order_id.
         """
-
+        await self._ensure_rate_limiter()
         broker = await self.get_broker_by_id(broker_id)
         if broker is None:
             logger.error(f"BrokerManager: Could not find broker for id: {broker_id}")
             return None
-        # Route to broker's cancel_order
-        return await async_retry(broker.cancel_order, broker_order_id, symbol=symbol, product_type=product_type, variety=variety, cancel_reason=cancel_reason, retries=retries, delay=delay, **kwargs)
+        
+        # Get broker_name for rate limiting
+        from algosat.core.db import AsyncSessionLocal, get_broker_by_id as db_get_broker_by_id
+        async with AsyncSessionLocal() as session:
+            broker_row = await db_get_broker_by_id(session, broker_id)
+            broker_name = broker_row.get("broker_name") if broker_row else None
+        
+        if not broker_name:
+            logger.error(f"BrokerManager: No broker_name found for broker_id={broker_id}")
+            return None
+        
+        # Create retry config with rate limiting
+        retry_config = get_retry_config("order_critical")
+        retry_config.rate_limit_broker = broker_name
+        retry_config.rate_limit_tokens = 1
+        retry_config.max_attempts = retries
+        retry_config.initial_delay = delay
+        
+        async def _cancel_order():
+            return await broker.cancel_order(broker_order_id, symbol=symbol, product_type=product_type, variety=variety, cancel_reason=cancel_reason, **kwargs)
+        
+        return await async_retry_with_rate_limit(_cancel_order, config=retry_config)

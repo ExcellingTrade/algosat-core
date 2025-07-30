@@ -217,8 +217,8 @@ class OrderMonitor:
                 market_close_time = dt_time(15, 30)  # 3:30 PM
                 if current_time_only >= market_close_time:
                     logger.info(f"OrderMonitor: Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
-                    # self.stop()
-                    # return
+                    self.stop()
+                    return
 
             # --- Price-based exit logic for OptionBuy and OptionSell strategies ---
             await self._check_price_based_exit(order_row, strategy, last_main_status)
@@ -300,7 +300,7 @@ class OrderMonitor:
                     if should_update:
                         # If status transitions from PENDING/PARTIAL to FILLED/PARTIAL, update all fields
                         transition_to_filled = (
-                            (last_status in ("PENDING", "PARTIAL", "PARTIALLY_FILLED")) and
+                            (last_status in ("PENDING","TRIGGER_PENDING" "PARTIAL", "PARTIALLY_FILLED")) and
                             (broker_status in ("FILLED", "PARTIAL", "PARTIALLY_FILLED"))
                         )
                         if transition_to_filled:
@@ -1093,8 +1093,8 @@ class OrderMonitor:
                 # fallback default
                 self.signal_monitor_seconds = 5 * 60
         logger.info(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_seconds}s)")
-        # await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
-        await asyncio.gather( self._signal_monitor())
+        await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
+        # await asyncio.gather( self._signal_monitor())
 
     def stop(self) -> None:
         self._running = False

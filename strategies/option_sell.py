@@ -94,6 +94,7 @@ class OptionSellStrategy(StrategyBase):
         super().__init__(config, data_manager, execution_manager)
         # All config access should use self.cfg (the StrategyConfig dataclass)
         self.symbol = self.cfg.symbol
+        self.name = "OptionSell"
         self.exchange = self.cfg.exchange
         self.instrument = self.cfg.instrument
         self.trade = self.cfg.trade
