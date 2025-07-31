@@ -14,7 +14,7 @@ except ModuleNotFoundError as e:
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import inspect, Table, MetaData, update, select, delete, func, text, and_, case # Modified import
+from sqlalchemy import inspect, Table, MetaData, update, select, delete, insert, func, text, and_, case # Modified import
 
 import os
 from datetime import datetime, timezone  # moved to top
@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 from algosat.common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
 from algosat.core.time_utils import get_ist_now
 
-from algosat.core.dbschema import metadata, orders, broker_credentials, strategies, strategy_configs, strategy_symbols, users, broker_balance_summaries # Added users, broker_balance_summaries
+from algosat.core.dbschema import metadata, orders, broker_credentials, strategies, strategy_configs, strategy_symbols, users, broker_balance_summaries, smart_levels # Added users, broker_balance_summaries, smart_levels
 
 # 1) Create the Async Engine
 engine = create_async_engine(
@@ -336,7 +336,7 @@ async def disable_strategy_config(session, config_id):
     return await get_strategy_config_by_id(session, config_id)
 
 # --- Strategy Symbol CRUD ---
-async def add_strategy_symbol(session, strategy_id, symbol, config_id, status='active'):
+async def add_strategy_symbol(session, strategy_id, symbol, config_id, status='active', enable_smart_levels=False):
     """
     Add a symbol to a strategy with a specific config.
     """
@@ -361,6 +361,7 @@ async def add_strategy_symbol(session, strategy_id, symbol, config_id, status='a
             .values(
                 config_id=config_id,
                 status=status,
+                enable_smart_levels=enable_smart_levels,
                 updated_at=now
             )
         )
@@ -379,6 +380,7 @@ async def add_strategy_symbol(session, strategy_id, symbol, config_id, status='a
             symbol=symbol,
             config_id=config_id,
             status=status,
+            enable_smart_levels=enable_smart_levels,
             created_at=now,
             updated_at=now
         )
@@ -2273,3 +2275,56 @@ async def reset_database_tables(session):
         "deleted_orders": orders_count,
         "total_deleted": broker_executions_count + orders_count
     }
+
+# --- Smart Levels CRUD ---
+async def get_all_smart_levels(session, strategy_symbol_id: Optional[int] = None):
+    """Get all smart levels, optionally filtered by strategy_symbol_id."""
+    query = select(smart_levels)
+    if strategy_symbol_id:
+        query = query.where(smart_levels.c.strategy_symbol_id == strategy_symbol_id)
+    
+    result = await session.execute(query.order_by(smart_levels.c.created_at.desc()))
+    return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_smart_level_by_id(session, smart_level_id: int):
+    """Get a smart level by its ID."""
+    result = await session.execute(select(smart_levels).where(smart_levels.c.id == smart_level_id))
+    row = result.first()
+    return dict(row._mapping) if row else None
+
+async def create_smart_level(session, smart_level_data: dict):
+    """Create a new smart level."""
+    from algosat.core.time_utils import get_ist_now
+    now = get_ist_now()
+    smart_level_data['created_at'] = now
+    smart_level_data['updated_at'] = now
+    
+    stmt = insert(smart_levels).values(**smart_level_data)
+    result = await session.execute(stmt)
+    await session.commit()
+    
+    smart_level_id = result.inserted_primary_key[0]
+    return await get_smart_level_by_id(session, smart_level_id)
+
+async def update_smart_level(session, smart_level_id: int, update_data: dict):
+    """Update a smart level with new data."""
+    from algosat.core.time_utils import get_ist_now
+    now = get_ist_now()
+    update_data['updated_at'] = now
+    
+    stmt = update(smart_levels).where(smart_levels.c.id == smart_level_id).values(**update_data)
+    result = await session.execute(stmt)
+    await session.commit()
+    
+    if result.rowcount == 0:
+        return None
+    
+    return await get_smart_level_by_id(session, smart_level_id)
+
+async def delete_smart_level(session, smart_level_id: int) -> bool:
+    """Delete a smart level by its ID. Returns True if deleted, False if not found."""
+    stmt = delete(smart_levels).where(smart_levels.c.id == smart_level_id)
+    result = await session.execute(stmt)
+    await session.commit()
+    
+    return result.rowcount > 0

@@ -269,7 +269,8 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 if all_failed:
                     logger.error(f"Order placement failed for all brokers, skipping atomic confirmation: {order_info}")
                     return order_info
-                logger.info(f"Order placed: {order_info}. Awaiting atomic confirmation on next entry candle close.")
+                logger.info(f"Order placed: {order_info}.")
+                logger.info(f"Awaiting atomic confirmation on next entry candle close.")
                 # Wait for next entry candle to confirm breakout
                 await strategy_utils.wait_for_next_candle(self.entry_minutes)
                 # Fetch fresh entry_df for confirmation
@@ -282,7 +283,8 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 if entry_df2 is None or len(entry_df2) < 2:
                     logger.warning("Not enough entry_df data for atomic confirmation after order.")
                     # Unable to confirm, exit order for safety
-                    await self.exit_order(order_info.get("order_id") or order_info.get("id"))
+                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed")
+                    # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
                     logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}")
                     return None
                 entry_df2_sorted = entry_df2.sort_values("timestamp")
@@ -295,7 +297,8 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     return order_info
                 else:
                     logger.info("Breakout failed atomic confirmation, exiting order.")
-                    await self.exit_order(order_info.get("order_id") or order_info.get("id"))
+                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed")
+                    # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
                     logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}")
                     return None
             else:
@@ -305,17 +308,17 @@ class SwingHighLowBuyStrategy(StrategyBase):
             logger.error(f"Error in process_cycle: {e}", exc_info=True)
             return None
 
-    async def cancel_order(self, order_id):
-        logger.info(f"Stub: cancelling order {order_id}")
-        # Implement integration with order manager if needed
+    # async def cancel_order(self, order_id):
+    #     logger.info(f"Stub: cancelling order {order_id}")
+    #     # Implement integration with order manager if needed
 
-    async def exit_order(self, order_id):
-        """
-        Immediately exit/cancel the given order (atomic entry confirmation).
-        """
-        logger.info(f"Exiting order {order_id} due to failed atomic entry confirmation.")
-        # Implement integration with order manager if needed, e.g., cancel or market exit
-        await self.cancel_order(order_id)
+    # async def exit_order(self, order_id):
+    #     """
+    #     Immediately exit/cancel the given order (atomic entry confirmation).
+    #     """
+    #     logger.info(f"Exiting order {order_id} due to failed atomic entry confirmation.")
+    #     # Implement integration with order manager if needed, e.g., cancel or market exit
+    #     await self.cancel_order(order_id)
 
     async def fetch_history_data(self, broker, symbols, interval_minutes):
         """

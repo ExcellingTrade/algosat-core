@@ -20,14 +20,14 @@ async def run_strategy_config(strategy_instance, order_queue):
     # For Swing strategies: use confirm_minutes from class
     cycle_interval_minutes = 5  # Default fallback
     
-    if strategy_name in ["OptionBuy", "OptionSell"]:
+    if strategy_name in ["OptionBuyStrategy", "OptionSellStrategy"]:
         # Option strategies: get interval_minutes from trade parameters
         trade_params = getattr(strategy, "trade", None)
         if trade_params and isinstance(trade_params, dict):
             cycle_interval_minutes = trade_params.get("interval_minutes", 5)
         logger.debug(f"Option strategy '{strategy_name}' using trade interval: {cycle_interval_minutes} minutes")
         
-    elif strategy_name in ["SwingHighLowBuy", "SwingHighLowSell"]:
+    elif strategy_name in ["SwingHighLowBuyStrategy", "SwingHighLowSellStrategy"]:
         # Swing strategies: get confirm_minutes from class attribute
         confirm_minutes = getattr(strategy, "confirm_minutes", None)
         if confirm_minutes:

@@ -40,7 +40,7 @@ from algosat.core.db import AsyncSessionLocal, get_user_by_username, get_user_by
 from .auth_dependencies import get_current_user
 
 # Import existing API routes
-from .routes import strategies, brokers, positions, trades, orders, nse_data, balance, logs, livefeed_ws # Added logs import
+from .routes import strategies, brokers, positions, trades, orders, nse_data, balance, logs, livefeed_ws, smart_levels # Added logs import and smart_levels
 
 # Use default port for now
 API_PORT = 8000
@@ -627,6 +627,7 @@ create_secured_router(orders.router, "/orders", ["Orders"]) # Added orders route
 create_secured_router(nse_data.router, "/nse", ["NSE Data"]) # Added NSE Data router
 create_secured_router(balance.router, "/api/v1", ["Balance Summary"]) # Added balance router
 create_secured_router(logs.router, "/logs", ["Log Management"]) # Added logs router
+create_secured_router(smart_levels.router, "/smart-levels", ["Smart Levels"]) # Added smart levels router
 
 # Import and include admin router
 from .routes import admin

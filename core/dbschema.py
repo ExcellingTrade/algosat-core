@@ -43,6 +43,7 @@ strategy_configs = Table(
     UniqueConstraint("strategy_id", "name", name="uq_strategy_config_name_per_strategy"),
 )
 
+
 strategy_symbols = Table(
     "strategy_symbols", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
@@ -50,11 +51,38 @@ strategy_symbols = Table(
     Column("symbol", String, nullable=False),
     Column("config_id", Integer, ForeignKey("strategy_configs.id"), nullable=False),
     Column("status", String, nullable=True, server_default=text("'active'")),
+    Column("enable_smart_levels", Boolean, nullable=False, server_default=text("false")),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 
     UniqueConstraint("strategy_id", "symbol", name="uq_strategy_symbol"),
     Index("ix_strategy_symbol_strategy_symbol_config_status", "strategy_id", "symbol", "config_id", "status"),
+)
+
+# Smart Level Strategy table
+smart_levels = Table(
+    "smart_levels", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("strategy_symbol_id", Integer, ForeignKey("strategy_symbols.id"), nullable=False, index=True),
+    Column("name", String, nullable=False),
+    Column("is_active", Boolean, nullable=False, server_default=text("true")),
+    Column("entry_level", Float, nullable=False),
+    Column("bullish_target", Float, nullable=True),
+    Column("bearish_target", Float, nullable=True),
+    Column("initial_lot_ce", Integer, nullable=True),
+    Column("initial_lot_pe", Integer, nullable=True),
+    Column("remaining_lot_ce", Integer, nullable=True),
+    Column("remaining_lot_pe", Integer, nullable=True),
+    Column("ce_buy_enabled", Boolean, nullable=False, server_default=text("false")),
+    Column("ce_sell_enabled", Boolean, nullable=False, server_default=text("false")),
+    Column("pe_buy_enabled", Boolean, nullable=False, server_default=text("false")),
+    Column("pe_sell_enabled", Boolean, nullable=False, server_default=text("false")),
+    Column("max_trades", Integer, nullable=True),
+    Column("max_loss_trades", Integer, nullable=True),
+    Column("pullback_percentage", Float, nullable=True),
+    Column("notes", String, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 )
 
 trade_logs = Table(

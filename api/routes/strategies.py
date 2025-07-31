@@ -54,6 +54,67 @@ async def list_strategies(db=Depends(get_db)):
         logger.error(f"Error in list_strategies: {e}")
         raise
 
+@router.get("/smart-levels/symbols")
+async def get_smart_levels_symbols(db=Depends(get_db)):
+    """
+    Get unique symbols from swinghighlowbuy and swinghighlowsell strategies 
+    where enable_smart_levels=true.
+    """
+    try:
+        from algosat.core.dbschema import strategy_symbols, strategies
+        from sqlalchemy import select, and_, or_
+        
+        # Query to get unique symbols with smart levels enabled from swing strategies
+        query = select(
+            strategy_symbols.c.symbol,
+            strategy_symbols.c.enable_smart_levels,
+            strategies.c.key.label('strategy_key'),
+            strategies.c.name.label('strategy_name')
+        ).select_from(
+            strategy_symbols.join(strategies, strategy_symbols.c.strategy_id == strategies.c.id)
+        ).where(
+            and_(
+                strategy_symbols.c.enable_smart_levels == True,
+                or_(
+                    strategies.c.key == 'SwingHighLowBuy',
+                    strategies.c.key == 'SwingHighLowSell'
+                )
+            )
+        ).distinct(strategy_symbols.c.symbol)
+        
+        result = await db.execute(query)
+        rows = result.fetchall()
+        
+        # Process results to return unique symbols with metadata
+        unique_symbols = {}
+        for row in rows:
+            symbol_name = row.symbol
+            if symbol_name not in unique_symbols:
+                unique_symbols[symbol_name] = {
+                    "symbol": symbol_name,
+                    "enable_smart_levels": row.enable_smart_levels,
+                    "strategies": []
+                }
+            
+            # Add strategy name to the list (use name for display, key for logic)
+            strategy_display = f"{row.strategy_name} ({row.strategy_key})"
+            if strategy_display not in unique_symbols[symbol_name]["strategies"]:
+                unique_symbols[symbol_name]["strategies"].append(strategy_display)
+        
+        # Convert to list and sort
+        symbols_list = list(unique_symbols.values())
+        symbols_list.sort(key=lambda x: x["symbol"])
+        
+        logger.info(f"Found {len(symbols_list)} unique symbols with smart levels enabled")
+        return {
+            "symbols": symbols_list,
+            "total_count": len(symbols_list)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error in get_smart_levels_symbols: {e}")
+        raise HTTPException(status_code=500, detail="Failed to fetch smart levels symbols")
+
 @router.get("/{strategy_id}", response_model=StrategyDetailResponse)
 async def get_strategy(strategy_id: int, db=Depends(get_db)):
     try:
@@ -292,7 +353,14 @@ async def add_symbol_to_strategy(strategy_id: int, symbol: StrategySymbolCreate,
     """
     if symbol.strategy_id != strategy_id:
         raise HTTPException(status_code=400, detail="strategy_id mismatch")
-    result = await add_strategy_symbol(db, symbol.strategy_id, symbol.symbol, symbol.config_id, symbol.status)
+    result = await add_strategy_symbol(
+        db, 
+        symbol.strategy_id, 
+        symbol.symbol, 
+        symbol.config_id, 
+        symbol.status,
+        symbol.enable_smart_levels
+    )
     return StrategySymbolResponse(**result)
 
 @router.get("/{strategy_id}/symbols", response_model=List[StrategySymbolWithConfigResponse])
@@ -417,6 +485,82 @@ async def delete_strategy_symbol_route(symbol_id: int, db=Depends(get_db)):
     if not result:
         raise HTTPException(status_code=404, detail="Strategy symbol not found")
     return {"message": "Strategy symbol deleted successfully", "symbol_id": symbol_id}
+
+@router.put("/symbols/{symbol_id}/smart-levels/enable", response_model=StrategySymbolResponse)
+async def enable_smart_levels_for_symbol(symbol_id: int, db=Depends(get_db)):
+    """
+    Enable smart levels for a strategy symbol.
+    """
+    try:
+        validated_symbol_id = input_validator.validate_integer(symbol_id, "symbol_id", min_value=1)
+        
+        # Check if symbol exists
+        existing_symbol = await get_strategy_symbol_by_id(db, validated_symbol_id)
+        if not existing_symbol:
+            raise HTTPException(status_code=404, detail="Strategy symbol not found")
+        
+        # Update enable_smart_levels to True
+        result = await update_strategy_symbol(db, validated_symbol_id, {"enable_smart_levels": True})
+        logger.info(f"Smart levels enabled for strategy symbol {validated_symbol_id}")
+        return StrategySymbolResponse(**result)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error enabling smart levels for symbol {symbol_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to enable smart levels")
+
+@router.put("/symbols/{symbol_id}/smart-levels/disable", response_model=StrategySymbolResponse)
+async def disable_smart_levels_for_symbol(symbol_id: int, db=Depends(get_db)):
+    """
+    Disable smart levels for a strategy symbol.
+    """
+    try:
+        validated_symbol_id = input_validator.validate_integer(symbol_id, "symbol_id", min_value=1)
+        
+        # Check if symbol exists
+        existing_symbol = await get_strategy_symbol_by_id(db, validated_symbol_id)
+        if not existing_symbol:
+            raise HTTPException(status_code=404, detail="Strategy symbol not found")
+        
+        # Update enable_smart_levels to False
+        result = await update_strategy_symbol(db, validated_symbol_id, {"enable_smart_levels": False})
+        logger.info(f"Smart levels disabled for strategy symbol {validated_symbol_id}")
+        return StrategySymbolResponse(**result)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error disabling smart levels for symbol {symbol_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to disable smart levels")
+
+@router.put("/symbols/{symbol_id}/smart-levels/toggle", response_model=StrategySymbolResponse)
+async def toggle_smart_levels_for_symbol(symbol_id: int, db=Depends(get_db)):
+    """
+    Toggle smart levels for a strategy symbol (enabled <-> disabled).
+    """
+    try:
+        validated_symbol_id = input_validator.validate_integer(symbol_id, "symbol_id", min_value=1)
+        
+        # Get current symbol
+        existing_symbol = await get_strategy_symbol_by_id(db, validated_symbol_id)
+        if not existing_symbol:
+            raise HTTPException(status_code=404, detail="Strategy symbol not found")
+        
+        # Toggle the enable_smart_levels field
+        current_value = existing_symbol.get("enable_smart_levels", False)
+        new_value = not current_value
+        
+        # Update the field
+        result = await update_strategy_symbol(db, validated_symbol_id, {"enable_smart_levels": new_value})
+        logger.info(f"Smart levels {'enabled' if new_value else 'disabled'} for strategy symbol {validated_symbol_id}")
+        return StrategySymbolResponse(**result)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error toggling smart levels for symbol {symbol_id}: {e}")
+        raise HTTPException(status_code=500, detail="Failed to toggle smart levels")
 
 @router.get("/symbols/{symbol_id}/stats")
 async def get_symbol_trade_stats(symbol_id: int, db=Depends(get_db)):

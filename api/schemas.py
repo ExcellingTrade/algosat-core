@@ -371,6 +371,7 @@ class StrategySymbolBase(BaseModel):
     symbol: str
     config_id: int
     status: str = 'active'
+    enable_smart_levels: bool = False
 
 class StrategySymbolCreate(StrategySymbolBase):
     pass
@@ -489,3 +490,64 @@ class PerStrategyStatsResponse(BaseModel):
     """Response model for per-strategy statistics."""
     strategies: List[PerStrategyStatsData] = Field(..., description="List of strategy statistics")
     total_strategies: int = Field(..., description="Total number of strategies")
+
+# --- Smart Levels Schemas ---
+class SmartLevelBase(BaseModel):
+    """Base schema for Smart Level with common fields."""
+    name: str = Field(..., description="Name for the smart level", min_length=1, max_length=100)
+    is_active: bool = Field(True, description="Whether this smart level is active")
+    entry_level: float = Field(..., description="Entry level price")
+    bullish_target: Optional[float] = Field(None, description="Bullish target price (should be above entry_level)")
+    bearish_target: Optional[float] = Field(None, description="Bearish target price (should be below entry_level)")
+    initial_lot_ce: Optional[int] = Field(None, description="Initial lots for Call options", ge=0)
+    initial_lot_pe: Optional[int] = Field(None, description="Initial lots for Put options", ge=0)
+    remaining_lot_ce: Optional[int] = Field(None, description="Remaining lots for Call options", ge=0)
+    remaining_lot_pe: Optional[int] = Field(None, description="Remaining lots for Put options", ge=0)
+    ce_buy_enabled: bool = Field(False, description="Enable CE buy orders")
+    ce_sell_enabled: bool = Field(False, description="Enable CE sell orders")
+    pe_buy_enabled: bool = Field(False, description="Enable PE buy orders")
+    pe_sell_enabled: bool = Field(False, description="Enable PE sell orders")
+    max_trades: Optional[int] = Field(None, description="Maximum number of trades allowed", ge=0)
+    max_loss_trades: Optional[int] = Field(None, description="Maximum number of loss trades allowed", ge=0)
+    pullback_percentage: Optional[float] = Field(None, description="Pullback percentage for entry", ge=0, le=100)
+    notes: Optional[str] = Field(None, description="Additional notes for this smart level")
+
+class SmartLevelCreate(SmartLevelBase):
+    """Schema for creating a new Smart Level."""
+    strategy_symbol_id: int = Field(..., description="Strategy symbol ID this smart level belongs to", gt=0)
+
+class SmartLevelUpdate(BaseModel):
+    """Schema for updating an existing Smart Level."""
+    name: Optional[str] = Field(None, description="Name for the smart level", min_length=1, max_length=100)
+    is_active: Optional[bool] = Field(None, description="Whether this smart level is active")
+    entry_level: Optional[float] = Field(None, description="Entry level price")
+    bullish_target: Optional[float] = Field(None, description="Bullish target price (should be above entry_level)")
+    bearish_target: Optional[float] = Field(None, description="Bearish target price (should be below entry_level)")
+    initial_lot_ce: Optional[int] = Field(None, description="Initial lots for Call options", ge=0)
+    initial_lot_pe: Optional[int] = Field(None, description="Initial lots for Put options", ge=0)
+    remaining_lot_ce: Optional[int] = Field(None, description="Remaining lots for Call options", ge=0)
+    remaining_lot_pe: Optional[int] = Field(None, description="Remaining lots for Put options", ge=0)
+    ce_buy_enabled: Optional[bool] = Field(None, description="Enable CE buy orders")
+    ce_sell_enabled: Optional[bool] = Field(None, description="Enable CE sell orders")
+    pe_buy_enabled: Optional[bool] = Field(None, description="Enable PE buy orders")
+    pe_sell_enabled: Optional[bool] = Field(None, description="Enable PE sell orders")
+    max_trades: Optional[int] = Field(None, description="Maximum number of trades allowed", ge=0)
+    max_loss_trades: Optional[int] = Field(None, description="Maximum number of loss trades allowed", ge=0)
+    pullback_percentage: Optional[float] = Field(None, description="Pullback percentage for entry", ge=0, le=100)
+    notes: Optional[str] = Field(None, description="Additional notes for this smart level")
+
+class SmartLevelResponse(SmartLevelBase):
+    """Schema for Smart Level response."""
+    id: int = Field(..., description="Smart Level ID")
+    strategy_symbol_id: int = Field(..., description="Strategy symbol ID this smart level belongs to")
+    created_at: datetime = Field(..., description="Creation timestamp")
+    updated_at: datetime = Field(..., description="Last update timestamp")
+
+    @field_serializer("created_at", "updated_at")
+    def serialize_dt(self, v):
+        if isinstance(v, str):
+            return v
+        return v.isoformat() if v else None
+
+    class Config:
+        from_attributes = True
