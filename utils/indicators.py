@@ -276,6 +276,22 @@ def calculate_atr_trial_stops(data, atr_multiplier=3, atr_period=21, high_low=Fa
     except Exception as err:
         logger.error("Error deriving SMA. Error: {0}".format(err))
         return pd.DataFrame()
+    
+def rsi(df, period=14):
+    """
+        Relative Strength Index
+    :param df: Pandas Dataframe
+    :param period: Period for which RSI needs to be calculated. Default is 14
+    :return: Pandas Dataframe with new field rsi_<period>. Ex: rsi_14
+    """
+    change = df['close'].diff()
+    gain = change.mask(change < 0, 0)
+    loss = change.mask(change > 0, 0)
+    average_gain = gain.ewm(com=period - 1, min_periods=period).mean()
+    average_loss = loss.ewm(com=period - 1, min_periods=period).mean()
+    rs = abs(average_gain / average_loss)
+    df['rsi_' + str(period)] = 100 - (100 / (1 + rs))
+    return df
 
 
 def calculate_rsi(data, period=14):
@@ -304,8 +320,10 @@ def calculate_rsi(data, period=14):
         df['loss'] = -df['price_change'].where(df['price_change'] < 0, 0)
         
         # Calculate average gain and loss using exponential moving average
-        df['avg_gain'] = df['gain'].ewm(span=period).mean()
-        df['avg_loss'] = df['loss'].ewm(span=period).mean()
+
+        df['avg_gain'] = df['gain'].ewm(com=period - 1, min_periods=period).mean()
+        df['avg_loss'] = df['loss'].ewm(com=period - 1, min_periods=period).mean()
+        
         
         # Calculate RSI
         df['rs'] = df['avg_gain'] / df['avg_loss']

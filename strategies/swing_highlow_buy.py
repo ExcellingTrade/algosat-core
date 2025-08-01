@@ -97,20 +97,22 @@ class SwingHighLowBuyStrategy(StrategyBase):
         self._stoploss_cfg = self.trade.get("stoploss", {})
         self._confirm_cfg = self.trade.get("confirmation", {})
         self.entry_timeframe = self._entry_cfg.get("timeframe", "5m")
-        self.entry_minutes = int(self.entry_timeframe.replace("m", "")) if self.entry_timeframe.endswith("m") else 5
+        self.entry_minutes = int(self.entry_timeframe.replace("min", "").replace("m", "")) if (self.entry_timeframe.endswith("m") or self.entry_timeframe.endswith("min")) else 5
         self.stoploss_timeframe = self._stoploss_cfg.get("timeframe", "5m")
-        self.stoploss_minutes = int(self.stoploss_timeframe.replace("m", "")) if self.stoploss_timeframe.endswith("m") else 5
+        self.stoploss_minutes = int(self.stoploss_timeframe.replace("min", "").replace("m", "")) if (self.stoploss_timeframe.endswith("m") or self.stoploss_timeframe.endswith("min")) else 5
         self.entry_swing_left_bars = self._entry_cfg.get("swing_left_bars", 3)
         self.entry_swing_right_bars = self._entry_cfg.get("swing_right_bars", 3)
         self.entry_buffer = self._entry_cfg.get("entry_buffer", 0)
         self.stop_percentage = self._stoploss_cfg.get("percentage", 0.05)
         self.confirm_timeframe = self._confirm_cfg.get("timeframe", "1m")
-        self.confirm_minutes = int(self.confirm_timeframe.replace("m", "")) if self.confirm_timeframe.endswith("m") else 1
+        self.confirm_minutes = int(self.confirm_timeframe.replace("min", "").replace("m", "")) if (self.confirm_timeframe.endswith("m") or self.confirm_timeframe.endswith("min")) else 1
         self.confirm_candles = self._confirm_cfg.get("candles", 1)
         self.ce_lot_qty = self.trade.get("ce_lot_qty", 2)
         self.lot_size = self.trade.get("lot_size", 75)
         self.rsi_ignore_above = self._entry_cfg.get("rsi_ignore_above", 80)
         self.rsi_period = self.indicators.get("rsi_period", 14)
+        self.rsi_timeframe_raw = self.indicators.get("rsi_timeframe", "5m") 
+        self.rsi_timeframe_minutes = self.rsi_timeframe_raw if (self.rsi_timeframe_raw.endswith("m") or self.rsi_timeframe_raw.endswith("min")) else f"{self.rsi_timeframe_raw}m"
         # Regime reference for sideways detection
         self.regime_reference = None
         logger.info(f"SwingHighLowBuyStrategy config: {self.trade}")
@@ -799,7 +801,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     
                     # Fetch fresh data using entry timeframe for RSI consistency
                     rsi_history_dict = await self.fetch_history_data(
-                        self.dp, [spot_symbol], self.entry_minutes
+                        self.dp, [spot_symbol], self.rsi_timeframe_minutes
                     )
                     rsi_history_df = rsi_history_dict.get(str(spot_symbol))
                     
@@ -1179,13 +1181,25 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 from algosat.utils.indicators import calculate_rsi
                 rsi_period = self.rsi_period or 14
                 
-                # Use entry timeframe data for RSI calculation to ensure consistency
-                rsi_df = calculate_rsi(entry_df, rsi_period)
-                if "rsi" in rsi_df.columns and len(rsi_df) > 0:
-                    entry_rsi_value = rsi_df["rsi"].iloc[-1]
-                    logger.info(f"Entry RSI calculated: {entry_rsi_value} (period={rsi_period})")
+                # Fetch fresh data using entry timeframe for RSI consistency
+                rsi_history_dict = await self.fetch_history_data(
+                    self.dp, [self.symbol,], self.rsi_timeframe_minutes
+                )
+                rsi_history_df = rsi_history_dict.get(str(self.symbol))
+                
+                if rsi_history_df is not None and len(rsi_history_df) > 0:
+                    # Calculate RSI on entry timeframe data
+                    rsi_df = calculate_rsi(rsi_history_df, rsi_period)
+
+                    # Use entry timeframe data for RSI calculation to ensure consistency
+                     # rsi_df = calculate_rsi(entry_df, rsi_period)
+                    if "rsi" in rsi_df.columns and len(rsi_df) > 0:
+                        entry_rsi_value = rsi_df["rsi"].iloc[-1]
+                        logger.info(f"Entry RSI calculated on {self.rsi_timeframe_minutes}min interval: {entry_rsi_value} (period={rsi_period})")
+                    else:
+                        logger.warning("Could not calculate entry RSI - missing RSI column")
                 else:
-                    logger.warning("Could not calculate entry RSI - missing RSI column")
+                    logger.warning("Could not fetch history data for entry RSI calculation")
             except Exception as e:
                 logger.error(f"Error calculating entry RSI: {e}")
 
