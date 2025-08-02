@@ -564,6 +564,7 @@ async def get_active_strategy_symbols_with_configs(session):
             strategies.c.product_type,
             strategy_symbols.c.symbol,
             strategy_symbols.c.status.label('symbol_status'),
+            strategy_symbols.c.enable_smart_levels,
             strategy_configs.c.id.label('config_id'),
             strategy_configs.c.name.label('config_name'),
             strategy_configs.c.description.label('config_description'),
@@ -2328,3 +2329,94 @@ async def delete_smart_level(session, smart_level_id: int) -> bool:
     await session.commit()
     
     return result.rowcount > 0
+
+async def get_smart_levels_for_symbol(session, symbol: str, strategy_id: int = None):
+    """
+    Get all active smart levels for a given symbol name.
+    
+    Args:
+        session: Database session
+        symbol: Symbol name (e.g., "NIFTY50", "NIFTYBANK")
+        strategy_id: Optional strategy ID filter
+        
+    Returns:
+        List of smart level records as dicts
+    """
+    from sqlalchemy import select, and_
+    
+    # Build the query joining smart_levels -> strategy_symbols -> strategies
+    stmt = (
+        select(
+            smart_levels.c.id,
+            smart_levels.c.strategy_symbol_id,
+            smart_levels.c.name,
+            smart_levels.c.is_active,
+            smart_levels.c.entry_level,
+            smart_levels.c.bullish_target,
+            smart_levels.c.bearish_target,
+            smart_levels.c.initial_lot_ce,
+            smart_levels.c.initial_lot_pe,
+            smart_levels.c.remaining_lot_ce,
+            smart_levels.c.remaining_lot_pe,
+            smart_levels.c.ce_buy_enabled,
+            smart_levels.c.ce_sell_enabled,
+            smart_levels.c.pe_buy_enabled,
+            smart_levels.c.pe_sell_enabled,
+            smart_levels.c.max_trades,
+            smart_levels.c.max_loss_trades,
+            smart_levels.c.pullback_percentage,
+            smart_levels.c.notes,
+            smart_levels.c.created_at,
+            smart_levels.c.updated_at,
+            strategy_symbols.c.symbol,
+            strategy_symbols.c.strategy_id,
+            strategies.c.name.label('strategy_name'),
+            strategies.c.key.label('strategy_key')
+        )
+        .select_from(
+            smart_levels
+            .join(strategy_symbols, smart_levels.c.strategy_symbol_id == strategy_symbols.c.id)
+            .join(strategies, strategy_symbols.c.strategy_id == strategies.c.id)
+        )
+        .where(
+            and_(
+                strategy_symbols.c.symbol == symbol,
+                smart_levels.c.is_active == True
+                # Removed: strategies.c.enabled == True - allow for disabled strategies in testing
+            )
+        )
+    )
+    
+    # Add strategy_id filter if provided
+    if strategy_id is not None:
+        stmt = stmt.where(strategy_symbols.c.strategy_id == strategy_id)
+    
+    stmt = stmt.order_by(smart_levels.c.created_at.desc())
+    
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_smart_levels_for_strategy_symbol_id(session, strategy_symbol_id: int):
+    """
+    Get all active smart levels for a given strategy_symbol_id.
+    
+    Args:
+        session: Database session
+        strategy_symbol_id: Strategy symbol ID (strategy_symbols.id)
+        
+    Returns:
+        List of smart level records as dicts
+    """
+    stmt = (
+        select(smart_levels)
+        .where(
+            and_(
+                smart_levels.c.strategy_symbol_id == strategy_symbol_id,
+                smart_levels.c.is_active == True
+            )
+        )
+        .order_by(smart_levels.c.created_at.desc())
+    )
+    
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]

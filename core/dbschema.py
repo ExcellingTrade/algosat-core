@@ -80,6 +80,7 @@ smart_levels = Table(
     Column("max_trades", Integer, nullable=True),
     Column("max_loss_trades", Integer, nullable=True),
     Column("pullback_percentage", Float, nullable=True),
+    Column("strict_entry_vs_swing_check", Boolean, nullable=False, server_default=text("false")),
     Column("notes", String, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),

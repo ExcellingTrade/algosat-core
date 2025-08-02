@@ -510,6 +510,7 @@ class SmartLevelBase(BaseModel):
     max_trades: Optional[int] = Field(None, description="Maximum number of trades allowed", ge=0)
     max_loss_trades: Optional[int] = Field(None, description="Maximum number of loss trades allowed", ge=0)
     pullback_percentage: Optional[float] = Field(None, description="Pullback percentage for entry", ge=0, le=100)
+    strict_entry_vs_swing_check: bool = Field(False, description="Enable strict entry vs swing check validation")
     notes: Optional[str] = Field(None, description="Additional notes for this smart level")
 
 class SmartLevelCreate(SmartLevelBase):
@@ -534,6 +535,7 @@ class SmartLevelUpdate(BaseModel):
     max_trades: Optional[int] = Field(None, description="Maximum number of trades allowed", ge=0)
     max_loss_trades: Optional[int] = Field(None, description="Maximum number of loss trades allowed", ge=0)
     pullback_percentage: Optional[float] = Field(None, description="Pullback percentage for entry", ge=0, le=100)
+    strict_entry_vs_swing_check: Optional[bool] = Field(None, description="Enable strict entry vs swing check validation")
     notes: Optional[str] = Field(None, description="Additional notes for this smart level")
 
 class SmartLevelResponse(SmartLevelBase):

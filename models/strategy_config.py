@@ -18,6 +18,7 @@ class StrategyConfig(BaseModel):
     # Symbol-specific fields (from the active symbol)
     symbol: Optional[str] = None  # Underlying symbol name (e.g., "NIFTY50", "BANKNIFTY")
     symbol_id: Optional[int] = None  # strategy_symbols.id (the strategy_symbol_id for DB relations)
+    enable_smart_levels: bool = False  # Whether smart levels are enabled for this symbol
     
     # Strategy-level fields
     strategy_key: Optional[str] = None

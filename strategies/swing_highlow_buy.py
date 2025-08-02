@@ -1,5 +1,6 @@
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
+from algosat.core.db import AsyncSessionLocal
 from algosat.core.signal import TradeSignal
 import pandas as pd
 from algosat.common import constants, strategy_utils
@@ -113,9 +114,16 @@ class SwingHighLowBuyStrategy(StrategyBase):
         self.rsi_period = self.indicators.get("rsi_period", 14)
         self.rsi_timeframe_raw = self.indicators.get("rsi_timeframe", "5m") 
         self.rsi_timeframe_minutes = self.rsi_timeframe_raw if (self.rsi_timeframe_raw.endswith("m") or self.rsi_timeframe_raw.endswith("min")) else f"{self.rsi_timeframe_raw}m"
+        
+        # Smart Level Integration
+        self._smart_levels_enabled = getattr(self.cfg, 'enable_smart_levels', False)
+        self._strategy_symbol_id = getattr(self.cfg, 'symbol_id', None)
+        self._smart_level = None  # Cache for single active smart level (dict)
+        
         # Regime reference for sideways detection
         self.regime_reference = None
         logger.info(f"SwingHighLowBuyStrategy config: {self.trade}")
+        logger.info(f"Smart levels enabled: {self._smart_levels_enabled}, strategy_symbol_id: {self._strategy_symbol_id}")
     
     async def ensure_broker(self):
         # No longer needed for data fetches, but keep for order placement if required
@@ -148,6 +156,13 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 today_dt
             )
             logger.info(f"Regime reference points for {self.symbol}: {self.regime_reference}")
+            
+            # Load smart levels if enabled
+            if self._smart_levels_enabled:
+                await self.load_smart_levels()
+                logger.info(f"Smart level setup complete:")
+                logger.info(self.get_smart_level_info_string())
+            
         except Exception as e:
             logger.error(f"SwingHighLowBuyStrategy setup failed: {e}", exc_info=True)
             self._setup_failed = True
@@ -173,6 +188,389 @@ class SwingHighLowBuyStrategy(StrategyBase):
         except Exception as e:
             logger.error(f"Error in compute_indicators: {e}", exc_info=True)
             return {"hh_levels": [], "ll_levels": []}
+
+    async def load_smart_levels(self):
+        """
+        Load active smart levels for this strategy symbol from database.
+        Uses either strategy_symbol_id or symbol name + strategy_id for lookup.
+        """
+        try:
+            from algosat.core.db import AsyncSessionLocal, get_smart_levels_for_strategy_symbol_id, get_smart_levels_for_symbol
+            
+            logger.info(f"🔄 Loading smart levels - enabled: {self._smart_levels_enabled}, strategy_symbol_id: {self._strategy_symbol_id}, symbol: {self.symbol}")
+            
+            # Initialize empty cache 
+            self._smart_level = None
+            
+            if not self._smart_levels_enabled:
+                logger.info("Smart levels disabled, skipping load")
+                return
+            
+            async with AsyncSessionLocal() as session:
+                smart_levels = []
+                lookup_method = None
+                
+                # Method 1: Use strategy_symbol_id if available (most direct)
+                if self._strategy_symbol_id:
+                    smart_levels = await get_smart_levels_for_strategy_symbol_id(session, self._strategy_symbol_id)
+                    lookup_method = f"strategy_symbol_id={self._strategy_symbol_id}"
+                    logger.debug(f"Method 1: Loaded {len(smart_levels)} smart levels using {lookup_method}")
+                
+                # Method 2: Fallback to symbol name + strategy_id lookup
+                elif hasattr(self.cfg, 'strategy_id') and self.cfg.strategy_id and self.symbol:
+                    smart_levels = await get_smart_levels_for_symbol(session, self.symbol, self.cfg.strategy_id)
+                    lookup_method = f"symbol={self.symbol}, strategy_id={self.cfg.strategy_id}"
+                    logger.debug(f"Method 2: Loaded {len(smart_levels)} smart levels using {lookup_method}")
+                
+                # Method 3: Last fallback - symbol name only
+                elif self.symbol:
+                    smart_levels = await get_smart_levels_for_symbol(session, self.symbol)
+                    lookup_method = f"symbol={self.symbol} only"
+                    logger.debug(f"Method 3: Loaded {len(smart_levels)} smart levels using {lookup_method}")
+                
+                else:
+                    logger.warning("❌ Cannot load smart levels: missing strategy_symbol_id, strategy_id, and symbol")
+                    return
+                
+                # Process smart levels - expect only one active level per symbol
+                if smart_levels:
+                    active_level = None
+                    
+                    for level in smart_levels:
+                        if not isinstance(level, dict):
+                            logger.warning(f"⚠️ Invalid smart level data type: {type(level)}, expected dict")
+                            continue
+                            
+                        # Check required fields
+                        required_fields = ['name', 'entry_level', 'is_active']
+                        missing_fields = [field for field in required_fields if field not in level]
+                        if missing_fields:
+                            logger.warning(f"⚠️ Smart level missing required fields {missing_fields}: {level}")
+                            continue
+                            
+                        # Only include active levels
+                        if not level.get('is_active', False):
+                            logger.debug(f"Skipping inactive smart level: {level.get('name')}")
+                            continue
+                        
+                        # Take the first active level (should be only one per symbol)
+                        if active_level is None:
+                            active_level = level
+                            logger.info(f"✅ Active smart level found: '{level['name']}'")
+                        else:
+                            logger.warning(f"⚠️ Multiple active smart levels found for {self.symbol}! Using first: '{active_level['name']}', skipping: '{level['name']}'")
+                    
+                    # Cache the single smart level
+                    self._smart_level = active_level
+                    
+                    if active_level:
+                        logger.info(f"✅ Smart level loaded for {self.symbol} using {lookup_method}")
+                        
+                        # Use summary method for comprehensive logging
+                        summary = self.get_smart_level_summary()
+                        level_info = summary['level']
+                        logger.info(f"📊 Smart Level Summary: '{level_info['name']}'")
+                        logger.info(f"    Entry Level: {level_info['entry_level']}")
+                        logger.info(f"    Targets: Bullish={level_info['bullish_target']}, Bearish={level_info['bearish_target']}")
+                        logger.info(f"    Initial Lots: CE={level_info['initial_lot_ce']}, PE={level_info['initial_lot_pe']}")
+                        logger.info(f"    Remaining Lots: CE={level_info['remaining_lot_ce']}, PE={level_info['remaining_lot_pe']}")
+                        logger.info(f"    Buy Enabled: CE={level_info['ce_buy_enabled']}, PE={level_info['pe_buy_enabled']}")
+                        logger.info(f"    Sell Enabled: CE={level_info['ce_sell_enabled']}, PE={level_info['pe_sell_enabled']}")
+                        logger.info(f"    Limits: Max Trades={level_info['max_trades']}, Max Loss={level_info['max_loss_trades']}")
+                        if level_info['pullback_percentage']:
+                            logger.info(f"    Pullback: {level_info['pullback_percentage']}%")
+                        if level_info['notes']:
+                            logger.info(f"    Notes: {level_info['notes']}")
+                    else:
+                        logger.info(f"ℹ️ No active smart levels found for {self.symbol} using {lookup_method}")
+                else:
+                    logger.info(f"ℹ️ No smart levels found for {self.symbol} using {lookup_method}")
+                    
+        except Exception as e:
+            logger.error(f"❌ Error loading smart levels: {e}", exc_info=True)
+            self._smart_level = None  # Ensure cache is cleared on error
+
+    def get_active_smart_level(self):
+        """
+        Get currently cached smart level.
+        
+        Returns:
+            dict: Smart level dict if available, None otherwise
+        """
+        return self._smart_level
+
+    def get_primary_smart_level(self):
+        """
+        Get the primary smart level for validation (same as get_active_smart_level).
+        
+        Returns:
+            dict: Smart level if available, None otherwise
+        """
+        return self._smart_level
+
+    def find_smart_level_by_name(self, name: str):
+        """
+        Find the smart level by name (since we only have one).
+        
+        Args:
+            name: Smart level name to search for
+            
+        Returns:
+            dict: Smart level if name matches, None otherwise
+        """
+        if self._smart_level and self._smart_level.get('name') == name:
+            return self._smart_level
+        return None
+
+    async def reload_smart_levels(self):
+        """
+        Force reload smart level from database.
+        Useful when smart level is updated during runtime.
+        
+        Returns:
+            bool: True if reload was successful, False otherwise
+        """
+        try:
+            logger.info("🔄 Force reloading smart level from database")
+            await self.load_smart_levels()
+            smart_level_name = self._smart_level.get('name') if self._smart_level else 'None'
+            logger.info(f"✅ Smart level reloaded: {smart_level_name}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Failed to reload smart level: {e}", exc_info=True)
+            return False
+
+    def get_smart_level_summary(self):
+        """
+        Get a comprehensive summary of loaded smart level for debugging.
+        
+        Returns:
+            dict: Complete summary information about smart level
+        """
+        if not self._smart_level:
+            return {
+                'enabled': self._smart_levels_enabled,
+                'loaded': False,
+                'level': None
+            }
+        
+        return {
+            'enabled': self._smart_levels_enabled,
+            'loaded': True,
+            'level': {
+                # Basic Info
+                'id': self._smart_level.get('id'),
+                'name': self._smart_level.get('name'),
+                'strategy_symbol_id': self._smart_level.get('strategy_symbol_id'),
+                'is_active': self._smart_level.get('is_active'),
+                
+                # Trading Levels
+                'entry_level': self._smart_level.get('entry_level'),
+                'bullish_target': self._smart_level.get('bullish_target'),
+                'bearish_target': self._smart_level.get('bearish_target'),
+                
+                # Initial Lots
+                'initial_lot_ce': self._smart_level.get('initial_lot_ce', 0),
+                'initial_lot_pe': self._smart_level.get('initial_lot_pe', 0),
+                
+                # Remaining Lots  
+                'remaining_lot_ce': self._smart_level.get('remaining_lot_ce', 0),
+                'remaining_lot_pe': self._smart_level.get('remaining_lot_pe', 0),
+                
+                # Enable/Disable Flags
+                'ce_buy_enabled': self._smart_level.get('ce_buy_enabled', False),
+                'ce_sell_enabled': self._smart_level.get('ce_sell_enabled', False),
+                'pe_buy_enabled': self._smart_level.get('pe_buy_enabled', False),
+                'pe_sell_enabled': self._smart_level.get('pe_sell_enabled', False),
+                
+                # Trading Limits
+                'max_trades': self._smart_level.get('max_trades'),
+                'max_loss_trades': self._smart_level.get('max_loss_trades'),
+                'pullback_percentage': self._smart_level.get('pullback_percentage'),
+                'strict_entry_vs_swing_check': self._smart_level.get('strict_entry_vs_swing_check', False),
+                
+                # Metadata
+                'notes': self._smart_level.get('notes'),
+                'created_at': self._smart_level.get('created_at'),
+                'updated_at': self._smart_level.get('updated_at'),
+                
+                # Strategy Info (if available from join)
+                'symbol': self._smart_level.get('symbol'),
+                'strategy_id': self._smart_level.get('strategy_id'),
+                'strategy_name': self._smart_level.get('strategy_name'),
+                'strategy_key': self._smart_level.get('strategy_key')
+            }
+        }
+
+    def get_smart_level_info_string(self):
+        """
+        Get a formatted string representation of smart level for logging.
+        
+        Returns:
+            str: Formatted smart level information
+        """
+        if not self._smart_level:
+            return "Smart Level: Not loaded"
+        
+        summary = self.get_smart_level_summary()
+        level = summary['level']
+        
+        info_lines = [
+            f"Smart Level: '{level['name']}'",
+            f"  Entry: {level['entry_level']}",
+            f"  Targets: Bullish={level['bullish_target']}, Bearish={level['bearish_target']}",
+            f"  Initial: CE={level['initial_lot_ce']}, PE={level['initial_lot_pe']}",
+            f"  Remaining: CE={level['remaining_lot_ce']}, PE={level['remaining_lot_pe']}",
+            f"  Buy Enabled: CE={level['ce_buy_enabled']}, PE={level['pe_buy_enabled']}",
+            f"  Sell Enabled: CE={level['ce_sell_enabled']}, PE={level['pe_sell_enabled']}"
+        ]
+        
+        if level['max_trades']:
+            info_lines.append(f"  Max Trades: {level['max_trades']}")
+        if level['max_loss_trades']:
+            info_lines.append(f"  Max Loss Trades: {level['max_loss_trades']}")
+        if level['pullback_percentage']:
+            info_lines.append(f"  Pullback: {level['pullback_percentage']}%")
+        if level['notes']:
+            info_lines.append(f"  Notes: {level['notes']}")
+            
+        return "\n".join(info_lines)
+
+    def is_smart_levels_enabled(self):
+        """
+        Check if smart level is enabled for this strategy.
+        
+        Returns:
+            bool: True if smart level is enabled and available
+        """
+        enabled = self._smart_levels_enabled and self._smart_level is not None
+        
+        if not self._smart_levels_enabled:
+            logger.debug("Smart levels not enabled in configuration")
+        elif self._smart_level is None:
+            logger.debug("Smart levels enabled but no active level loaded")
+        else:
+            logger.debug(f"Smart level enabled: '{self._smart_level.get('name')}'")
+            
+        return enabled
+
+    async def validate_smart_level_entry(self, breakout_type, spot_price, direction):
+        """
+        Validate entry against smart levels with comprehensive logging.
+        
+        Args:
+            breakout_type: "CE" or "PE" (reusing existing terminology)
+            spot_price: Current spot price from last_candle["close"] 
+            direction: "UP" or "DOWN" (reusing existing terminology)
+            
+        Returns:
+            (is_valid: bool, smart_level_data: dict, updated_lot_qty: int)
+        """
+        try:
+            logger.info(f"🔍 Smart Level Validation: breakout_type={breakout_type}, spot_price={spot_price}, direction={direction}")
+            
+            if not self.is_smart_levels_enabled():
+                logger.warning("Smart levels validation called but smart levels not enabled or no active level")
+                return False, None, 0
+            
+            # Get the smart level (single dict)
+            smart_level = self._smart_level
+            if smart_level is None:
+                logger.warning(f"🚫 Smart Level Validation FAILED: No smart level available")
+                return False, None, 0
+            
+            entry_level = smart_level.get('entry_level')
+            if entry_level is None:
+                logger.warning(f"🚫 Smart Level Validation FAILED: entry_level is None for smart level '{smart_level.get('name')}'")
+                return False, smart_level, 0
+            
+            # Log the smart level being validated using summary method
+            summary = self.get_smart_level_summary()
+            level_info = summary['level']
+            logger.debug(f"🔍 Validating Smart Level Summary:")
+            logger.debug(f"    Name: '{level_info['name']}', Entry: {level_info['entry_level']}")
+            logger.debug(f"    Targets: Bullish={level_info['bullish_target']}, Bearish={level_info['bearish_target']}")
+            logger.debug(f"    CE: buy_enabled={level_info['ce_buy_enabled']}, remaining_lots={level_info['remaining_lot_ce']}")
+            logger.debug(f"    PE: buy_enabled={level_info['pe_buy_enabled']}, remaining_lots={level_info['remaining_lot_pe']}")
+            logger.debug(f"    Limits: Max Trades={level_info['max_trades']}, Max Loss={level_info['max_loss_trades']}")
+            
+            # Position validation: for UP trend, spot should be above entry_level; for DOWN trend, below
+            if direction == "UP" and float(spot_price) > float(entry_level):
+                logger.info(f"✅ Smart Level Position Check (UP trend): spot_price={spot_price} > entry_level={entry_level}")
+            elif direction == "DOWN" and float(spot_price) < float(entry_level):
+                logger.info(f"✅ Smart Level Position Check (DOWN trend): spot_price={spot_price} < entry_level={entry_level}")
+            else:
+                logger.warning(f"🚫 Smart Level Validation FAILED: Position check failed - spot_price={spot_price} vs entry_level={entry_level} for {direction} trend")
+                return False, smart_level, 0
+            
+            # Extract smart level data for validation using summary method
+            summary = self.get_smart_level_summary()
+            level_info = summary['level']
+            entry_level = float(level_info['entry_level'])
+            bullish_target = level_info['bullish_target']
+            bearish_target = level_info['bearish_target'] 
+            ce_buy_enabled = level_info['ce_buy_enabled']
+            pe_buy_enabled = level_info['pe_buy_enabled']
+            remaining_lot_ce = level_info['remaining_lot_ce']
+            remaining_lot_pe = level_info['remaining_lot_pe']
+            
+            logger.info(f"📊 Smart Level Validation Data:")
+            logger.info(f"    Name: '{level_info['name']}', Entry: {entry_level}")
+            logger.info(f"    Targets: Bullish={bullish_target}, Bearish={bearish_target}")
+            logger.info(f"    CE: enabled={ce_buy_enabled}, remaining_lots={remaining_lot_ce}")
+            logger.info(f"    PE: enabled={pe_buy_enabled}, remaining_lots={remaining_lot_pe}")
+            
+            # Validation 1: Target Boundary Check
+            if direction == "UP" and bullish_target is not None:
+                if float(spot_price) >= float(bullish_target):
+                    logger.warning(f"🚫 Smart Level Validation FAILED: UP trend spot_price={spot_price} >= bullish_target={bullish_target} (no room to move up)")
+                    return False, smart_level, 0
+                else:
+                    logger.info(f"✅ Target Boundary Check (UP): spot_price={spot_price} < bullish_target={bullish_target} (room to move up)")
+            
+            if direction == "DOWN" and bearish_target is not None:
+                if float(spot_price) <= float(bearish_target):
+                    logger.warning(f"🚫 Smart Level Validation FAILED: DOWN trend spot_price={spot_price} <= bearish_target={bearish_target} (no room to move down)")
+                    return False, smart_level, 0
+                else:
+                    logger.info(f"✅ Target Boundary Check (DOWN): spot_price={spot_price} > bearish_target={bearish_target} (room to move down)")
+            
+            # Validation 2: Direction Enable Check
+            if breakout_type == "CE" and not ce_buy_enabled:
+                logger.warning(f"🚫 Smart Level Validation FAILED: CE buy signal detected but ce_buy_enabled={ce_buy_enabled} for level '{smart_level.get('name')}'")
+                return False, smart_level, 0
+            
+            if breakout_type == "PE" and not pe_buy_enabled:
+                logger.warning(f"🚫 Smart Level Validation FAILED: PE buy signal detected but pe_buy_enabled={pe_buy_enabled} for level '{smart_level.get('name')}'")
+                return False, smart_level, 0
+            
+            logger.info(f"✅ Direction Enable Check: {breakout_type} buy is enabled for level '{smart_level.get('name')}'")
+            
+            # Validation 3: Remaining Lots Check and Quantity Calculation
+            if breakout_type == "CE":
+                if remaining_lot_ce <= 0:
+                    logger.warning(f"🚫 Smart Level Validation FAILED: CE buy signal but remaining_lot_ce={remaining_lot_ce} (no lots available)")
+                    return False, smart_level, 0
+                # Calculate smart level quantity: remaining_lot_ce * ce_lot_qty
+                original_ce_lot_qty = self.ce_lot_qty
+                smart_lot_qty = remaining_lot_ce * original_ce_lot_qty
+                logger.info(f"💰 Quantity Override (CE): remaining_lot_ce={remaining_lot_ce} * ce_lot_qty={original_ce_lot_qty} = smart_lot_qty={smart_lot_qty}")
+            
+            elif breakout_type == "PE":
+                if remaining_lot_pe <= 0:
+                    logger.warning(f"🚫 Smart Level Validation FAILED: PE buy signal but remaining_lot_pe={remaining_lot_pe} (no lots available)")
+                    return False, smart_level, 0
+                # Calculate smart level quantity: remaining_lot_pe * pe_lot_qty  
+                original_pe_lot_qty = self.trade.get("pe_lot_qty", 1)
+                smart_lot_qty = remaining_lot_pe * original_pe_lot_qty
+                logger.info(f"💰 Quantity Override (PE): remaining_lot_pe={remaining_lot_pe} * pe_lot_qty={original_pe_lot_qty} = smart_lot_qty={smart_lot_qty}")
+            
+            logger.info(f"🎉 Smart Level Validation PASSED: All checks successful for {breakout_type} {direction} trade with smart_lot_qty={smart_lot_qty}")
+            return True, smart_level, smart_lot_qty
+            
+        except Exception as e:
+            logger.error(f"Error in validate_smart_level_entry: {e}", exc_info=True)
+            return False, None, 0
 
     def select_strikes_from_pivots(self):
         """
@@ -201,6 +599,14 @@ class SwingHighLowBuyStrategy(StrategyBase):
             if self._setup_failed:
                 logger.warning("process_cycle aborted: setup failed.")
                 return None
+            
+            # Check trade limits before proceeding with any new trades
+            can_trade, limit_reason = await self.check_trade_limits()
+            if not can_trade:
+                logger.warning(f"process_cycle aborted: {limit_reason}")
+                return None
+            
+            logger.debug(f"Trade limits check passed: {limit_reason}")
 
             # Sync open positions from DB before proceeding
             await self.sync_open_positions()
@@ -1004,6 +1410,103 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 
     #     except Exception as e:
     #         logger.error(f"Error updating exit status in DB for order_id={order_id}: {e}", exc_info=True)
+
+    async def check_trade_limits(self) -> tuple[bool, str]:
+        """
+        Check if the strategy has exceeded maximum trades or maximum loss trades configured limits.
+        For smart level enabled strategies, uses limits from smart level.
+        For normal strategies, uses limits from trade config.
+        Returns (can_trade: bool, reason: str)
+        """
+        try:
+            # Ensure smart levels are loaded if they should be enabled
+            if not hasattr(self, '_smart_level') or self._smart_level is None:
+                await self.load_smart_levels()
+            
+            # Determine source of trade limits
+            if self.is_smart_levels_enabled():
+                # Use smart level limits
+                summary = self.get_smart_level_summary()
+                level_info = summary['level']
+                max_trades = level_info.get('max_trades', None)
+                max_loss_trades = level_info.get('max_loss_trades', None)
+                limits_source = f"smart level '{level_info.get('name')}'"
+                
+                logger.debug(f"Using trade limits from {limits_source}: max_trades={max_trades}, max_loss_trades={max_loss_trades}")
+            else:
+                # Use trade config limits
+                trade_config = self.trade
+                max_trades = trade_config.get('max_trades', None)
+                max_loss_trades = trade_config.get('max_loss_trades', None)
+                limits_source = "trade config"
+                
+                logger.debug(f"Using trade limits from {limits_source}: max_trades={max_trades}, max_loss_trades={max_loss_trades}")
+            
+            # If no limits are configured, allow trading
+            if max_trades is None and max_loss_trades is None:
+                return True, f"No trade limits configured in {limits_source}"
+            
+            strategy_id = getattr(self.cfg, 'strategy_id', None)
+            if not strategy_id:
+                logger.warning("No strategy_id found in config, cannot check trade limits")
+                return True, "No strategy_id found, allowing trade"
+            
+            trade_day = get_trade_day(get_ist_datetime())
+            
+            async with AsyncSessionLocal() as session:
+                from algosat.core.db import get_all_orders_for_strategy_and_tradeday
+                
+                # Get all orders for this strategy on the current trade day
+                all_orders = await get_all_orders_for_strategy_and_tradeday(session, strategy_id, trade_day)
+                
+                # Count completed trades (both profitable and loss trades)
+                completed_statuses = [
+                    constants.TRADE_STATUS_EXIT_TARGET,
+                    constants.TRADE_STATUS_EXIT_STOPLOSS,
+                    constants.TRADE_STATUS_EXIT_REVERSAL,
+                    constants.TRADE_STATUS_EXIT_EOD,
+                    constants.TRADE_STATUS_EXIT_MAX_LOSS,
+                    constants.TRADE_STATUS_ENTRY_CANCELLED,
+                    constants.TRADE_STATUS_EXIT_CLOSED
+                    
+                ]
+                
+                completed_trades = [order for order in all_orders if order.get('status') in completed_statuses]
+                total_completed_trades = len(completed_trades)
+                
+                # Count loss trades (excluding profitable trades)
+                loss_statuses = [
+                    constants.TRADE_STATUS_EXIT_STOPLOSS,
+                    constants.TRADE_STATUS_EXIT_MAX_LOSS,
+                    constants.TRADE_STATUS_ENTRY_CANCELLED
+                ]
+                
+                loss_trades = [order for order in completed_trades if order.get('status') in loss_statuses]
+                total_loss_trades = len(loss_trades)
+                
+                logger.debug(f"Trade limits check - Total completed trades: {total_completed_trades}, Loss trades: {total_loss_trades}")
+                logger.debug(f"Trade limits from {limits_source} - Max trades: {max_trades}, Max loss trades: {max_loss_trades}")
+                logger.debug(f"Completed trade statuses found: {[order.get('status') for order in completed_trades]}")
+                logger.debug(f"Loss trade statuses found: {[order.get('status') for order in loss_trades]}")
+                
+                # Check max_trades limit
+                if max_trades is not None and total_completed_trades >= max_trades:
+                    reason = f"Maximum trades limit reached: {total_completed_trades}/{max_trades} (from {limits_source})"
+                    logger.info(reason)
+                    return False, reason
+                
+                # Check max_loss_trades limit
+                if max_loss_trades is not None and total_loss_trades >= max_loss_trades:
+                    reason = f"Maximum loss trades limit reached: {total_loss_trades}/{max_loss_trades} (from {limits_source})"
+                    logger.info(reason)
+                    return False, reason
+                
+                return True, f"Trade limits OK - Completed: {total_completed_trades}/{max_trades or 'unlimited'}, Loss: {total_loss_trades}/{max_loss_trades or 'unlimited'} (from {limits_source})"
+                
+        except Exception as e:
+            logger.error(f"Error checking trade limits: {e}")
+            # On error, allow trading to avoid blocking legitimate trades
+            return True, f"Error checking trade limits, allowing trade: {e}"
         
     async def evaluate_signal(self, entry_df, confirm_df, config) -> Optional[TradeSignal]:
         """
@@ -1068,14 +1571,40 @@ class SwingHighLowBuyStrategy(StrategyBase):
 
             # 4. Get spot price and ATM strike for option
             spot_price = last_candle["close"]  # Use last candle close as spot price
+            
+            # 4.1 Smart Level Validation (if enabled)
+            if self.is_smart_levels_enabled():
+                logger.info(f"🔍 Starting Smart Level Validation for {breakout_type} {direction} breakout at spot_price={spot_price}")
+                is_valid, smart_level_data, smart_lot_qty = await self.validate_smart_level_entry(
+                    breakout_type, spot_price, direction
+                )
+                if not is_valid:
+                    logger.warning(f"🚫 Smart Level Validation REJECTED {breakout_type} {direction} trade at spot_price={spot_price}")
+                    return None
+                logger.info(f"✅ Smart Level Validation APPROVED {breakout_type} {direction} trade with smart_lot_qty={smart_lot_qty}")
+            else:
+                logger.debug("Smart levels not enabled, proceeding with normal validation")
+                smart_level_data = None
+                smart_lot_qty = None
+            
             strike, expiry_date = swing_utils.get_atm_strike_symbol(self.cfg.symbol, spot_price, breakout_type, self.trade)
             
             qty = self.ce_lot_qty * self.lot_size if breakout_type == "CE" else self.trade.get("pe_lot_qty", 1) * self.lot_size
+            
+            # Use smart level quantity if available, otherwise use config quantity
+            if smart_lot_qty is not None:
+                lot_qty = smart_lot_qty
+                logger.info(f"📊 Using Smart Level Quantity: lot_qty={lot_qty} (from smart level validation)")
+            else:
+                if breakout_type == "CE":
+                    lot_qty = config.get("ce_lot_qty", 1)
+                else:
+                    lot_qty = config.get("pe_lot_qty", 1)
+                logger.info(f"📊 Using Config Quantity: lot_qty={lot_qty} (from strategy config)")
+            
             if breakout_type == "CE":
-                lot_qty = config.get("ce_lot_qty", 1)
                 stoploss_spot_level = last_ll["price"]  # Stoploss is swing low for CE
             else:
-                lot_qty = config.get("pe_lot_qty", 1)
                 stoploss_spot_level = last_hh["price"]  # Stoploss is swing high for PE
 
             entry_spot_price = spot_price
@@ -1203,7 +1732,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             except Exception as e:
                 logger.error(f"Error calculating entry RSI: {e}")
 
-            logger.info(f"Breakout detected: type={breakout_type}, trend={trend}, direction={direction}, strike={strike}, price={last_candle['close']}, entry_spot_price={entry_spot_price}, entry_spot_swing_high={entry_spot_swing_high}, entry_spot_swing_low={entry_spot_swing_low}, stoploss_spot_level={stoploss_spot_level}, target_spot_level={target_spot_level}, entry_rsi={entry_rsi_value}, target_type={target_type}, expiry_date={expiry_date}, regime={regime}, lot_qty={lot_qty}")
+            logger.info(f"Breakout detected: type={breakout_type}, trend={trend}, direction={direction}, strike={strike}, price={last_candle['close']}, entry_spot_price={entry_spot_price}, entry_spot_swing_high={entry_spot_swing_high}, entry_spot_swing_low={entry_spot_swing_low}, stoploss_spot_level={stoploss_spot_level}, target_spot_level={target_spot_level}, entry_rsi={entry_rsi_value}, target_type={target_type}, expiry_date={expiry_date}, regime={regime}, lot_qty={lot_qty}, smart_level_enabled={self.is_smart_levels_enabled()}")
             from algosat.core.signal import Side
             signal = TradeSignal(
                 symbol=strike,
@@ -1220,7 +1749,13 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 entry_rsi=entry_rsi_value,
                 expiry_date=expiry_date
             )
-            logger.info(f"🟢 Swing breakout signal formed for {self.symbol}: type={breakout_type}, direction={direction}, strike={strike}, price={last_candle['close']}, regime={regime}, lot_qty={lot_qty} (original: {original_lot_qty})")
+            
+            # Final log with smart level information
+            smart_level_info = ""
+            if smart_level_data:
+                smart_level_info = f", smart_level='{smart_level_data.get('name')}'"
+            
+            logger.info(f"🟢 Swing breakout signal formed for {self.symbol}: type={breakout_type}, direction={direction}, strike={strike}, price={last_candle['close']}, regime={regime}, lot_qty={lot_qty} (original: {original_lot_qty}){smart_level_info}")
             return signal
         except Exception as e:
             logger.error(f"Error in evaluate_signal: {e}", exc_info=True)

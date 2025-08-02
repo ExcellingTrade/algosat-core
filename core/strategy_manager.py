@@ -745,7 +745,8 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                                         'strategy_key': row.strategy_key,
                                         'strategy_name': row.strategy_name,
                                         'order_type': row.order_type,
-                                        'product_type': row.product_type
+                                        'product_type': row.product_type,
+                                        'enable_smart_levels': row.enable_smart_levels
                                     }
                                     config = StrategyConfig(**config_dict)
                                     # Get or create strategy instance with caching
