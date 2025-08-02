@@ -339,60 +339,73 @@ async def disable_strategy_config(session, config_id):
 async def add_strategy_symbol(session, strategy_id, symbol, config_id, status='active', enable_smart_levels=False):
     """
     Add a symbol to a strategy with a specific config.
+    For swing strategies, allows same symbol with different smart_levels status.
+    For non-swing strategies, prevents duplicate symbols regardless of smart_levels.
     """
     now = get_ist_now()
     
-    # Check if the strategy-symbol combination already exists
-    existing = await session.execute(
-        select(strategy_symbols).where(
-            and_(
-                strategy_symbols.c.strategy_id == strategy_id,
-                strategy_symbols.c.symbol == symbol
+    # First, get the strategy information to determine if it's a swing strategy
+    strategy_result = await session.execute(
+        select(strategies).where(strategies.c.id == strategy_id)
+    )
+    strategy_row = strategy_result.first()
+    
+    if not strategy_row:
+        raise ValueError(f"Strategy with id {strategy_id} not found")
+    
+    is_swing_strategy = strategy_row.key in ('SwingHighLowBuy', 'SwingHighLowSell')
+    
+    # Check for existing records based on strategy type
+    if is_swing_strategy:
+        # For swing strategies, check for duplicate (strategy_id, symbol, enable_smart_levels) combination
+        existing = await session.execute(
+            select(strategy_symbols).where(
+                and_(
+                    strategy_symbols.c.strategy_id == strategy_id,
+                    strategy_symbols.c.symbol == symbol,
+                    strategy_symbols.c.enable_smart_levels == enable_smart_levels
+                )
             )
         )
-    )
+    else:
+        # For non-swing strategies, check for duplicate (strategy_id, symbol) combination
+        existing = await session.execute(
+            select(strategy_symbols).where(
+                and_(
+                    strategy_symbols.c.strategy_id == strategy_id,
+                    strategy_symbols.c.symbol == symbol
+                )
+            )
+        )
+    
     existing_row = existing.first()
     
     if existing_row:
-        # Update existing record
-        await session.execute(
-            update(strategy_symbols)
-            .where(strategy_symbols.c.id == existing_row.id)
-            .values(
-                config_id=config_id,
-                status=status,
-                enable_smart_levels=enable_smart_levels,
-                updated_at=now
-            )
-        )
-        await session.commit()
-        
-        # Return updated record
-        result = await session.execute(
-            select(strategy_symbols).where(strategy_symbols.c.id == existing_row.id)
-        )
-        row = result.first()
-        return dict(row._mapping) if row else None
-    else:
-        # Create new record
-        stmt = strategy_symbols.insert().values(
-            strategy_id=strategy_id,
-            symbol=symbol,
-            config_id=config_id,
-            status=status,
-            enable_smart_levels=enable_smart_levels,
-            created_at=now,
-            updated_at=now
-        )
-        res = await session.execute(stmt)
-        await session.commit()
-        
-        symbol_id = res.inserted_primary_key[0]
-        result = await session.execute(
-            select(strategy_symbols).where(strategy_symbols.c.id == symbol_id)
-        )
-        row = result.first()
-        return dict(row._mapping) if row else None
+        # For duplicates, raise an error instead of updating
+        if is_swing_strategy:
+            raise ValueError(f"Symbol '{symbol}' with smart_levels={enable_smart_levels} already exists for strategy {strategy_id}")
+        else:
+            raise ValueError(f"Symbol '{symbol}' already exists for strategy {strategy_id}")
+    
+    # Create new record
+    stmt = strategy_symbols.insert().values(
+        strategy_id=strategy_id,
+        symbol=symbol,
+        config_id=config_id,
+        status=status,
+        enable_smart_levels=enable_smart_levels,
+        created_at=now,
+        updated_at=now
+    )
+    res = await session.execute(stmt)
+    await session.commit()
+    
+    symbol_id = res.inserted_primary_key[0]
+    result = await session.execute(
+        select(strategy_symbols).where(strategy_symbols.c.id == symbol_id)
+    )
+    row = result.first()
+    return dict(row._mapping) if row else None
 
 async def list_strategy_symbols(session, strategy_id):
     """
@@ -764,7 +777,7 @@ async def get_all_orders(session: AsyncSession):
     """
     Retrieve all orders with broker execution details.
     """
-    from algosat.core.dbschema import broker_executions, broker_credentials
+    from algosat.core.dbschema import broker_executions, broker_credentials, strategies
     stmt = (
         select(
             orders.c.id,
@@ -790,9 +803,12 @@ async def get_all_orders(session: AsyncSession):
             orders.c.updated_at,
             orders.c.executed_quantity,  # Add this line to select executed_quantity
             strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
+            strategies.c.name.label('strategy_name'),  # Join to get the strategy name
         )
         .select_from(
-            orders.outerjoin(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
+            orders
+            .outerjoin(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
+            .outerjoin(strategies, strategy_symbols.c.strategy_id == strategies.c.id)
         )
         .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
     )
@@ -857,7 +873,7 @@ async def get_orders_by_broker(session: AsyncSession, broker_name: str):
     Retrieve orders filtered by broker_name with broker execution details.
     Joins orders with broker_credentials.
     """
-    from algosat.core.dbschema import broker_executions
+    from algosat.core.dbschema import broker_executions, strategies
     stmt = (
         select(
             orders.c.id,
@@ -884,10 +900,12 @@ async def get_orders_by_broker(session: AsyncSession, broker_name: str):
             orders.c.executed_quantity,  # Add this field
             broker_credentials.c.broker_name,
             strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
+            strategies.c.name.label('strategy_name'),  # Join to get the strategy name
         )
         .select_from(
             orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id)
             .outerjoin(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
+            .outerjoin(strategies, strategy_symbols.c.strategy_id == strategies.c.id)
         )
         .where(broker_credentials.c.broker_name == broker_name)
         .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
@@ -935,7 +953,7 @@ async def get_orders_by_broker_and_strategy(session: AsyncSession, broker_name: 
     Retrieve orders filtered by both broker_name and strategy_config_id with broker execution details.
     Joins orders with broker_credentials.
     """
-    from algosat.core.dbschema import broker_executions
+    from algosat.core.dbschema import broker_executions, strategies
     stmt = (
         select(
             orders.c.id,
@@ -962,10 +980,12 @@ async def get_orders_by_broker_and_strategy(session: AsyncSession, broker_name: 
             orders.c.executed_quantity,  # Add this field
             broker_credentials.c.broker_name,
             strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
+            strategies.c.name.label('strategy_name'),  # Join to get the strategy name
         )
         .select_from(
             orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id)
             .outerjoin(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
+            .outerjoin(strategies, strategy_symbols.c.strategy_id == strategies.c.id)
         )
         .where(broker_credentials.c.broker_name == broker_name)
         .where(orders.c.strategy_config_id == strategy_config_id)

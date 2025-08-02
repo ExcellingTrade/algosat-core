@@ -87,3 +87,54 @@ class OrderCache:
         except Exception as e:
             logger.error(f"OrderCache.get_order_by_id failed for {broker_name}, order_id {order_id}: {e}")
             return None
+
+    async def get_order_status_by_id(self, broker_name: str, order_id: Any) -> Optional[str]:
+        """
+        Get normalized order status by order ID from cache.
+        Returns a string representation of the order status with proper normalization
+        for different broker formats.
+        """
+        try:
+            # Import here to avoid circular dependencies
+            from algosat.brokers.base import OrderStatus
+            
+            # Fyers status mapping using OrderStatus enum
+            FYERS_STATUS_MAP = {
+                1: OrderStatus.CANCELLED,      # 1 = Cancelled
+                2: OrderStatus.FILLED,        # 2 = Traded / Filled
+                3: OrderStatus.PENDING,       # 3 = For future use (treat as Pending)
+                4: OrderStatus.PENDING,       # 4 = Transit (treat as Pending)
+                5: OrderStatus.REJECTED,      # 5 = Rejected
+                6: OrderStatus.PENDING,       # 6 = Pending
+                # Add more mappings as per Fyers API
+            }
+            
+            cache_order = await self.get_order_by_id(broker_name, order_id)
+            if not cache_order:
+                logger.debug(f"Order not found in cache for {broker_name}, order_id {order_id}")
+                return None
+                
+            broker_status = cache_order.get('status')
+            if not broker_status:
+                logger.debug(f"No status found for order {order_id} in {broker_name}")
+                return None
+                
+            # Handle Fyers integer status codes
+            if broker_status and isinstance(broker_status, int) and broker_name.lower() == "fyers":
+                broker_status = FYERS_STATUS_MAP.get(broker_status, broker_status)
+                
+            # Normalize broker_status from OrderStatus.VALUE format
+            if broker_status and isinstance(broker_status, str) and broker_status.startswith("OrderStatus."):
+                broker_status = broker_status.split(".")[-1]
+            # Handle OrderStatus enum objects
+            elif broker_status and hasattr(broker_status, 'value') and hasattr(broker_status, 'name'):
+                broker_status = broker_status.value if hasattr(broker_status, 'value') else str(broker_status)
+                
+            return str(broker_status) if broker_status else None
+            
+        except RuntimeError as re:
+            logger.error(f"OrderCache.get_order_status_by_id RuntimeError for {broker_name}, order_id {order_id}: {re}")
+            return None
+        except Exception as e:
+            logger.error(f"OrderCache.get_order_status_by_id failed for {broker_name}, order_id {order_id}: {e}")
+            return None

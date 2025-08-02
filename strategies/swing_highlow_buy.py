@@ -113,7 +113,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
         self.rsi_ignore_above = self._entry_cfg.get("rsi_ignore_above", 80)
         self.rsi_period = self.indicators.get("rsi_period", 14)
         self.rsi_timeframe_raw = self.indicators.get("rsi_timeframe", "5m") 
-        self.rsi_timeframe_minutes = self.rsi_timeframe_raw if (self.rsi_timeframe_raw.endswith("m") or self.rsi_timeframe_raw.endswith("min")) else f"{self.rsi_timeframe_raw}m"
+        self.rsi_timeframe_minutes = int(self.rsi_timeframe_raw.replace("min", "").replace("m", "")) if (self.rsi_timeframe_raw.endswith("m") or self.rsi_timeframe_raw.endswith("min")) else int(self.rsi_timeframe_raw) 
         
         # Smart Level Integration
         self._smart_levels_enabled = getattr(self.cfg, 'enable_smart_levels', False)

@@ -55,7 +55,10 @@ strategy_symbols = Table(
     Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
     Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
 
-    UniqueConstraint("strategy_id", "symbol", name="uq_strategy_symbol"),
+    # Note: Unique constraints are implemented as conditional indexes in the database:
+    # - Non-swing strategies (OptionBuy, OptionSell): unique on (strategy_id, symbol)
+    # - Swing strategies (SwingHighLowBuy, SwingHighLowSell): unique on (strategy_id, symbol, enable_smart_levels)
+    # This allows same symbol with different smart_levels status for swing strategies only
     Index("ix_strategy_symbol_strategy_symbol_config_status", "strategy_id", "symbol", "config_id", "status"),
 )
 

@@ -353,15 +353,20 @@ async def add_symbol_to_strategy(strategy_id: int, symbol: StrategySymbolCreate,
     """
     if symbol.strategy_id != strategy_id:
         raise HTTPException(status_code=400, detail="strategy_id mismatch")
-    result = await add_strategy_symbol(
-        db, 
-        symbol.strategy_id, 
-        symbol.symbol, 
-        symbol.config_id, 
-        symbol.status,
-        symbol.enable_smart_levels
-    )
-    return StrategySymbolResponse(**result)
+    
+    try:
+        result = await add_strategy_symbol(
+            db, 
+            symbol.strategy_id, 
+            symbol.symbol, 
+            symbol.config_id, 
+            symbol.status,
+            symbol.enable_smart_levels
+        )
+        return StrategySymbolResponse(**result)
+    except ValueError as e:
+        # Handle duplicate symbol errors with 409 Conflict
+        raise HTTPException(status_code=409, detail=str(e))
 
 @router.get("/{strategy_id}/symbols", response_model=List[StrategySymbolWithConfigResponse])
 async def get_symbols_for_strategy(strategy_id: int, db=Depends(get_db)):

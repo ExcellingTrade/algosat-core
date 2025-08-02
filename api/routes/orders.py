@@ -89,6 +89,10 @@ async def list_orders(
         if rows:
             print(f"DEBUG: first row: {rows[0]}")
         
+        # Add order_id field (alias for id) to each row
+        for row in rows:
+            row['order_id'] = row['id']
+        
         orders = [OrderListResponse(**row) for row in rows]
         print(f"DEBUG: orders after schema conversion: {len(orders)}")
         
@@ -541,6 +545,7 @@ async def exit_order(
     order_id: int,
     exit_reason: Optional[str] = Query(None, description="Reason for exiting the order"),
     ltp: Optional[float] = Query(None, description="Last traded price to use as exit price"),
+    check_live_status: bool = Query(False, description="Check live broker status before exit decision"),
     order_manager = Depends(get_order_manager),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -574,7 +579,8 @@ async def exit_order(
         await order_manager.exit_order(
             parent_order_id=order_id,
             exit_reason=exit_reason,
-            ltp=ltp
+            ltp=ltp,
+            check_live_status=True
         )
         
         logger.info(f"Order {order_id} exit initiated successfully. Reason: {exit_reason}")
@@ -594,6 +600,7 @@ async def exit_order(
 async def exit_all_orders(
     exit_reason: Optional[str] = Query(None, description="Reason for exiting all orders"),
     strategy_id: Optional[int] = Query(None, description="Optional strategy ID to filter orders by"),
+    check_live_status: bool = Query(False, description="Check live broker status before exit decisions"),
     order_manager = Depends(get_order_manager),
     current_user: Dict[str, Any] = Depends(get_current_user)
 ):
@@ -618,7 +625,11 @@ async def exit_all_orders(
     """
     try:
         # Call OrderManager to exit all orders
-        await order_manager.exit_all_orders(exit_reason=exit_reason, strategy_id=strategy_id)
+        await order_manager.exit_all_orders(
+            exit_reason=exit_reason, 
+            strategy_id=strategy_id,
+            check_live_status=check_live_status
+        )
         
         filter_desc = f" for strategy {strategy_id}" if strategy_id else ""
         logger.info(f"Exit all orders initiated successfully{filter_desc}. Reason: {exit_reason}")

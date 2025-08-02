@@ -201,7 +201,9 @@ class PlaceOrderResponse(BaseModel):
 
 class OrderListResponse(BaseModel):
     """Order list response with basic metadata."""
-    id: int
+    id: int  # This is the order_id from orders table
+    order_id: int  # Alias for id for clarity in frontend
+    strategy_name: Optional[str] = None  # Strategy name from strategies table
     symbol: Optional[str] = None  # This will be the strategy symbol name (from join)
     strike_symbol: Optional[str] = None  # Actual tradeable symbol
     pnl: Optional[float] = None  # Profit/Loss for this order

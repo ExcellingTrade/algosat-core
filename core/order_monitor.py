@@ -259,6 +259,7 @@ class OrderMonitor:
                             if cache_order and 'status' in cache_order:
                                 broker_status = cache_order['status']
                             else:
+                                logger.info(f"OrderMonitor: Using DB status for broker_order_id={broker_order_id} as cache_order not found or missing status for order_id {self.order_id}")
                                 broker_status = getattr(bro, 'status', None)
                             if broker_status and isinstance(broker_status, int) and broker_name == "fyers":
                                 broker_status = FYERS_STATUS_MAP.get(broker_status, broker_status)
@@ -267,6 +268,7 @@ class OrderMonitor:
                                 broker_status = broker_status.split(".")[-1]
                             elif broker_status and isinstance(broker_status, OrderStatus):
                                 broker_status = broker_status.value
+                            # broker_status = "FILLED"
 
                         all_statuses.append(broker_status)
                         status_set.add(broker_status)
@@ -440,6 +442,7 @@ class OrderMonitor:
                     await self.order_manager.update_order_status_in_db(self.order_id, main_status)
                 last_main_status = main_status
                 if main_status in (OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.FAILED):
+                    logger.info(f"OrderMonitor: Order {self.order_id} reached terminal status {main_status}. Stopping monitor.")
                     self.stop()
                     return
                 
