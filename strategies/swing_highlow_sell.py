@@ -1167,8 +1167,8 @@ class SwingHighLowSellStrategy(StrategyBase):
                         order_datetime_ist = to_ist(order_datetime)
                         order_trade_day = get_trade_day(order_datetime_ist)
                         
-                        # Check if it's next trading day
-                        if current_trade_day > order_trade_day:
+                        # Check if it's next trading day (compare dates only, not datetime)
+                        if current_trade_day.date() > order_trade_day.date():
                             # Calculate first candle completion time based on stoploss timeframe
                             market_open_time = current_datetime.replace(hour=9, minute=15, second=0, microsecond=0)
                             first_candle_end_time = market_open_time + timedelta(minutes=self.stoploss_minutes)
@@ -1366,8 +1366,8 @@ class SwingHighLowSellStrategy(StrategyBase):
                         order_datetime_ist = to_ist(order_datetime)
                         order_trade_day = get_trade_day(order_datetime_ist)
                         
-                        # Check if it's next trading day
-                        if current_trade_day > order_trade_day:
+                        # Check if it's next trading day (compare dates only, not datetime)
+                        if current_trade_day.date() > order_trade_day.date():
                             # Calculate first candle completion time
                             market_open_time = current_datetime.replace(hour=9, minute=15, second=0, microsecond=0)
                             first_candle_end_time = market_open_time + timedelta(minutes=self.stoploss_minutes)
