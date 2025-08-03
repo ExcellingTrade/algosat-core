@@ -204,7 +204,10 @@ class OrderMonitor:
                         if current_time_only >= square_off_time:
                             logger.info(f"OrderMonitor: Square-off time {square_off_time_str} reached for non-DELIVERY order_id={self.order_id}. Exiting order.")
                             try:
-                                await self.order_manager.exit_order(self.order_id, reason=f"Square-off time {square_off_time_str} reached")
+                                await self.order_manager.exit_order(self.order_id, exit_reason=f"Square-off time {square_off_time_str} reached")
+                                # Update status to EOD exit
+                                from algosat.common import constants
+                                await self.order_manager.update_order_status_in_db(self.order_id, constants.TRADE_STATUS_EXIT_EOD)
                                 self.stop()
                                 return
                             except Exception as e:
@@ -219,6 +222,29 @@ class OrderMonitor:
                     logger.info(f"OrderMonitor: Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
                     self.stop()
                     return
+            
+            # Exit AWAITING_ENTRY orders at 15:25 (regardless of product type)
+            awaiting_entry_exit_time = dt_time(15, 25)  # 3:25 PM
+            current_status = order_row.get('status') if order_row else None
+            if (current_time_only >= awaiting_entry_exit_time and 
+                current_status in ('AWAITING_ENTRY', OrderStatus.AWAITING_ENTRY)):
+                logger.info(f"OrderMonitor: 15:25 reached for AWAITING_ENTRY order_id={self.order_id}. Exiting order.")
+                try:
+                    await self.order_manager.exit_order(self.order_id, reason="AWAITING_ENTRY order exit at 15:25")
+                    # Update status to CANCELLED
+                    await self.order_manager.update_order_status_in_db(self.order_id, "CANCELLED")
+                    self.stop()
+                    return
+                except Exception as e:
+                    logger.error(f"OrderMonitor: Failed to exit AWAITING_ENTRY order {self.order_id} at 15:25: {e}")
+                    return
+
+            # --- Update current price for OPEN orders and get LTP for exit checks ---
+            current_ltp = None
+            current_status = order_row.get('status') if order_row and order_row.get('status') else last_main_status
+            logger.info(f"CurrentStatus: {current_status}")
+            if current_status == OrderStatus.OPEN or current_status == 'OPEN':
+                current_ltp = await self._update_current_price_for_open_order(order_row)
                 
             # --- Price-based exit logic for OptionBuy and OptionSell strategies ---
             # Pass the already-fetched LTP to avoid duplicate API calls
@@ -706,6 +732,9 @@ class OrderMonitor:
                             
                             # 6. Exit the order immediately
                             await self.order_manager.exit_order(self.order_id, reason="Per-trade loss limit exceeded")
+                            # Update status to max loss exit
+                            from algosat.common import constants
+                            await self.order_manager.update_order_status_in_db(self.order_id, constants.TRADE_STATUS_EXIT_MAX_LOSS)
                             logger.critical(f"🚨 Exited order_id={self.order_id} due to per-trade loss limit breach")
                             self.stop()
                             return
@@ -1184,7 +1213,7 @@ class OrderMonitor:
                 # fallback default
                 self.signal_monitor_seconds = 5 * 60
         logger.info(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_seconds}s)")
-        await asyncio.gather(self._price_order_monitor())#, self._signal_monitor())
+        await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
         # await asyncio.gather( self._signal_monitor())
 
     def stop(self) -> None:
