@@ -1456,7 +1456,7 @@ async def upsert_broker_credentials(broker_name: str, config: dict) -> None:
     
     # Log the updated credentials for debug
     updated = await get_broker_credentials(broker_name)
-    logger.info(f"Updated broker credentials for {broker_name}: access_token={updated.get('credentials',{}).get('access_token')} generated_on={updated.get('credentials',{}).get('generated_on')}")
+    logger.info(f"Updated broker credentials for {broker_name} generated_on={updated.get('credentials',{}).get('generated_on')}")
 
 
 async def fetch_table_data(table, *where_clauses) -> list[dict]:

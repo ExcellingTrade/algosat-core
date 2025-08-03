@@ -24,7 +24,7 @@ logger = get_logger(__name__)
 from algosat.common.default_strategy_configs import DEFAULT_STRATEGY_CONFIGS
 from algosat.core.time_utils import get_ist_now
 
-from algosat.core.dbschema import metadata, orders, broker_credentials, strategies, strategy_configs, strategy_symbols, users, broker_balance_summaries, smart_levels # Added users, broker_balance_summaries, smart_levels
+from algosat.core.dbschema import metadata, orders, broker_credentials, strategies, strategy_configs, strategy_symbols, users, broker_balance_summaries, smart_levels, re_entry_tracking # Added users, broker_balance_summaries, smart_levels, re_entry_tracking
 
 # 1) Create the Async Engine
 engine = create_async_engine(

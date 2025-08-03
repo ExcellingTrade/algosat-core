@@ -286,5 +286,27 @@ broker_balance_summaries = Table(
     Index("ix_broker_balance_brokerid_date", "broker_id", "date"),
 )
 
+re_entry_tracking = Table(
+    "re_entry_tracking", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("parent_order_id", Integer, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("pullback_level", Numeric(precision=10, scale=2), nullable=False),
+    Column("pullback_touched", Boolean, nullable=False, server_default=text("false")),
+    Column("pullback_touched_at", DateTime(timezone=True), nullable=True),
+    Column("re_entry_attempted", Boolean, nullable=False, server_default=text("false")),
+    Column("re_entry_attempted_at", DateTime(timezone=True), nullable=True),
+    Column("re_entry_order_id", Integer, ForeignKey("orders.id", ondelete="SET NULL"), nullable=True, index=True),
+    Column("created_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    Column("updated_at", DateTime(timezone=True), nullable=False, server_default=text("now()")),
+    
+    # Ensure only one re-entry tracking record per parent order
+    UniqueConstraint("parent_order_id", name="uq_reentry_parent_order"),
+    
+    # Index for efficient lookups
+    Index("ix_reentry_parent_order", "parent_order_id"),
+    Index("ix_reentry_pullback_touched", "pullback_touched"),
+    Index("ix_reentry_attempted", "re_entry_attempted"),
+)
+
 # NOTE: The migrations folder is deprecated and will be removed as per current development workflow.
 # All schema changes should be handled by dropping and recreating tables during development.
