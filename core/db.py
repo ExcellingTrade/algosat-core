@@ -788,6 +788,8 @@ async def get_all_orders(session: AsyncSession):
             orders.c.entry_price,
             orders.c.stop_loss,
             orders.c.target_price,
+            orders.c.current_price,  # Add current_price field
+            orders.c.price_last_updated,  # Add price_last_updated field
             orders.c.signal_time,
             orders.c.entry_time,
             orders.c.exit_time,
@@ -884,6 +886,8 @@ async def get_orders_by_broker(session: AsyncSession, broker_name: str):
             orders.c.entry_price,
             orders.c.stop_loss,
             orders.c.target_price,
+            orders.c.current_price,  # Add current_price field
+            orders.c.price_last_updated,  # Add price_last_updated field
             orders.c.signal_time,
             orders.c.entry_time,
             orders.c.exit_time,
@@ -964,6 +968,8 @@ async def get_orders_by_broker_and_strategy(session: AsyncSession, broker_name: 
             orders.c.entry_price,
             orders.c.stop_loss,
             orders.c.target_price,
+            orders.c.current_price,  # Add current_price field
+            orders.c.price_last_updated,  # Add price_last_updated field
             orders.c.signal_time,
             orders.c.entry_time,
             orders.c.exit_time,
@@ -1043,6 +1049,8 @@ async def get_orders_by_symbol(session: AsyncSession, symbol: str):
             orders.c.entry_price,
             orders.c.stop_loss,
             orders.c.target_price,
+            orders.c.current_price,  # Add current_price field
+            orders.c.price_last_updated,  # Add price_last_updated field
             orders.c.signal_time,
             orders.c.entry_time,
             orders.c.exit_time,
@@ -1642,6 +1650,8 @@ async def get_orders_by_strategy_symbol_id(session: AsyncSession, strategy_symbo
             orders.c.entry_price,
             orders.c.stop_loss,
             orders.c.target_price,
+            orders.c.current_price,  # Add current_price field
+            orders.c.price_last_updated,  # Add price_last_updated field
             orders.c.signal_time,
             orders.c.entry_time,
             orders.c.exit_time,

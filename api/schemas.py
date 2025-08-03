@@ -211,6 +211,8 @@ class OrderListResponse(BaseModel):
     side: Optional[str] = None
     entry_price: Optional[float] = None
     exit_price: Optional[float] = None  # Exit price for this order
+    current_price: Optional[float] = None  # Current LTP price for strike symbol
+    price_last_updated: Optional[datetime] = None  # When the current_price was last updated
     lot_qty: Optional[int] = None
     qty: Optional[int] = None
     executed_quantity: Optional[int] = None  # <-- Add this field
@@ -221,7 +223,7 @@ class OrderListResponse(BaseModel):
     traded_price: Optional[float] = Field(default=0.0, description="Actual traded price")
     broker_executions: Optional[List[Dict[str, Any]]] = Field(default=[], description="List of broker executions for this order")
 
-    @field_serializer("signal_time", "entry_time", "exit_time", "created_at")
+    @field_serializer("signal_time", "entry_time", "exit_time", "created_at", "price_last_updated")
     def serialize_dt(self, v):
         if v is None:
             return None
@@ -240,6 +242,8 @@ class OrderDetailResponse(BaseModel):
     entry_price: Optional[float] = None
     stop_loss: Optional[float] = None
     target_price: Optional[float] = None
+    current_price: Optional[float] = None  # Current LTP price for strike symbol
+    price_last_updated: Optional[datetime] = None  # When the current_price was last updated
     signal_time: Optional[datetime] = None
     entry_time: Optional[datetime] = None
     exit_time: Optional[datetime] = None
@@ -257,7 +261,7 @@ class OrderDetailResponse(BaseModel):
     traded_price: Optional[float] = Field(default=0.0, description="Actual traded price")
     # Add any other fields from the orders table as needed
 
-    @field_serializer("signal_time", "entry_time", "exit_time", "created_at", "updated_at")
+    @field_serializer("signal_time", "entry_time", "exit_time", "created_at", "updated_at", "price_last_updated")
     def serialize_dt(self, v):
         if v is None:
             return None

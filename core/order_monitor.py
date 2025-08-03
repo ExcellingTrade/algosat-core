@@ -219,9 +219,10 @@ class OrderMonitor:
                     logger.info(f"OrderMonitor: Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
                     self.stop()
                     return
-
+                
             # --- Price-based exit logic for OptionBuy and OptionSell strategies ---
-            await self._check_price_based_exit(order_row, strategy, last_main_status)
+            # Pass the already-fetched LTP to avoid duplicate API calls
+            await self._check_price_based_exit(order_row, strategy, last_main_status, current_ltp)
 
             # --- Use live broker order data from order_cache for ENTRY side ---
             entry_broker_db_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
@@ -769,10 +770,16 @@ class OrderMonitor:
             await asyncio.sleep(self.price_order_monitor_seconds)
         logger.info(f"OrderMonitor: Stopping price monitor for order_id={self.order_id} (last status: {last_main_status})")
     
-    async def _check_price_based_exit(self, order_row, strategy, last_main_status):
+    async def _check_price_based_exit(self, order_row, strategy, last_main_status, current_ltp=None):
         """
         Check price-based exit conditions for OptionBuy and OptionSell strategies.
         Compare LTP with target_price and stop_loss to trigger exits.
+        
+        Args:
+            order_row: Order data from database
+            strategy: Strategy instance or dict
+            last_main_status: Current main order status
+            current_ltp: Pre-fetched LTP to avoid duplicate API calls (optional)
         """
         try:
             # Only check for OPEN orders
@@ -803,24 +810,31 @@ class OrderMonitor:
                 logger.debug(f"OrderMonitor: No target_price or stop_loss set for order_id={self.order_id}")
                 return
                 
-            # Get current LTP
-            try:
-                ltp_response = await self.data_manager.get_ltp(strike_symbol)
-                if isinstance(ltp_response, dict):
-                    ltp = ltp_response.get(strike_symbol)
-                else:
-                    ltp = ltp_response
+            # Get current LTP (use pre-fetched LTP if available, otherwise fetch)
+            ltp = None
+            if current_ltp is not None:
+                ltp = float(current_ltp)
+                logger.debug(f"OrderMonitor: Using pre-fetched LTP for price check: order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}")
+            else:
+                try:
+                    ltp_response = await self.data_manager.get_ltp(strike_symbol)
+                    if isinstance(ltp_response, dict):
+                        ltp = ltp_response.get(strike_symbol)
+                    else:
+                        ltp = ltp_response
+                        
+                    if ltp is None:
+                        logger.debug(f"OrderMonitor: Could not get LTP for {strike_symbol}, order_id={self.order_id}")
+                        return
+                        
+                    ltp = float(ltp)
+                    logger.debug(f"OrderMonitor: Fetched LTP for price check: order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}")
                     
-                if ltp is None:
-                    logger.debug(f"OrderMonitor: Could not get LTP for {strike_symbol}, order_id={self.order_id}")
+                except Exception as e:
+                    logger.error(f"OrderMonitor: Error getting LTP for {strike_symbol}, order_id={self.order_id}: {e}")
                     return
                     
-                ltp = float(ltp)
-                logger.debug(f"OrderMonitor: Price check for order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}, target={target_price}, SL={stop_loss}, side={side}")
-                
-            except Exception as e:
-                logger.error(f"OrderMonitor: Error getting LTP for {strike_symbol}, order_id={self.order_id}: {e}")
-                return
+            logger.debug(f"OrderMonitor: Price check for order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}, target={target_price}, SL={stop_loss}, side={side}")
             
             # Check exit conditions based on strategy and side
             should_exit = False
@@ -944,6 +958,80 @@ class OrderMonitor:
         else:
             self._broker_name_cache.clear()
             self._broker_name_cache_time.clear()
+
+    async def _update_current_price_in_db(self, strike_symbol: str, current_price: float):
+        """
+        Update current_price and price_last_updated fields in orders table.
+        
+        Args:
+            strike_symbol: The strike symbol to update price for
+            current_price: The current LTP price
+        """
+        try:
+            from datetime import datetime, timezone
+            from algosat.core.db import AsyncSessionLocal, update_rows_in_table
+            from algosat.core.dbschema import orders
+            
+            price_last_updated = datetime.now(timezone.utc)
+            
+            async with AsyncSessionLocal() as session:
+                # Update orders table with current price
+                await update_rows_in_table(
+                    target_table=orders,
+                    condition=(orders.c.id == self.order_id) & (orders.c.strike_symbol == strike_symbol),
+                    new_values={
+                        "current_price": current_price,
+                        "price_last_updated": price_last_updated
+                    }
+                )
+                
+            logger.debug(f"OrderMonitor: Updated current_price={current_price} for order_id={self.order_id}, symbol={strike_symbol}")
+            
+        except Exception as e:
+            logger.error(f"OrderMonitor: Error updating current_price for order_id={self.order_id}, symbol={strike_symbol}: {e}")
+
+    async def _update_current_price_for_open_order(self, order_row):
+        """
+        Update current price for any OPEN order regardless of strategy type.
+        Called during the main monitoring loop for all OPEN orders.
+        
+        Args:
+            order_row: The order row from database
+            
+        Returns:
+            float: Current LTP price if successfully fetched, None otherwise
+        """
+        try:
+            # Only update price for OPEN orders
+            if order_row.get('status') != 'OPEN':
+                return None
+                
+            strike_symbol = order_row.get('strike_symbol')
+            if not strike_symbol:
+                return None
+                
+            # Get current LTP
+            ltp_response = await self.data_manager.get_ltp(strike_symbol)
+            if isinstance(ltp_response, dict):
+                ltp = ltp_response.get(strike_symbol)
+            else:
+                ltp = ltp_response
+                
+            if ltp is None:
+                logger.debug(f"OrderMonitor: Could not get LTP for {strike_symbol}, order_id={self.order_id}")
+                return None
+                
+            ltp = float(ltp)
+            
+            # Update current price in database
+            await self._update_current_price_in_db(strike_symbol, ltp)
+            
+            # Return the LTP for use in exit checks
+            return ltp
+            
+        except Exception as e:
+            logger.error(f"OrderMonitor: Error updating current price for OPEN order_id={self.order_id}: {e}")
+            return None
 
     async def _get_normalized_broker_status(self, bro, broker_name, cache_lookup_order_id):
         """
@@ -1096,7 +1184,7 @@ class OrderMonitor:
                 # fallback default
                 self.signal_monitor_seconds = 5 * 60
         logger.info(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_seconds}s)")
-        await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
+        await asyncio.gather(self._price_order_monitor())#, self._signal_monitor())
         # await asyncio.gather( self._signal_monitor())
 
     def stop(self) -> None:

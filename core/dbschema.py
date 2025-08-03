@@ -197,6 +197,8 @@ orders = Table(
     Column("entry_price",  Float, nullable=True),
     Column("stop_loss",  Float, nullable=True),
     Column("target_price",  Float, nullable=True),
+    Column("current_price", Numeric(15, 4), nullable=True),  # Current LTP price for strike symbol
+    Column("price_last_updated", DateTime(timezone=True), nullable=True),  # When current_price was last updated
     Column("orig_target", Float, nullable=True),  # NEW: Original target price, optional
     Column("signal_time", DateTime(timezone=True), nullable=True),
     Column("entry_time", DateTime(timezone=True), nullable=True),
