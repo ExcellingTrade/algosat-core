@@ -2147,6 +2147,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                         atr_df = pd.DataFrame()  # Empty DataFrame to avoid errors
                     if "atr" in atr_df.columns:
                         atr_value = atr_df["atr"].iloc[-1]
+                        logger.info(f"ATR calculated on {self.atr_timeframe_minutes}min interval: {atr_value} (period={atr_period})")
                 except Exception as e:
                     logger.error(f"Error calculating ATR for target: {e}")
                 
@@ -2157,6 +2158,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     else:
                         # For PE: Target = swing_low - (ATR * effective_multiplier)
                         target_spot_level = float(entry_spot_swing_low) - (float(atr_value) * float(effective_atr_multiplier))
+                    logger.info(f"Target calculated using ATR: {target_spot_level} (effective_multiplier={effective_atr_multiplier})")
                 else:
                     logger.warning("Could not calculate ATR for target, using fallback")
                     target_spot_level = None
@@ -2168,6 +2170,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 else:
                     # For PE: Target = swing_low - fixed_points  
                     target_spot_level = float(entry_spot_swing_low) - float(fixed_points)
+                logger.info(f"Target calculated using fixed points: {target_spot_level} (fixed_points={fixed_points})")
             else:
                 target_spot_level = None
 
