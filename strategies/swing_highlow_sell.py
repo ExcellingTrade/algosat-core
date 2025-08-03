@@ -1,6 +1,6 @@
 from datetime import datetime, time, timedelta
 from typing import Any, Optional
-from algosat.core.signal import TradeSignal
+from algosat.core.signal import SignalType, TradeSignal
 import pandas as pd
 from algosat.common import constants, strategy_utils
 from algosat.common.broker_utils import calculate_backdate_days, get_trade_day
@@ -113,6 +113,11 @@ class SwingHighLowSellStrategy(StrategyBase):
         self.lot_size = self.trade.get("lot_size", 75)
         self.rsi_ignore_above = self._entry_cfg.get("rsi_ignore_above", 80)
         self.rsi_period = self.indicators.get("rsi_period", 14)
+        self.rsi_timeframe_raw = self.indicators.get("rsi_timeframe", "5m") 
+        self.rsi_timeframe_minutes = int(self.rsi_timeframe_raw.replace("min", "").replace("m", "")) if (self.rsi_timeframe_raw.endswith("m") or self.rsi_timeframe_raw.endswith("min")) else int(self.rsi_timeframe_raw) 
+        self.atr_period = self.indicators.get("atr_period", 14)
+        self.atr_timeframe_raw = self.indicators.get("atr_timeframe", "5m")
+        self.atr_timeframe_minutes = int(self.atr_timeframe_raw.replace("min", "").replace("m", "")) if (self.atr_timeframe_raw.endswith("m") or self.atr_timeframe_raw.endswith("min")) else int(self.atr_timeframe_raw)
         
         # Smart Level Integration
         self._smart_levels_enabled = getattr(self.cfg, 'enable_smart_levels', False)
@@ -1068,6 +1073,49 @@ class SwingHighLowSellStrategy(StrategyBase):
         if signal_payload:
             ts = data.iloc[-1].get('timestamp', 'N/A') if hasattr(data, 'iloc') and len(data) > 0 else signal_payload.get('timestamp', 'N/A')
             logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
+            # Fetch hedge symbol for this strike (pass strike directly)
+            hedge_symbol = await self.fetch_hedge_symbol(self.order_manager.broker_manager, strike, self.trade)
+            if hedge_symbol:
+                logger.info(f"Hedge symbol for {strike}: {hedge_symbol}")
+                hedge_signal_payload = TradeSignal(
+                    symbol=hedge_symbol,
+                    side="BUY",
+                    signal_type=SignalType.HEDGE_ENTRY,
+                    signal_time=signal_payload.signal_time,
+                    signal_direction="hedge buy",
+                    lot_qty=signal_payload.lot_qty,
+                )
+                # Build order request for hedge
+                hedge_order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
+                    hedge_signal_payload, self.cfg
+                )
+                # Place hedge order
+                hedge_order_result = await self.order_manager.place_order(
+                    self.cfg,
+                    hedge_order_request,
+                    strategy_name=None
+                )
+                logger.debug(f"Hedge order result for {hedge_symbol}: {hedge_order_result}")
+                 # Check if any broker response is failed/cancelled/rejected
+                failed_statuses = {"FAILED", "CANCELLED", "REJECTED"}
+                broker_responses = hedge_order_result.get('broker_responses') if hedge_order_result else None
+                any_failed = False
+                if broker_responses and isinstance(broker_responses, dict):
+                    statuses = [str(resp.get('status')) if resp else None for resp in broker_responses.values()]
+                    statuses = [s.split('.')[-1].replace("'", "").replace(">", "").upper() if s else None for s in statuses]
+                    if any(s in failed_statuses for s in statuses if s):
+                        any_failed = True
+                if any_failed:
+                    logger.error(f"At least one hedge order broker response failed/cancelled/rejected, aborting entry. Details: {hedge_order_result}")
+                    hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
+                    if hedge_order_id:
+                        await self.exit_order(hedge_order_id)
+                    return None
+
+            else:
+                logger.error(f"No hedge symbol found for {strike}")
+                return None
+
 
             order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
                 signal_payload, self.cfg
@@ -1851,7 +1899,7 @@ class SwingHighLowSellStrategy(StrategyBase):
             target_type = target_cfg.get("type", "ATR")
             if target_type == "ATR":
                 # Calculate ATR on entry timeframe (5m default)
-                atr_period = target_cfg.get("atr_period", 14)
+                atr_period = self.atr_period or 14
                 atr_multiplier = target_cfg.get("atr_multiplier", 3)  # Default to 3x ATR
                 
                 # Use sideways_target_atr_multiplier if in sideways regime
@@ -1865,7 +1913,17 @@ class SwingHighLowSellStrategy(StrategyBase):
                 atr_value = None
                 try:
                     from algosat.utils.indicators import calculate_atr
-                    atr_df = calculate_atr(entry_df, atr_period)
+                    # Fetch fresh data using entry timeframe for RSI consistency
+                    atr_history_dict = await self.fetch_history_data(
+                        self.dp, [self.symbol,], self.atr_timeframe_minutes
+                    )
+                    atr_history_df = atr_history_dict.get(str(self.symbol))
+                    if atr_history_df is not None and len(atr_history_df) > 0:
+                        # Calculate ATR on entry timeframe data
+                        atr_df = calculate_atr(atr_history_df, atr_period)
+                    else:
+                        logger.warning("Could not fetch history data for ATR calculation")
+                        atr_df = pd.DataFrame()  # Empty DataFrame to avoid errors
                     if "atr" in atr_df.columns:
                         atr_value = atr_df["atr"].iloc[-1]
                 except Exception as e:
@@ -1897,14 +1955,25 @@ class SwingHighLowSellStrategy(StrategyBase):
             try:
                 from algosat.utils.indicators import calculate_rsi
                 rsi_period = self.rsi_period or 14
+                # Fetch fresh data using entry timeframe for RSI consistency
+                rsi_history_dict = await self.fetch_history_data(
+                    self.dp, [self.symbol,], self.rsi_timeframe_minutes
+                )
+                rsi_history_df = rsi_history_dict.get(str(self.symbol))
                 
-                # Use entry timeframe data for RSI calculation to ensure consistency
-                rsi_df = calculate_rsi(entry_df, rsi_period)
-                if "rsi" in rsi_df.columns and len(rsi_df) > 0:
-                    entry_rsi_value = rsi_df["rsi"].iloc[-1]
-                    logger.info(f"Entry RSI calculated: {entry_rsi_value} (period={rsi_period})")
+                if rsi_history_df is not None and len(rsi_history_df) > 0:
+                    # Calculate RSI on entry timeframe data
+                    rsi_df = calculate_rsi(rsi_history_df, rsi_period)
+
+                    # Use entry timeframe data for RSI calculation to ensure consistency
+                     # rsi_df = calculate_rsi(entry_df, rsi_period)
+                    if "rsi" in rsi_df.columns and len(rsi_df) > 0:
+                        entry_rsi_value = rsi_df["rsi"].iloc[-1]
+                        logger.info(f"Entry RSI calculated on {self.rsi_timeframe_minutes}min interval: {entry_rsi_value} (period={rsi_period})")
+                    else:
+                        logger.warning("Could not calculate entry RSI - missing RSI column")
                 else:
-                    logger.warning("Could not calculate entry RSI - missing RSI column")
+                    logger.warning("Could not fetch history data for entry RSI calculation")
             except Exception as e:
                 logger.error(f"Error calculating entry RSI: {e}")
 
@@ -1925,7 +1994,13 @@ class SwingHighLowSellStrategy(StrategyBase):
                 entry_rsi=entry_rsi_value,
                 expiry_date=expiry_date
             )
-            logger.info(f"🔴 Swing breakout signal formed for {self.symbol}: type={breakout_type}, direction={direction}, strike={strike}, price={last_candle['close']}, regime={regime}, lot_qty={lot_qty} (original: {original_lot_qty})")
+            # Final log with smart level information
+            smart_level_info = ""
+            if smart_level_data:
+                smart_level_info = f", smart_level='{smart_level_data.get('name')}'"
+            
+            logger.info(f"🟢 Swing breakout signal formed for {self.symbol}: type={breakout_type}, direction={direction}, strike={strike}, price={last_candle['close']}, regime={regime}, lot_qty={lot_qty} (original: {original_lot_qty}){smart_level_info}")
+            
             return signal
         except Exception as e:
             logger.error(f"Error in evaluate_signal: {e}", exc_info=True)

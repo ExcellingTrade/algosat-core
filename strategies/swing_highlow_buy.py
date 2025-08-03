@@ -115,7 +115,9 @@ class SwingHighLowBuyStrategy(StrategyBase):
         self.rsi_period = self.indicators.get("rsi_period", 14)
         self.rsi_timeframe_raw = self.indicators.get("rsi_timeframe", "5m") 
         self.rsi_timeframe_minutes = int(self.rsi_timeframe_raw.replace("min", "").replace("m", "")) if (self.rsi_timeframe_raw.endswith("m") or self.rsi_timeframe_raw.endswith("min")) else int(self.rsi_timeframe_raw) 
-        
+        self.atr_period = self.indicators.get("atr_period", 14)
+        self.atr_timeframe_raw = self.indicators.get("atr_timeframe", "5m")
+        self.atr_timeframe_minutes = int(self.atr_timeframe_raw.replace("min", "").replace("m", "")) if (self.atr_timeframe_raw.endswith("m") or self.atr_timeframe_raw.endswith("min")) else int(self.atr_timeframe_raw)
         # Smart Level Integration
         self._smart_levels_enabled = getattr(self.cfg, 'enable_smart_levels', False)
         self._strategy_symbol_id = getattr(self.cfg, 'symbol_id', None)
@@ -2117,7 +2119,8 @@ class SwingHighLowBuyStrategy(StrategyBase):
             target_type = target_cfg.get("type", "ATR")
             if target_type == "ATR":
                 # Calculate ATR on entry timeframe (5m default)
-                atr_period = target_cfg.get("atr_period", 14)
+                atr_period = self.atr_period or 14
+
                 atr_multiplier = target_cfg.get("atr_multiplier", 3)  # Default to 3x ATR
                 
                 # Use sideways_target_atr_multiplier if in sideways regime
@@ -2131,7 +2134,17 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 atr_value = None
                 try:
                     from algosat.utils.indicators import calculate_atr
-                    atr_df = calculate_atr(entry_df, atr_period)
+                    # Fetch fresh data using entry timeframe for RSI consistency
+                    atr_history_dict = await self.fetch_history_data(
+                        self.dp, [self.symbol,], self.atr_timeframe_minutes
+                    )
+                    atr_history_df = atr_history_dict.get(str(self.symbol))
+                    if atr_history_df is not None and len(atr_history_df) > 0:
+                        # Calculate ATR on entry timeframe data
+                        atr_df = calculate_atr(atr_history_df, atr_period)
+                    else:
+                        logger.warning("Could not fetch history data for ATR calculation")
+                        atr_df = pd.DataFrame()  # Empty DataFrame to avoid errors
                     if "atr" in atr_df.columns:
                         atr_value = atr_df["atr"].iloc[-1]
                 except Exception as e:
