@@ -29,7 +29,8 @@ class MarketHours:
     @staticmethod
     def get_market_hours():
         """Get default market hours (can be made configurable later)"""
-        return datetime.time(9, 0), datetime.time(23, 30)  # 9:00 AM - 3:30 PM
+        return datetime.time(9, 0), datetime.time(15, 30)  # 9:00 AM - 3:30 PM
+        # return datetime.time(9, 0), datetime.time(23, 30)  # 9:00 AM - 3:30 PM
     
     @staticmethod
     def is_market_open(current_time: datetime.time = None) -> bool:
@@ -709,7 +710,8 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                             # Use configurable times with fallbacks
                             trade_config = row.trade_config or {}
                             start_time_str = trade_config.get("start_time", "09:00")  # 9:00 AM default
-                            square_off_time_str = "23:30" #trade_config.get("square_off_time", "15:30")  # 3:30 PM default
+                            square_off_time_str = trade_config.get("square_off_time", "15:30")  # 3:30 PM default
+                            # square_off_time_str = "23:30" #trade_config.get("square_off_time", "15:30")  # 3:30 PM default
                             
                             try:
                                 st_time = datetime.datetime.strptime(start_time_str, "%H:%M").time()
