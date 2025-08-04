@@ -798,7 +798,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 if entry_df2 is None or len(entry_df2) < 2:
                     logger.warning("Not enough entry_df data for atomic confirmation after order.")
                     # Unable to confirm, exit order for safety
-                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed")
+                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed",check_live_status=True)
                     # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
                     logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}")
                     return None
@@ -816,11 +816,10 @@ class SwingHighLowBuyStrategy(StrategyBase):
                         logger.info(f"✅ Pullback level stored successfully for order_id={order_info.get('order_id')}")
                     else:
                         logger.warning(f"⚠️ Failed to store pullback level for order_id={order_info.get('order_id')}")
-                    
                     return order_info
                 else:
                     logger.info("Breakout failed atomic confirmation, exiting order.")
-                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed")
+                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed", check_live_status=True)
                     # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
                     logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}")
                     return None
@@ -831,17 +830,6 @@ class SwingHighLowBuyStrategy(StrategyBase):
             logger.error(f"Error in process_cycle: {e}", exc_info=True)
             return None
 
-    # async def cancel_order(self, order_id):
-    #     logger.info(f"Stub: cancelling order {order_id}")
-    #     # Implement integration with order manager if needed
-
-    # async def exit_order(self, order_id):
-    #     """
-    #     Immediately exit/cancel the given order (atomic entry confirmation).
-    #     """
-    #     logger.info(f"Exiting order {order_id} due to failed atomic entry confirmation.")
-    #     # Implement integration with order manager if needed, e.g., cancel or market exit
-    #     await self.cancel_order(order_id)
 
     async def fetch_history_data(self, broker, symbols, interval_minutes):
         """

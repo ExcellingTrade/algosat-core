@@ -738,7 +738,8 @@ class SwingHighLowSellStrategy(StrategyBase):
                 if entry_df2 is None or len(entry_df2) < 2:
                     logger.warning("Not enough entry_df data for atomic confirmation after order.")
                     # Unable to confirm, exit order for safety
-                    await self.exit_order(order_info.get("order_id") or order_info.get("id"))
+                    # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
+                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed",check_live_status=True)
                     logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}")
                     return None
                 entry_df2_sorted = entry_df2.sort_values("timestamp")
@@ -751,7 +752,8 @@ class SwingHighLowSellStrategy(StrategyBase):
                     return order_info
                 else:
                     logger.info("Breakout failed atomic confirmation, exiting order.")
-                    await self.exit_order(order_info.get("order_id") or order_info.get("id"))
+                    # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
+                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed",check_live_status=True)
                     logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}")
                     return None
             else:
