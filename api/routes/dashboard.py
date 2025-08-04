@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, func, and_, cast, Float
 from algosat.api.dependencies import get_db
 from algosat.api.auth_dependencies import get_current_user
-from algosat.core.dbschema import broker_balance_summaries, broker_credentials
+from algosat.core.dbschema import broker_balance_summaries, broker_credentials, orders
 from algosat.core.time_utils import get_ist_datetime
 from algosat.common.logger import get_logger
 
@@ -74,6 +74,19 @@ async def get_dashboard_summary(session=Depends(get_db)) -> Dict[str, Any]:
         strategies_row = strategies_result.first()
         active_strategies_count = int(strategies_row.count) if strategies_row.count else 0
         
+        # Get open positions count
+        open_positions_query = select(
+            func.count(orders.c.id).label('count'),
+            func.sum(orders.c.pnl).label('total_pnl')
+        ).where(
+            orders.c.status == 'OPEN'
+        )
+        
+        positions_result = await session.execute(open_positions_query)
+        positions_row = positions_result.first()
+        open_positions_count = int(positions_row.count) if positions_row.count else 0
+        today_pnl = float(positions_row.total_pnl) if positions_row.total_pnl else 0.0
+        
         # Format the response
         dashboard_summary = {
             "total_balance": {
@@ -83,9 +96,13 @@ async def get_dashboard_summary(session=Depends(get_db)) -> Dict[str, Any]:
                 "is_positive": balance_change >= 0
             },
             "todays_pnl": {
-                "amount": 0.0,  # Placeholder - implement actual P&L calculation later
-                "change_percentage": 0.0,
-                "is_positive": True
+                "amount": round(today_pnl, 2),
+                "change_percentage": 0.0,  # Placeholder - can be enhanced later
+                "is_positive": today_pnl >= 0
+            },
+            "open_positions": {
+                "count": open_positions_count,
+                "total_pnl": round(today_pnl, 2)
             },
             "active_strategies": {
                 "count": active_strategies_count,
@@ -167,3 +184,71 @@ async def get_broker_balances_summary(session=Depends(get_db)) -> Dict[str, Any]
     except Exception as e:
         logger.error(f"Error fetching broker balances summary: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to fetch broker balances summary")
+
+
+@router.get("/open-positions")
+async def get_open_positions_count(session=Depends(get_db)) -> Dict[str, Any]:
+    """
+    Get count of open positions and their details.
+    """
+    try:
+        # Get open orders count
+        open_orders_query = select(
+            func.count(orders.c.id).label('count')
+        ).where(
+            orders.c.status == 'OPEN'
+        )
+        
+        open_orders_result = await session.execute(open_orders_query)
+        open_orders_row = open_orders_result.first()
+        open_positions_count = int(open_orders_row.count) if open_orders_row.count else 0
+        
+        # Get open orders details for additional info
+        open_orders_details_query = select(
+            orders.c.id,
+            orders.c.symbol,
+            orders.c.qty,
+            orders.c.entry_price,
+            orders.c.current_price,
+            orders.c.pnl,
+            orders.c.entry_time,
+            orders.c.strategy_id
+        ).where(
+            orders.c.status == 'OPEN'
+        ).order_by(
+            orders.c.entry_time.desc()
+        )
+        
+        details_result = await session.execute(open_orders_details_query)
+        open_orders_details = details_result.fetchall()
+        
+        # Calculate total PnL for open positions
+        total_pnl = 0.0
+        positions_details = []
+        
+        for order in open_orders_details:
+            order_dict = dict(order)
+            positions_details.append({
+                "order_id": order_dict["id"],
+                "symbol": order_dict["symbol"],
+                "quantity": order_dict["qty"],
+                "entry_price": float(order_dict["entry_price"]) if order_dict["entry_price"] else 0.0,
+                "current_price": float(order_dict["current_price"]) if order_dict["current_price"] else 0.0,
+                "pnl": float(order_dict["pnl"]) if order_dict["pnl"] else 0.0,
+                "entry_time": order_dict["entry_time"].isoformat() if order_dict["entry_time"] else None,
+                "strategy_id": order_dict["strategy_id"]
+            })
+            
+            if order_dict["pnl"]:
+                total_pnl += float(order_dict["pnl"])
+        
+        return {
+            "open_positions_count": open_positions_count,
+            "total_pnl": round(total_pnl, 2),
+            "positions": positions_details,
+            "last_updated": get_ist_datetime().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching open positions: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to fetch open positions")

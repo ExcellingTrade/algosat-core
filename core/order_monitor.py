@@ -23,6 +23,7 @@ class OrderMonitor:
         order_manager: OrderManager,
         order_cache: OrderCache,  # new dependency
         strategy_instance=None,  # strategy instance for shared usage
+        strategy_id: int = None,  # Optional: pass strategy_id directly for efficiency
         price_order_monitor_seconds: float = 30.0,  # 1 minute default
         signal_monitor_seconds: int = None  # will be set from strategy config
     ):
@@ -31,6 +32,7 @@ class OrderMonitor:
         self.order_manager: OrderManager = order_manager
         self.order_cache: OrderCache = order_cache
         self.strategy_instance = strategy_instance  # Store strategy instance
+        self.strategy_id: int = strategy_id  # Store strategy_id if provided
         self.price_order_monitor_seconds: float = price_order_monitor_seconds
         self.signal_monitor_seconds: int = signal_monitor_seconds
                 # --- Add position cache fields ---
@@ -201,7 +203,7 @@ class OrderMonitor:
                         hour, minute = map(int, square_off_time_str.split(':'))
                         square_off_time = dt_time(hour, minute)
                         
-                        if current_time_only >= square_off_time:
+                        if current_time_only <= square_off_time:
                             logger.info(f"OrderMonitor: Square-off time {square_off_time_str} reached for non-DELIVERY order_id={self.order_id}. Exiting order.")
                             try:
                                 await self.order_manager.exit_order(self.order_id, exit_reason=f"Square-off time {square_off_time_str} reached")
@@ -218,7 +220,7 @@ class OrderMonitor:
             # For DELIVERY orders: stop monitoring at 3:30 PM
             elif product_type and product_type.upper() == 'DELIVERY':
                 market_close_time = dt_time(15, 30)  # 3:30 PM
-                if current_time_only >= market_close_time:
+                if current_time_only <= market_close_time:
                     logger.info(f"OrderMonitor: Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
                     self.stop()
                     return
@@ -245,10 +247,6 @@ class OrderMonitor:
             logger.info(f"CurrentStatus: {current_status}")
             if current_status == OrderStatus.OPEN or current_status == 'OPEN':
                 current_ltp = await self._update_current_price_for_open_order(order_row)
-                
-            # --- Price-based exit logic for OptionBuy and OptionSell strategies ---
-            # Pass the already-fetched LTP to avoid duplicate API calls
-            await self._check_price_based_exit(order_row, strategy, last_main_status, current_ltp)
 
             # --- Use live broker order data from order_cache for ENTRY side ---
             entry_broker_db_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
@@ -329,7 +327,7 @@ class OrderMonitor:
                     if should_update:
                         # If status transitions from PENDING/PARTIAL to FILLED/PARTIAL, update all fields
                         transition_to_filled = (
-                            (last_status in ("PENDING","TRIGGER_PENDING" "PARTIAL", "PARTIALLY_FILLED")) and
+                            (last_status in ("PENDING", "TRIGGER_PENDING", "PARTIAL", "PARTIALLY_FILLED")) and
                             (broker_status in ("FILLED", "PARTIAL", "PARTIALLY_FILLED"))
                         )
                         if transition_to_filled:
@@ -473,6 +471,12 @@ class OrderMonitor:
                     self.stop()
                     return
                 
+            # --- Price-based exit logic for OptionBuy and OptionSell strategies ---
+            # Call after status is determined to ensure we have the correct OPEN status
+            current_order_status = last_main_status if last_main_status else current_status
+            if current_order_status == OrderStatus.OPEN or current_order_status == 'OPEN':
+                await self._check_price_based_exit(order_row, strategy, current_order_status, current_ltp)
+                
             # --- monitor positions if status is OPEN ---
             # Only for OPEN status, check broker positions and update order status/PnL based on positions
             if last_main_status == str(OrderStatus.OPEN) or (main_status == OrderStatus.OPEN):
@@ -487,7 +491,7 @@ class OrderMonitor:
                     # For each broker_exec in ENTRY, match to broker positions by broker, symbol, quantity, product
                     async with AsyncSessionLocal() as session:
                     # entry_broker_db_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
-                        entry_broker_db_orders = await get_broker_executions_for_order(session, self.order_id, side='ENTRY')
+                        entry_broker_db_orders = await get_broker_executions_for_order(session, self.order_id, side='ENTRY') 
                     total_pnl = 0.0
                     all_closed = True
                     for bro in entry_broker_db_orders:
@@ -528,18 +532,62 @@ class OrderMonitor:
                             if broker_name and broker_name.lower() == "zerodha":
                                 for pos in positions:
                                     try:
-                                        # Match by tradingsymbol, product, and buy_quantity or overnight_quantity
+                                        logger.info(f"pos.get('tradingsymbol') = {pos.get('tradingsymbol')}, symbol_val = {symbol_val}, qty = {qty}, product = {product}, exec_price = {exec_price}")
+                                        # Match by tradingsymbol and product only
                                         product_match = (str(pos.get('product')).upper() == str(product).upper()) if product else True
-                                        entry_price_match = (float(pos.get('buy_price', 0)) == float(exec_price)) if exec_price else True
-                                        qty_match = (int(pos.get('buy_quantity', 0)) == int(qty)) or (int(pos.get('overnight_quantity', 0)) == int(qty))
+                                        # entry_price_match = (float(pos.get('buy_price', 0)) == float(exec_price)) if exec_price else True
+                                        
+                                        # # Flexible quantity matching: handle duplicate orders for same symbol
+                                        # broker_buy_qty = int(pos.get('buy_quantity', 0))
+                                        # broker_overnight_qty = int(pos.get('overnight_quantity', 0))
+                                        # broker_current_qty = int(pos.get('quantity', 0))
+                                        # db_qty = int(qty)
+                                        
+                                        # # For closed positions (quantity=0), use buy_quantity for matching
+                                        # # For open positions, use quantity for matching
+                                        # qty_match = False
+                                        
+                                        # if broker_current_qty == 0:
+                                        #     # Position is closed - match against buy_quantity or overnight_quantity
+                                        #     logger.debug(f"OrderMonitor: Closed position detected (qty=0) - matching against buy_qty={broker_buy_qty}, overnight_qty={broker_overnight_qty}")
+                                        #     
+                                        #     if broker_buy_qty > 0 and db_qty > 0:
+                                        #         qty_match = (broker_buy_qty % db_qty == 0) or (db_qty % broker_buy_qty == 0)
+                                        #         if qty_match:
+                                        #             logger.info(f"OrderMonitor: Matched closed position by buy_quantity: broker_buy_qty={broker_buy_qty}, db_qty={db_qty}")
+                                        #     elif broker_overnight_qty > 0 and db_qty > 0:
+                                        #         qty_match = (broker_overnight_qty % db_qty == 0) or (db_qty % broker_overnight_qty == 0)
+                                        #         if qty_match:
+                                        #             logger.info(f"OrderMonitor: Matched closed position by overnight_quantity: broker_overnight_qty={broker_overnight_qty}, db_qty={db_qty}")
+                                        # else:
+                                        #     # Position is open - match against current quantity
+                                        #     logger.debug(f"OrderMonitor: Open position detected (qty={broker_current_qty}) - standard matching")
+                                        #     if broker_current_qty > 0 and db_qty > 0:
+                                        #         qty_match = (broker_current_qty % db_qty == 0) or (db_qty % broker_current_qty == 0)
+                                        
+                                        # # Fallback to exact match for safety
+                                        # if not qty_match:
+                                        #     qty_match = (broker_buy_qty == db_qty) or (broker_overnight_qty == db_qty) or (broker_current_qty == db_qty)
+                                        
                                         if (
                                             pos.get('tradingsymbol') == symbol_val and
-                                            qty_match and
-                                            product_match and
-                                            entry_price_match
+                                            product_match
+                                            # qty_match and
+                                            # entry_price_match
                                         ):
                                             matched_pos = pos
-                                            logger.info(f"OrderMonitor: Matched Zerodha position for symbol={symbol_val}: {pos}")
+                                            
+                                            # Log potential duplicate detection
+                                            broker_qty = int(pos.get('buy_quantity', 0)) or int(pos.get('overnight_quantity', 0)) or int(pos.get('quantity', 0))
+                                            position_status = "CLOSED" if int(pos.get('quantity', 0)) == 0 else "OPEN"
+                                            
+                                            if broker_qty > int(qty) and broker_qty % int(qty) == 0:
+                                                multiplier = broker_qty // int(qty)
+                                                logger.warning(f"OrderMonitor: Detected potential duplicate orders - "
+                                                             f"Broker quantity ({broker_qty}) is {multiplier}x DB quantity ({qty}) "
+                                                             f"for symbol={symbol_val} (Position: {position_status})")
+                                            
+                                            logger.info(f"OrderMonitor: Matched Zerodha position for symbol={symbol_val} (Status: {position_status}): {pos}")
                                             break
                                     except Exception as e:
                                         logger.error(f"OrderMonitor: Error matching Zerodha position: {e}")
@@ -549,11 +597,50 @@ class OrderMonitor:
                                     try:
                                         # Fyers fields: 'symbol', 'qty', 'productType', 'buyAvg', 'side'
                                         product_match = (str(pos.get('productType')).upper() == str(product).upper()) if product else True
-                                        qty_match = (int(pos.get('buyQty', 0)) == int(qty))
+                                        
+                                        # # Flexible quantity matching: handle duplicate orders for same symbol
+                                        # broker_buy_qty = int(pos.get('buyQty', 0))
+                                        # broker_current_qty = int(pos.get('qty', 0))
+                                        # db_qty = int(qty)
+                                        
+                                        # # For closed positions (qty=0), use buyQty for matching
+                                        # # For open positions, use qty for matching
+                                        # qty_match = False
+                                        
+                                        # if broker_current_qty == 0:
+                                        #     # Position is closed - match against buyQty
+                                        #     logger.debug(f"OrderMonitor: Closed Fyers position detected (qty=0) - matching against buyQty={broker_buy_qty}")
+                                        #     
+                                        #     if broker_buy_qty > 0 and db_qty > 0:
+                                        #         qty_match = (broker_buy_qty % db_qty == 0) or (db_qty % broker_buy_qty == 0)
+                                        #         if qty_match:
+                                        #             logger.info(f"OrderMonitor: Matched closed Fyers position by buyQty: broker_buy_qty={broker_buy_qty}, db_qty={db_qty}")
+                                        # else:
+                                        #     # Position is open - match against current qty
+                                        #     logger.debug(f"OrderMonitor: Open Fyers position detected (qty={broker_current_qty}) - standard matching")
+                                        #     if broker_current_qty > 0 and db_qty > 0:
+                                        #         qty_match = (broker_current_qty % db_qty == 0) or (db_qty % broker_current_qty == 0)
+                                        
+                                        # # Fallback to exact match for safety
+                                        # if not qty_match:
+                                        #     qty_match = (broker_buy_qty == db_qty) or (broker_current_qty == db_qty)
+                                        
                                         symbol_match = (pos.get('symbol') == symbol_val)
-                                        if symbol_match and qty_match and product_match:
+                                        if symbol_match and product_match:
+                                            # qty_match:
                                             matched_pos = pos
-                                            logger.info(f"OrderMonitor: Matched Fyers position for symbol={symbol_val}: {pos}")
+                                            
+                                            # Log potential duplicate detection
+                                            broker_qty = int(pos.get('buyQty', 0)) or int(pos.get('qty', 0))
+                                            position_status = "CLOSED" if int(pos.get('qty', 0)) == 0 else "OPEN"
+                                            
+                                            if broker_qty > int(qty) and broker_qty % int(qty) == 0:
+                                                multiplier = broker_qty // int(qty)
+                                                logger.warning(f"OrderMonitor: Detected potential duplicate orders - "
+                                                             f"Broker quantity ({broker_qty}) is {multiplier}x DB quantity ({qty}) "
+                                                             f"for symbol={symbol_val} (Position: {position_status})")
+                                            
+                                            logger.info(f"OrderMonitor: Matched Fyers position for symbol={symbol_val} (Status: {position_status}): {pos}")
                                             break
                                     except Exception as e:
                                         logger.error(f"OrderMonitor: Error matching Fyers position: {e}")
@@ -564,20 +651,71 @@ class OrderMonitor:
                         if matched_pos:
                             logger.info(f"OrderMonitor: Processing matched position for broker={broker_name}: {matched_pos}")
                             # Zerodha: use 'pnl' field; Fyers: use 'pl' field
-                            pnl_val = 0.0
+                            broker_total_pnl = 0.0
+                            broker_total_qty = 0
+                            our_qty = int(qty)
                             closed = False
+                            
                             if broker_name and broker_name.lower() == "zerodha":
-                                pnl_val = float(matched_pos.get('pnl', 0))
-                                # If quantity is 0, consider squared off
-                                if int(matched_pos.get('quantity', 0)) == 0:
+                                broker_total_pnl = float(matched_pos.get('pnl', 0))
+                                # For quantity determination: prefer buy_quantity for closed positions, quantity for open positions
+                                broker_current_qty = int(matched_pos.get('quantity', 0))
+                                if broker_current_qty == 0:
+                                    # Closed position - use buy_quantity or overnight_quantity
+                                    broker_total_qty = int(matched_pos.get('buy_quantity', 0)) or int(matched_pos.get('overnight_quantity', 0))
+                                    logger.debug(f"OrderMonitor: Using buy_quantity={broker_total_qty} for closed Zerodha position PnL calculation")
+                                else:
+                                    # Open position - use current quantity
+                                    broker_total_qty = broker_current_qty
+                                    logger.debug(f"OrderMonitor: Using current quantity={broker_total_qty} for open Zerodha position PnL calculation")
+                                
+                                # Position closure detection
+                                if broker_current_qty == 0:
                                     closed = True
                             elif broker_name and broker_name.lower() == "fyers":
-                                pnl_val = float(round(matched_pos.get('pl', 0),2))
-                                if int(matched_pos.get('qty', 0)) == 0:
+                                broker_total_pnl = float(round(matched_pos.get('pl', 0), 2))
+                                # For Fyers: use buyQty for closed positions, qty for open positions
+                                broker_current_qty = int(matched_pos.get('qty', 0))
+                                if broker_current_qty == 0:
+                                    # Closed position - use buyQty
+                                    broker_total_qty = int(matched_pos.get('buyQty', 0))
+                                    logger.debug(f"OrderMonitor: Using buyQty={broker_total_qty} for closed Fyers position PnL calculation")
+                                else:
+                                    # Open position - use current qty
+                                    broker_total_qty = broker_current_qty
+                                    logger.debug(f"OrderMonitor: Using current qty={broker_total_qty} for open Fyers position PnL calculation")
+                                
+                                # Position closure detection
+                                if broker_current_qty == 0:
                                     closed = True
                             
-                            total_pnl += pnl_val
-                            logger.info(f"OrderMonitor: Added PnL {pnl_val} from {broker_name} position. Total PnL now: {total_pnl}")
+                            # Calculate proportional PnL for our specific quantity
+                            if broker_total_qty > 0 and our_qty > 0:
+                                # Proportional PnL = (Our Quantity / Broker Total Quantity) * Broker Total PnL
+                                proportional_pnl = (our_qty / broker_total_qty) * broker_total_pnl
+                                logger.info(f"OrderMonitor: PnL Calculation for {broker_name}:")
+                                logger.info(f"  Broker Total PnL: {broker_total_pnl}")
+                                logger.info(f"  Broker Total Qty: {broker_total_qty}")
+                                logger.info(f"  Our DB Qty: {our_qty}")
+                                logger.info(f"  Proportional PnL: {proportional_pnl} = ({our_qty}/{broker_total_qty}) * {broker_total_pnl}")
+                            else:
+                                proportional_pnl = 0.0
+                                logger.warning(f"OrderMonitor: Cannot calculate proportional PnL - broker_total_qty={broker_total_qty}, our_qty={our_qty}")
+                            
+                            total_pnl += proportional_pnl
+                            logger.info(f"OrderMonitor: Added proportional PnL {proportional_pnl} from {broker_name} position. Total PnL now: {total_pnl}")
+                            
+                            # Log potential duplicate order detection based on PnL difference
+                            if broker_total_qty > our_qty and broker_total_qty % our_qty == 0:
+                                multiplier = broker_total_qty // our_qty
+                                expected_total_pnl = proportional_pnl * multiplier
+                                pnl_diff = abs(broker_total_pnl - expected_total_pnl)
+                                if pnl_diff > 0.01:  # Allow small rounding differences
+                                    logger.warning(f"OrderMonitor: PnL calculation discrepancy detected!")
+                                    logger.warning(f"  Expected total PnL: {expected_total_pnl} (proportional_pnl * {multiplier})")
+                                    logger.warning(f"  Actual broker PnL: {broker_total_pnl}")
+                                    logger.warning(f"  Difference: {pnl_diff}")
+                            
                             if closed:
                                 # --- Enhancement: Insert EXIT broker_execution before marking CLOSED ---
                                 try:
@@ -799,7 +937,7 @@ class OrderMonitor:
             await asyncio.sleep(self.price_order_monitor_seconds)
         logger.info(f"OrderMonitor: Stopping price monitor for order_id={self.order_id} (last status: {last_main_status})")
     
-    async def _check_price_based_exit(self, order_row, strategy, last_main_status, current_ltp=None):
+    async def _check_price_based_exit(self, order_row, strategy, current_main_status, current_ltp=None):
         """
         Check price-based exit conditions for OptionBuy and OptionSell strategies.
         Compare LTP with target_price and stop_loss to trigger exits.
@@ -807,12 +945,15 @@ class OrderMonitor:
         Args:
             order_row: Order data from database
             strategy: Strategy instance or dict
-            last_main_status: Current main order status
+            current_main_status: Current main order status
             current_ltp: Pre-fetched LTP to avoid duplicate API calls (optional)
         """
         try:
+            logger.info(f"OrderMonitor: Starting price-based exit check for order_id={self.order_id}, status={current_main_status}")
+            
             # Only check for OPEN orders
-            if last_main_status != 'OPEN':
+            if current_main_status != 'OPEN':
+                logger.info(f"OrderMonitor: ⏸️ SKIP: Price check skipped - order_id={self.order_id} status is '{current_main_status}', not 'OPEN'")
                 return
             
             # Only for OptionBuy and OptionSell strategies
@@ -821,8 +962,11 @@ class OrderMonitor:
                 strategy_name = strategy.get('strategy_key', '').lower()
             else:
                 strategy_name = getattr(strategy, 'strategy_key', '').lower()
-                
+            
+            logger.info(f"OrderMonitor: 📋 Price check - order_id={self.order_id}, strategy='{strategy_name}'")
+            
             if strategy_name not in ['optionbuy', 'optionsell']:
+                logger.info(f"OrderMonitor: ⏸️ SKIP: Price check skipped - order_id={self.order_id} strategy '{strategy_name}' not supported for price-based exits. Supported: [optionbuy, optionsell]")
                 return
                 
             # Get required values from order
@@ -831,21 +975,24 @@ class OrderMonitor:
             stop_loss = order_row.get('stop_loss')
             side = order_row.get('side', '').upper()
             
+            logger.info(f"OrderMonitor: Price check data - order_id={self.order_id}, symbol={strike_symbol}, target={target_price}, SL={stop_loss}, side={side}")
+            
             if not strike_symbol:
-                logger.debug(f"OrderMonitor: No strike_symbol for price-based exit check, order_id={self.order_id}")
+                logger.warning(f"OrderMonitor: No strike_symbol for price-based exit check, order_id={self.order_id}")
                 return
                 
             if target_price is None and stop_loss is None:
-                logger.debug(f"OrderMonitor: No target_price or stop_loss set for order_id={self.order_id}")
+                logger.info(f"OrderMonitor: No target_price or stop_loss set for order_id={self.order_id} - skipping price check")
                 return
                 
             # Get current LTP (use pre-fetched LTP if available, otherwise fetch)
             ltp = None
             if current_ltp is not None:
                 ltp = float(current_ltp)
-                logger.debug(f"OrderMonitor: Using pre-fetched LTP for price check: order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}")
+                logger.info(f"OrderMonitor: Using pre-fetched LTP for price check: order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}")
             else:
                 try:
+                    logger.info(f"OrderMonitor: Fetching LTP for price check: order_id={self.order_id}, symbol={strike_symbol}")
                     ltp_response = await self.data_manager.get_ltp(strike_symbol)
                     if isinstance(ltp_response, dict):
                         ltp = ltp_response.get(strike_symbol)
@@ -853,17 +1000,17 @@ class OrderMonitor:
                         ltp = ltp_response
                         
                     if ltp is None:
-                        logger.debug(f"OrderMonitor: Could not get LTP for {strike_symbol}, order_id={self.order_id}")
+                        logger.warning(f"OrderMonitor: Could not get LTP for {strike_symbol}, order_id={self.order_id}")
                         return
                         
                     ltp = float(ltp)
-                    logger.debug(f"OrderMonitor: Fetched LTP for price check: order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}")
+                    logger.info(f"OrderMonitor: Fetched LTP for price check: order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}")
                     
                 except Exception as e:
                     logger.error(f"OrderMonitor: Error getting LTP for {strike_symbol}, order_id={self.order_id}: {e}")
                     return
                     
-            logger.debug(f"OrderMonitor: Price check for order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}, target={target_price}, SL={stop_loss}, side={side}")
+            logger.info(f"OrderMonitor: 🔍 PRICE CHECK - order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}, target={target_price}, SL={stop_loss}, side={side}")
             
             # Check exit conditions based on strategy and side
             should_exit = False
@@ -871,31 +1018,47 @@ class OrderMonitor:
             exit_status = None
             
             if side == 'BUY':  # Long position
+                logger.debug(f"OrderMonitor: Checking BUY position exit conditions for order_id={self.order_id}")
+                
                 # Target hit: LTP >= target_price
                 if target_price is not None and ltp >= float(target_price):
                     should_exit = True
                     exit_reason = f"Target hit: LTP {ltp} >= Target {target_price}"
                     exit_status = "EXIT_TARGET"
+                    logger.info(f"OrderMonitor: 🎯 TARGET HIT - {exit_reason} for order_id={self.order_id}")
+                    
                 # Stoploss hit: LTP <= stop_loss
                 elif stop_loss is not None and ltp <= float(stop_loss):
                     should_exit = True
                     exit_reason = f"Stoploss hit: LTP {ltp} <= SL {stop_loss}"
                     exit_status = "EXIT_STOPLOSS"
+                    logger.info(f"OrderMonitor: 🛑 STOP LOSS HIT - {exit_reason} for order_id={self.order_id}")
+                else:
+                    logger.debug(f"OrderMonitor: No exit condition met for BUY order_id={self.order_id} - LTP={ltp}, target={target_price}, SL={stop_loss}")
                     
             elif side == 'SELL':  # Short position
+                logger.debug(f"OrderMonitor: Checking SELL position exit conditions for order_id={self.order_id}")
+                
                 # Target hit: LTP <= target_price
                 if target_price is not None and ltp <= float(target_price):
                     should_exit = True
                     exit_reason = f"Target hit: LTP {ltp} <= Target {target_price}"
                     exit_status = "EXIT_TARGET"
+                    logger.info(f"OrderMonitor: 🎯 TARGET HIT - {exit_reason} for order_id={self.order_id}")
+                    
                 # Stoploss hit: LTP >= stop_loss
                 elif stop_loss is not None and ltp >= float(stop_loss):
                     should_exit = True
                     exit_reason = f"Stoploss hit: LTP {ltp} >= SL {stop_loss}"
                     exit_status = "EXIT_STOPLOSS"
+                    logger.info(f"OrderMonitor: 🛑 STOP LOSS HIT - {exit_reason} for order_id={self.order_id}")
+                else:
+                    logger.debug(f"OrderMonitor: No exit condition met for SELL order_id={self.order_id} - LTP={ltp}, target={target_price}, SL={stop_loss}")
+            else:
+                logger.warning(f"OrderMonitor: Unknown side '{side}' for order_id={self.order_id}")
             
             if should_exit:
-                logger.info(f"OrderMonitor: Price-based exit triggered for order_id={self.order_id}. {exit_reason}")
+                logger.critical(f"OrderMonitor: 🚨 PRICE-BASED EXIT TRIGGERED for order_id={self.order_id}. {exit_reason}")
                 
                 try:
                     # Exit the order via OrderManager
@@ -919,17 +1082,19 @@ class OrderMonitor:
                         status=status_constant
                     )
                     
-                    logger.info(f"OrderMonitor: Successfully exited order_id={self.order_id} due to price condition. Status updated to {status_constant}")
+                    logger.critical(f"OrderMonitor: ✅ Successfully exited order_id={self.order_id} due to price condition. Status updated to {status_constant}")
                     
                     # Stop monitoring this order
                     self.stop()
                     return
                     
                 except Exception as e:
-                    logger.error(f"OrderMonitor: Error exiting order_id={self.order_id} due to price condition: {e}")
+                    logger.error(f"OrderMonitor: ❌ Error exiting order_id={self.order_id} due to price condition: {e}")
+            else:
+                logger.debug(f"OrderMonitor: ✅ Price check completed - no exit conditions met for order_id={self.order_id}")
                     
         except Exception as e:
-            logger.error(f"OrderMonitor: Error in price-based exit check for order_id={self.order_id}: {e}")
+            logger.error(f"OrderMonitor: ❌ Error in price-based exit check for order_id={self.order_id}: {e}", exc_info=True)
 
 
     def _get_cache_lookup_order_id(self, broker_order_id, broker_name, product_type):
@@ -1159,20 +1324,30 @@ class OrderMonitor:
             # Use strategy instance if available, otherwise fetch from database
             if self.strategy_instance is not None:
                 strategy = self.strategy_instance
-                # Still need strategy_config from database
-                _, _, strategy_config, _ = await self._get_order_and_strategy(self.order_id)
+                # Still need strategy_config and strategy_symbol from database for strategy_id
+                _, strategy_symbol, strategy_config, _ = await self._get_order_and_strategy(self.order_id)
                 logger.debug(f"OrderMonitor: Using passed strategy instance for signal_monitor_seconds calculation")
             else:
                 # Use unified cache-based access for strategy_config and strategy
-                _, _, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
+                _, strategy_symbol, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
                 logger.debug(f"OrderMonitor: Using database strategy for signal_monitor_seconds calculation")
                 
+            # Get strategy_id from multiple sources (priority order)
             strategy_id = None
-            if strategy:
-                # Try to get id from strategy object (dict or object)
-                strategy_id = getattr(strategy, 'id', None)
-                if strategy_id is None and isinstance(strategy, dict):
-                    strategy_id = strategy.get('id')
+            
+            # Priority 1: Use strategy_id passed to constructor (most efficient)
+            if self.strategy_id is not None:
+                strategy_id = self.strategy_id
+                logger.debug(f"OrderMonitor: Using constructor strategy_id={strategy_id} for order_id={self.order_id}")
+            # Priority 2: Get from strategy_symbol (most reliable from database)
+            elif strategy_symbol:
+                strategy_id = strategy_symbol.get('strategy_id')
+                logger.debug(f"OrderMonitor: Found strategy_id={strategy_id} from strategy_symbol for order_id={self.order_id}")
+            else:
+                logger.warning(f"OrderMonitor: No strategy_id available for order_id={self.order_id}, using fallback signal_monitor_seconds")
+                
+            logger.info(f"OrderMonitor: Using strategy_id={strategy_id} for signal_monitor_seconds calculation")
+            
             import json
             trade_param = strategy_config.get('trade') if strategy_config else None
             if strategy_id in (1, 2):
@@ -1211,6 +1386,7 @@ class OrderMonitor:
                     self.signal_monitor_seconds = 5 * 60
             else:
                 # fallback default
+                logger.info(f"OrderMonitor: Using fallback signal_monitor_seconds (300) for order_id={self.order_id}")
                 self.signal_monitor_seconds = 5 * 60
         logger.info(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_seconds}s)")
         await asyncio.gather(self._price_order_monitor(), self._signal_monitor())

@@ -7,7 +7,8 @@ from algosat.common.broker_utils import calculate_backdate_days, get_trade_day
 from algosat.common.strategy_utils import (
     calculate_end_date,
     detect_regime,
-    get_regime_reference_points
+    get_regime_reference_points,
+    wait_for_first_candle_completion
 )
 from algosat.core.data_manager import DataManager
 from algosat.core.order_manager import OrderManager
@@ -155,6 +156,7 @@ class SwingHighLowSellStrategy(StrategyBase):
             # Setup regime reference for sideways detection
             today_dt = get_ist_datetime()
             first_candle_time = self.trade.get("first_candle_time", "09:15")
+            await wait_for_first_candle_completion(self.entry_minutes, first_candle_time, self.symbol)
             self.regime_reference = await get_regime_reference_points(
                 self.dp,
                 self.symbol,
@@ -223,6 +225,7 @@ class SwingHighLowSellStrategy(StrategyBase):
         """
         try:
             from algosat.core.db import AsyncSessionLocal, get_smart_levels_for_strategy_symbol_id, get_smart_levels_for_symbol
+            from algosat.common.swing_utils import sanitize_symbol_for_db
             
             logger.info(f"🔄 Loading smart levels - enabled: {self._smart_levels_enabled}, strategy_symbol_id: {self._strategy_symbol_id}, symbol: {self.symbol}")
             
@@ -233,6 +236,10 @@ class SwingHighLowSellStrategy(StrategyBase):
                 logger.debug("Smart levels not enabled in configuration")
                 return
             
+            # Sanitize symbol for database lookup (NSE:NIFTY50-INDEX -> NIFTY50)
+            db_symbol = sanitize_symbol_for_db(self.symbol)
+            logger.debug(f"Sanitized symbol for DB lookup: '{self.symbol}' -> '{db_symbol}'")
+
             async with AsyncSessionLocal() as session:
                 smart_levels = []
                 
@@ -241,11 +248,11 @@ class SwingHighLowSellStrategy(StrategyBase):
                     smart_levels = await get_smart_levels_for_strategy_symbol_id(session, self._strategy_symbol_id)
                     logger.debug(f"Found {len(smart_levels)} smart levels using strategy_symbol_id={self._strategy_symbol_id}")
                 else:
-                    # Fallback to symbol name lookup
+                    # Fallback to symbol name lookup using sanitized symbol
                     strategy_id = getattr(self.cfg, 'strategy_id', None)
                     if strategy_id:
-                        smart_levels = await get_smart_levels_for_symbol(session, self.symbol, strategy_id)
-                        logger.debug(f"Found {len(smart_levels)} smart levels using symbol={self.symbol}, strategy_id={strategy_id}")
+                        smart_levels = await get_smart_levels_for_symbol(session, db_symbol, strategy_id)
+                        logger.debug(f"Found {len(smart_levels)} smart levels using db_symbol={db_symbol}, strategy_id={strategy_id}")
                     else:
                         logger.warning("No strategy_symbol_id or strategy_id available for smart level lookup")
                         return
@@ -255,7 +262,7 @@ class SwingHighLowSellStrategy(StrategyBase):
                 
                 if active_levels:
                     self._smart_level = active_levels[0]  # Take first active level
-                    logger.info(f"✅ Loaded smart level: '{self._smart_level.get('name')}' for {self.symbol}")
+                    logger.info(f"✅ Loaded smart level: '{self._smart_level.get('name')}' for {db_symbol} (original: {self.symbol})")
                 else:
                     logger.info(f"No active smart levels found for {self.symbol}")
                     

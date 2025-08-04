@@ -440,26 +440,48 @@ class OrderManager:
     async def _insert_exit_broker_execution(self, session, *, parent_order_id, broker_id, broker_order_id, side, status, executed_quantity, execution_price, product_type, order_type, order_messages, symbol, execution_time, notes, action=None, exit_reason=None):
         """
         Helper to build and insert a broker_executions row for EXIT/cancel actions.
+        Checks for existing EXIT entries before inserting to prevent duplicates.
         """
         from algosat.core.dbschema import broker_executions
-        broker_exec_data = self.build_broker_exec_data(
-            parent_order_id=parent_order_id,
-            broker_id=broker_id,
-            broker_order_id=broker_order_id,
-            side=side,
-            status=status,
-            executed_quantity=executed_quantity,
-            execution_price=execution_price,
-            product_type=product_type,
-            order_type=order_type,
-            order_messages=order_messages,
-            action=action,
-            raw_execution_data=None,
-            symbol=symbol,
-            execution_time=execution_time,
-            notes=notes
+        from algosat.core.db import get_broker_executions_for_order
+        
+        # Check if EXIT broker_execution already exists for this parent_order_id, broker_id, broker_order_id
+        existing_execs = await get_broker_executions_for_order(
+            session,
+            parent_order_id,
+            side='EXIT'
         )
-        await session.execute(broker_executions.insert().values(**broker_exec_data))
+        found = None
+        for ex in existing_execs:
+            if ex.get('broker_id') == broker_id and ex.get('broker_order_id') == broker_order_id:
+                found = ex
+                break
+        
+        if found:
+            # Update only execution_price if EXIT entry already exists
+            await self.update_broker_execution_price(found.get('id'), execution_price)
+            logger.info(f"OrderManager: Updated execution_price for existing EXIT broker_execution id={found.get('id')}")
+        else:
+            # Insert new EXIT broker_execution
+            broker_exec_data = self.build_broker_exec_data(
+                parent_order_id=parent_order_id,
+                broker_id=broker_id,
+                broker_order_id=broker_order_id,
+                side=side,
+                status=status,
+                executed_quantity=executed_quantity,
+                execution_price=execution_price,
+                product_type=product_type,
+                order_type=order_type,
+                order_messages=order_messages,
+                action=action,
+                raw_execution_data=None,
+                symbol=symbol,
+                execution_time=execution_time,
+                notes=notes
+            )
+            await session.execute(broker_executions.insert().values(**broker_exec_data))
+            logger.info(f"OrderManager: Inserted new EXIT broker_execution for parent_order_id={parent_order_id}, broker_id={broker_id}, broker_order_id={broker_order_id}")
 
 
     async def exit_all_orders(self, exit_reason: str = None, strategy_id: int = None, check_live_status: bool = False):

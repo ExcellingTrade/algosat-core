@@ -438,6 +438,65 @@ def get_latest_confirmed_high_low(df: pd.DataFrame):
     return latest_high, latest_low
 
 
+# ──────────── Utility: Symbol sanitization for database lookup ────────────────
+def sanitize_symbol_for_db(symbol):
+    """
+    Sanitize symbol for database lookup by removing NSE: prefix and -INDEX suffix.
+    This is used to convert symbols like 'NSE:NIFTY50-INDEX' to 'NIFTY50' for database queries.
+    
+    Args:
+        symbol (str): The symbol to sanitize (e.g., 'NSE:NIFTY50-INDEX', 'NIFTY50', etc.)
+        
+    Returns:
+        str: Sanitized symbol suitable for database lookup (e.g., 'NIFTY50')
+    """
+    import re
+    
+    if not symbol:
+        return symbol
+        
+    # Remove NSE: prefix if present
+    if symbol.startswith("NSE:"):
+        symbol = symbol[4:]
+    # Remove -INDEX suffix if present
+    if symbol.endswith("-INDEX"):
+        symbol = symbol[:-6]
+    
+    return symbol
+
+
+# ──────────── Utility: Symbol sanitization for option generation ────────────────
+def sanitize_symbol_for_options(symbol):
+    """
+    Sanitize symbol specifically for option symbol generation.
+    This handles the full transformation including mapping numbered symbols and special cases.
+    
+    Args:
+        symbol (str): The symbol to sanitize (e.g., 'NSE:NIFTY50-INDEX', 'NIFTYBANK', etc.)
+        
+    Returns:
+        str: Sanitized symbol suitable for option generation (e.g., 'NIFTY', 'BANKNIFTY')
+    """
+    import re
+    
+    if not symbol:
+        return symbol
+    
+    # First apply basic sanitization
+    symbol = sanitize_symbol_for_db(symbol)
+    
+    # For NIFTY, BANKNIFTY with numbers (NIFTY50), just map to NIFTY, BANKNIFTY
+    m = re.match(r"^(NIFTY|BANKNIFTY)\d+$", symbol)
+    if m:
+        symbol = m.group(1)
+    # Special handling: if symbol is NIFTYBANK, use BANKNIFTY for option symbol generation
+    if symbol == "NIFTYBANK":
+        symbol = "BANKNIFTY"
+    # (Otherwise, symbol is used as-is after prefix/suffix removal)
+    
+    return symbol
+
+
 # ──────────── Utility: Option ATM symbol builder ────────────────
 def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
     """
@@ -448,23 +507,8 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
     - Option strike = rounded ATM + offset (separate for CE/PE).
     - Naming convention per user spec above.
     """
-    import re
-
-    # --- Sanitize symbol ---
-    # Remove NSE: prefix if present
-    if symbol.startswith("NSE:"):
-        symbol = symbol[4:]
-    # Remove -INDEX suffix if present
-    if symbol.endswith("-INDEX"):
-        symbol = symbol[:-6]
-    # For NIFTY, BANKNIFTY with numbers (NIFTY50), just map to NIFTY, BANKNIFTY
-    m = re.match(r"^(NIFTY|BANKNIFTY)\d+$", symbol)
-    if m:
-        symbol = m.group(1)
-    # Special handling: if symbol is NIFTYBANK, use BANKNIFTY for option symbol generation
-    if symbol == "NIFTYBANK":
-        symbol = "BANKNIFTY"
-    # (Otherwise, symbol is used as-is after prefix/suffix removal)
+    # --- Sanitize symbol for option generation ---
+    symbol = sanitize_symbol_for_options(symbol)
 
     if today is None:
         today = datetime.now()

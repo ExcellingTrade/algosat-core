@@ -8,7 +8,8 @@ from algosat.common.broker_utils import calculate_backdate_days, get_trade_day
 from algosat.common.strategy_utils import (
     calculate_end_date,
     detect_regime,
-    get_regime_reference_points
+    get_regime_reference_points,
+    wait_for_first_candle_completion
 )
 from algosat.core.data_manager import DataManager
 from algosat.core.order_manager import OrderManager
@@ -154,6 +155,8 @@ class SwingHighLowBuyStrategy(StrategyBase):
             # Setup regime reference for sideways detection
             today_dt = get_ist_datetime()
             first_candle_time = self.trade.get("first_candle_time", "09:15")
+            # 1. Wait for first candle completion
+            await wait_for_first_candle_completion(self.entry_minutes, first_candle_time, self.symbol)
             self.regime_reference = await get_regime_reference_points(
                 self.dp,
                 self.symbol,
@@ -202,6 +205,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
         """
         try:
             from algosat.core.db import AsyncSessionLocal, get_smart_levels_for_strategy_symbol_id, get_smart_levels_for_symbol
+            from algosat.common.swing_utils import sanitize_symbol_for_db
             
             logger.info(f"🔄 Loading smart levels - enabled: {self._smart_levels_enabled}, strategy_symbol_id: {self._strategy_symbol_id}, symbol: {self.symbol}")
             
@@ -212,6 +216,10 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 logger.info("Smart levels disabled, skipping load")
                 return
             
+            # Sanitize symbol for database lookup (NSE:NIFTY50-INDEX -> NIFTY50)
+            db_symbol = sanitize_symbol_for_db(self.symbol)
+            logger.debug(f"Sanitized symbol for DB lookup: '{self.symbol}' -> '{db_symbol}'")
+
             async with AsyncSessionLocal() as session:
                 smart_levels = []
                 lookup_method = None
@@ -222,21 +230,24 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     lookup_method = f"strategy_symbol_id={self._strategy_symbol_id}"
                     logger.debug(f"Method 1: Loaded {len(smart_levels)} smart levels using {lookup_method}")
                 
-                # Method 2: Fallback to symbol name + strategy_id lookup
-                elif hasattr(self.cfg, 'strategy_id') and self.cfg.strategy_id and self.symbol:
-                    smart_levels = await get_smart_levels_for_symbol(session, self.symbol, self.cfg.strategy_id)
-                    lookup_method = f"symbol={self.symbol}, strategy_id={self.cfg.strategy_id}"
+                # Method 2: Fallback to symbol name + strategy_id lookup (only if Method 1 found no data)
+                if not smart_levels and hasattr(self.cfg, 'strategy_id') and self.cfg.strategy_id and db_symbol:
+                    smart_levels = await get_smart_levels_for_symbol(session, db_symbol, self.cfg.strategy_id)
+                    lookup_method = f"symbol={db_symbol}, strategy_id={self.cfg.strategy_id}"
                     logger.debug(f"Method 2: Loaded {len(smart_levels)} smart levels using {lookup_method}")
                 
-                # Method 3: Last fallback - symbol name only
-                elif self.symbol:
-                    smart_levels = await get_smart_levels_for_symbol(session, self.symbol)
-                    lookup_method = f"symbol={self.symbol} only"
+                # Method 3: Last fallback - symbol name only (only if previous methods found no data)
+                if not smart_levels and db_symbol:
+                    smart_levels = await get_smart_levels_for_symbol(session, db_symbol)
+                    lookup_method = f"symbol={db_symbol} only"
                     logger.debug(f"Method 3: Loaded {len(smart_levels)} smart levels using {lookup_method}")
                 
-                else:
-                    logger.warning("❌ Cannot load smart levels: missing strategy_symbol_id, strategy_id, and symbol")
-                    return
+                # If still no data found - FAIL THE SETUP when smart levels are enabled
+                if not smart_levels:
+                    error_msg = f"❌ Smart levels are ENABLED but no configuration found for {db_symbol} (original: {self.symbol})!"
+                    logger.error(error_msg)
+                    logger.error(f"    Lookup attempts failed: strategy_symbol_id={self._strategy_symbol_id}, db_symbol={db_symbol}, strategy_id={getattr(self.cfg, 'strategy_id', None)}")
+                    raise ValueError(f"Smart levels enabled but no configuration found for symbol '{db_symbol}' (original: '{self.symbol}'). Cannot proceed without smart level data.")
                 
                 # Process smart levels - expect only one active level per symbol
                 if smart_levels:
@@ -264,13 +275,13 @@ class SwingHighLowBuyStrategy(StrategyBase):
                             active_level = level
                             logger.info(f"✅ Active smart level found: '{level['name']}'")
                         else:
-                            logger.warning(f"⚠️ Multiple active smart levels found for {self.symbol}! Using first: '{active_level['name']}', skipping: '{level['name']}'")
+                            logger.warning(f"⚠️ Multiple active smart levels found for {db_symbol}! Using first: '{active_level['name']}', skipping: '{level['name']}'")
                     
                     # Cache the single smart level
                     self._smart_level = active_level
                     
                     if active_level:
-                        logger.info(f"✅ Smart level loaded for {self.symbol} using {lookup_method}")
+                        logger.info(f"✅ Smart level loaded for {db_symbol} using {lookup_method}")
                         
                         # Use summary method for comprehensive logging
                         summary = self.get_smart_level_summary()
@@ -288,13 +299,17 @@ class SwingHighLowBuyStrategy(StrategyBase):
                         if level_info['notes']:
                             logger.info(f"    Notes: {level_info['notes']}")
                     else:
-                        logger.info(f"ℹ️ No active smart levels found for {self.symbol} using {lookup_method}")
-                else:
-                    logger.info(f"ℹ️ No smart levels found for {self.symbol} using {lookup_method}")
+                        # FAIL THE SETUP when smart levels are enabled but no active level found
+                        error_msg = f"❌ Smart levels are ENABLED but no ACTIVE configuration found for {self.symbol}!"
+                        logger.error(error_msg)
+                        logger.error(f"    Found {len(smart_levels)} smart level records but none are active")
+                        raise ValueError(f"Smart levels enabled but no active configuration found for symbol '{self.symbol}'. Cannot proceed without active smart level data.")
                     
         except Exception as e:
             logger.error(f"❌ Error loading smart levels: {e}", exc_info=True)
             self._smart_level = None  # Ensure cache is cleared on error
+            # Re-raise the exception to fail the setup
+            raise
 
     def get_active_smart_level(self):
         """
