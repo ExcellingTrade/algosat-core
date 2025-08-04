@@ -536,7 +536,7 @@ async def wait_for_next_candle(interval_minutes: int) -> float:
     return wait_time
 
 
-def get_max_premium_from_config(trade_config: dict, symbol: str, current_dt: 'datetime') -> int:
+def get_max_premium_from_config(trade_config: dict, symbol: str, current_dt: 'datetime') -> Optional[int]:
     """
     Determine the maximum premium based on the trade_config, symbol, and current datetime.
     Expiry type (weekly/monthly) is auto-detected from symbol:
@@ -544,14 +544,17 @@ def get_max_premium_from_config(trade_config: dict, symbol: str, current_dt: 'da
       - For all other symbols, treat as "monthly".
     Symbol is sanitized (strips NSE: prefix, -INDEX suffix, NIFTYBANK→BANKNIFTY, etc).
     Supports dynamic selection via max_premium_selection in config for weekly/monthly expiries.
-    Falls back to trade_config['max_premium'] or 100 if not found.
+    Returns None if:
+      - No entry found for the specific weekday/week
+      - Selected premium exceeds max_threshold
+      - max_premium_selection is not configured properly
     Logs the expiry_type, detection path, and selected premium.
     Args:
         trade_config (dict): The trade config dict.
         symbol (str): The trading symbol (e.g., "NIFTY", "NSE:BANKNIFTY", etc).
         current_dt (datetime): The current datetime (IST).
     Returns:
-        int: The selected max_premium value.
+        Optional[int]: The selected max_premium value or None if not found/invalid.
     """
     # --- Symbol sanitization (same as get_atm_strike_symbol in swing_utils.py) ---
     orig_symbol = symbol
@@ -573,49 +576,59 @@ def get_max_premium_from_config(trade_config: dict, symbol: str, current_dt: 'da
     else:
         expiry_type = "monthly"
         expiry_reason = f"Detected as monthly expiry for symbol '{symbol_upper}'"
-    # --- Select max_premium as before ---
+    # --- Select max_premium from selection ---
     max_premium_selection = trade_config.get("max_premium_selection")
-    fallback = trade_config.get("max_premium", 100)
-    result = fallback
+    result = None
     details = ""
     try:
         if isinstance(max_premium_selection, dict):
             if expiry_type == "weekly":
                 weekday = current_dt.strftime("%A").lower()
                 weekly_map = max_premium_selection.get("weekly", {})
-                # result = weekly_map.get(weekday, fallback)
                 if weekday in weekly_map:
                     result = weekly_map[weekday]
+                    details = f"weekly, day={weekday}"
                 else:
-                    result = max_premium_selection.get("max_threshold", fallback)
+                    result = None
+                    details = f"weekly, day={weekday} not found"
                     logger.warning(
-                        f"[get_max_premium_from_config] WEEKLY: No entry for weekday='{weekday}' in map, using fallback={result} (symbol={orig_symbol})"
+                        f"[get_max_premium_from_config] WEEKLY: No entry for weekday='{weekday}' in map, returning None (symbol={orig_symbol})"
                     )
-                details = f"weekly, day={weekday}"
             elif expiry_type == "monthly":
                 day = current_dt.day
                 week_of_month = ((day - 1) // 7) + 1
                 week_key = f"week{week_of_month}"
                 monthly_map = max_premium_selection.get("monthly", {})
-                # result = monthly_map.get(week_key,  fallback)
                 if week_key in monthly_map:
                     result = monthly_map[week_key]
+                    details = f"monthly, {week_key}"
                 else:
-                    result = max_premium_selection.get("max_threshold", fallback)
+                    result = None
+                    details = f"monthly, {week_key} not found"
                     logger.warning(
-                        f"[get_max_premium_from_config] MONTHLY: No entry for {week_key} in map, using fallback={result} (symbol={orig_symbol})"
+                        f"[get_max_premium_from_config] MONTHLY: No entry for {week_key} in map, returning None (symbol={orig_symbol})"
                     )
-                details = f"monthly, {week_key}"
             else:
-                result = fallback
+                result = None
                 details = "unknown expiry_type"
         else:
-            result = fallback
+            result = None
             details = "no max_premium_selection"
     except Exception as e:
         logger.warning(f"[get_max_premium_from_config] Error during max_premium selection: {e}")
-        result = fallback
+        result = None
         details = "exception fallback"
+    
+    # Check against max_threshold if result is valid
+    if result is not None:
+        max_threshold = max_premium_selection.get("max_threshold") if isinstance(max_premium_selection, dict) else None
+        if max_threshold is not None and result > max_threshold:
+            logger.warning(
+                f"[get_max_premium_from_config] Selected premium {result} exceeds max_threshold {max_threshold}, returning None (symbol={orig_symbol})"
+            )
+            result = None
+            details += f", exceeded max_threshold={max_threshold}"
+    
     logger.debug(
         f"[get_max_premium_from_config] symbol={orig_symbol} (sanitized={symbol_upper}), expiry_type={expiry_type} ({expiry_reason}), {details}, selected max_premium={result}"
     )

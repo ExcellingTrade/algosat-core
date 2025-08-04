@@ -141,6 +141,10 @@ class OptionBuyStrategy(StrategyBase):
         logger.info(f"Regime reference points for {symbol}: {self.regime_reference}")
         # Dynamically select max_premium (expiry_type is auto-detected inside)
         max_premium = get_max_premium_from_config(trade, symbol, today_dt)
+        if max_premium is None:
+            logger.error(f"Failed to determine max_premium for {symbol} on {today_dt}. Check configuration.")
+            self._setup_failed = True
+            return
         # 1. Wait for first candle completion
         await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
         # 2. Calculate first candle data using the correct trade day
