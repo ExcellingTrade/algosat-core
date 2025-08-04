@@ -10,6 +10,7 @@ from rich.progress import (
     Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn,
     TimeRemainingColumn, TaskProgressColumn
 )
+from algosat.core.data_manager import DataManager
 from algosat.core.time_utils import localize_to_ist, get_ist_datetime
 from algosat.common.logger import get_logger
 import logging
@@ -20,8 +21,8 @@ from algosat.core.order_request import OrderRequest, Side, OrderType
 from algosat.common import constants
 from algosat.common.broker_utils import get_trade_day
 
-if TYPE_CHECKING:
-    from core.data_provider.provider import DataManager
+# if TYPE_CHECKING:
+#     from core.data_provider.provider import DataManager
 
 logger = get_logger("strategy_utils")
 
@@ -29,7 +30,7 @@ logger = get_logger("strategy_utils")
 _history_cache = cachetools.TTLCache(maxsize=128, ttl=60*60*24)
 
 async def fetch_instrument_history(
-    broker: 'DataManager',
+    broker: DataManager,
     strike_symbols,
     from_date,
     to_date,
@@ -77,6 +78,7 @@ async def fetch_instrument_history(
                 ins_type=ins_type,
                 cache=cache
             )
+            logger.debug(f"Fetched history for {strike_symbol} from {from_date} to {to_date} ({len(data)} records).")
             if data is not None:
                 if cache:
                     _history_cache[cache_key] = data
@@ -637,18 +639,20 @@ async def get_regime_reference_points(
     """
     Fetch previous day high/low and first candle high/low for regime identification.
     """
-    logger = logging.getLogger("regime_utils")
+    # logger = logging.getLogger("regime_utils")
 
     # Get today's trading day (IST)
     trade_day = get_trade_day(current_dt or get_ist_datetime())
     prev_day = trade_day - timedelta(days=1)
+    prev_day = get_trade_day(prev_day)  # Ensure it's a valid trading day
+    prev_day = prev_day.replace(hour=9, minute=15, second=0, microsecond=0)
 
     # 1. Fetch previous day OHLC
     prev_day_history = await fetch_instrument_history(
         data_manager,
         [symbol],
         prev_day,
-        prev_day,
+        prev_day.replace(hour=15, minute=30),  # Assuming market close at 15:30
         interval_minutes="day",  # Or 1440, depending on your system
         ins_type=""
     )
