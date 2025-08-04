@@ -1219,6 +1219,7 @@ class OrderMonitor:
             
             # Update current price in database
             await self._update_current_price_in_db(strike_symbol, ltp)
+            logger.debug(f"OrderMonitor: Updated current_price={ltp} for order_id={self.order_id}, symbol={strike_symbol}")
             
             # Return the LTP for use in exit checks
             return ltp

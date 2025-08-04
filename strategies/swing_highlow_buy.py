@@ -1202,7 +1202,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             # Store pullback level in database
             from algosat.core.re_entry_db_helpers import create_re_entry_tracking_record
             
-            success = await create_re_entry_tracking_record(order_id, pullback_level)
+            success = await cxreate_re_entry_tracking_record(order_id, pullback_level)
             
             if success:
                 logger.info(f"✅ Pullback level calculated and stored successfully:")
@@ -2116,6 +2116,10 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     return None
                 lot_qty = new_lot_qty
                 logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, updating lot_qty to {lot_qty} ({sideways_qty_perc}% of {original_lot_qty}) and using target_atr_multiplier={sideways_target_atr_multiplier}")
+            elif not sideways_enabled and regime == "Sideways":
+                # If sideways is not enabled, skip the trade entirely
+                logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, but sideways_trade_enabled is False, skipping trade entirely")
+                return None
 
             # Target calculation
             target_cfg = config.get("target", {})

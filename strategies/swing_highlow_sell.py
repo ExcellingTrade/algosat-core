@@ -1902,6 +1902,10 @@ class SwingHighLowSellStrategy(StrategyBase):
                     return None
                 lot_qty = new_lot_qty
                 logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, updating lot_qty to {lot_qty} ({sideways_qty_perc}% of {original_lot_qty}) and using target_atr_multiplier={sideways_target_atr_multiplier}")
+            elif not sideways_enabled and regime == "Sideways":
+                # If sideways is not enabled, skip the trade entirely
+                logger.info(f"Sideways regime detected for {self.symbol} at {last_candle['timestamp']}, but sideways_trade_enabled is False, skipping trade entirely")
+                return None
 
             # Target calculation
             target_cfg = config.get("target", {})
