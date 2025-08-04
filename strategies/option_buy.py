@@ -529,7 +529,19 @@ class OptionBuyStrategy(StrategyBase):
                 )
                 return None
 
-            threshold_entry = config.get('threshold_entry', 500)
+            # Calculate threshold_entry using configured premium + max_threshold
+            today_dt = get_ist_datetime()
+            configured_premium = get_max_premium_from_config(config, self.symbol, today_dt)
+            max_premium_selection = config.get("max_premium_selection", {})
+            max_threshold = max_premium_selection.get("max_threshold", 0) if isinstance(max_premium_selection, dict) else 0
+            
+            if configured_premium is not None:
+                threshold_entry = configured_premium + max_threshold
+                logger.debug(f"Calculated threshold_entry: configured_premium={configured_premium} + max_threshold={max_threshold} = {threshold_entry} for {strike}")
+            else:
+                threshold_entry = 500  # Fallback value
+                logger.warning(f"Could not determine configured premium for {strike}, using fallback threshold_entry={threshold_entry}")
+            
             if (
                 curr["supertrend_signal"] == constants.TRADE_DIRECTION_BUY
                 and prev["supertrend_signal"] == constants.TRADE_DIRECTION_BUY

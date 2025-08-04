@@ -546,15 +546,16 @@ def get_max_premium_from_config(trade_config: dict, symbol: str, current_dt: 'da
     Supports dynamic selection via max_premium_selection in config for weekly/monthly expiries.
     Returns None if:
       - No entry found for the specific weekday/week
-      - Selected premium exceeds max_threshold
       - max_premium_selection is not configured properly
-    Logs the expiry_type, detection path, and selected premium.
+    Returns the configured premium value without any validation or threshold processing.
+    Validation should be performed separately by the calling code.
+    
     Args:
         trade_config (dict): The trade config dict.
         symbol (str): The trading symbol (e.g., "NIFTY", "NSE:BANKNIFTY", etc).
         current_dt (datetime): The current datetime (IST).
     Returns:
-        Optional[int]: The selected max_premium value or None if not found/invalid.
+        Optional[int]: The configured max_premium value or None if not found.
     """
     # --- Symbol sanitization (same as get_atm_strike_symbol in swing_utils.py) ---
     orig_symbol = symbol
@@ -619,18 +620,8 @@ def get_max_premium_from_config(trade_config: dict, symbol: str, current_dt: 'da
         result = None
         details = "exception fallback"
     
-    # Check against max_threshold if result is valid
-    if result is not None:
-        max_threshold = max_premium_selection.get("max_threshold") if isinstance(max_premium_selection, dict) else None
-        if max_threshold is not None and result > max_threshold:
-            logger.warning(
-                f"[get_max_premium_from_config] Selected premium {result} exceeds max_threshold {max_threshold}, returning None (symbol={orig_symbol})"
-            )
-            result = None
-            details += f", exceeded max_threshold={max_threshold}"
-    
     logger.debug(
-        f"[get_max_premium_from_config] symbol={orig_symbol} (sanitized={symbol_upper}), expiry_type={expiry_type} ({expiry_reason}), {details}, selected max_premium={result}"
+        f"[get_max_premium_from_config] symbol={orig_symbol} (sanitized={symbol_upper}), expiry_type={expiry_type} ({expiry_reason}), {details}, returning_configured_premium={result}"
     )
     return result
 

@@ -2010,3 +2010,40 @@ class SwingHighLowSellStrategy(StrategyBase):
         except Exception as e:
             logger.error(f"Error in evaluate_signal: {e}", exc_info=True)
             return None
+
+    async def fetch_hedge_symbol(self, broker, strike, trade_config):
+        """
+        Identify the hedge symbol from the option chain for the given strike, based on opp_side_max_premium.
+
+        :param broker: Broker instance.
+        :param strike: The strike symbol for which to find the hedge (e.g., 'NIFTY25JUL24500CE').
+        :param trade_config: Trade configuration dictionary.
+        :return: The hedge symbol or None if not found.
+        """
+        try:
+            # Use the passed strike symbol to infer option type
+            opp_side = constants.OPTION_TYPE_CALL if constants.OPTION_TYPE_PUT in strike else constants.OPTION_TYPE_PUT
+            max_premium = trade_config.get("opp_side_max_premium") or self.trade.get("opp_side_max_premium")
+            logger.info(f"Identifying hedge symbol for {opp_side} with max premium: {max_premium}")
+            # Assume broker.get_option_chain returns all options for the relevant symbol family
+            option_chain_response = await broker.get_option_chain(strike, trade_config.get("max_strikes", 40))
+            option_chain_df = pd.DataFrame(option_chain_response['data']['optionsChain'])
+            # Filter for the opposite side
+            hedge_options = option_chain_df[
+                (option_chain_df[constants.COLUMN_OPTION_TYPE] == opp_side) &
+                (pd.to_numeric(option_chain_df[constants.COLUMN_LTP], errors='coerce') <= max_premium)
+            ]
+            if hedge_options.empty:
+                logger.warning("No suitable hedge options found.")
+                return None
+            # Select the closest strike price (highest LTP under max_premium)
+            hedge_options[constants.COLUMN_LTP] = pd.to_numeric(
+                hedge_options[constants.COLUMN_LTP], errors='coerce'
+            )
+            hedge_option = hedge_options.loc[hedge_options[constants.COLUMN_LTP].idxmax()]
+            hedge_symbol = hedge_option[constants.COLUMN_SYMBOL]
+            logger.info(f"Hedge symbol identified: {hedge_symbol}")
+            return hedge_symbol
+        except Exception as error:
+            logger.error(f"Error fetching hedge symbol: {error}")
+            return None

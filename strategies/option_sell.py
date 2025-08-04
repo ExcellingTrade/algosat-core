@@ -122,7 +122,7 @@ class OptionSellStrategy(StrategyBase):
         await self.dp._ensure_broker()
 
     async def setup(self) -> None:
-        """One-time setup: modular workflow for OptionBuy."""
+        """One-time setup: modular workflow for OptionSell."""
         if self._strikes:
             return
         trade = self.trade
@@ -131,7 +131,7 @@ class OptionSellStrategy(StrategyBase):
         max_strikes = trade.get("max_strikes", 40)
         symbol = self.symbol
         if not symbol:
-            logger.error("No symbol configured for OptionBuy strategy.")
+            logger.error("No symbol configured for OptionSell strategy.")
             return
         today_dt = get_ist_datetime()
         # Dynamically select max_premium (expiry_type is auto-detected inside)
@@ -157,7 +157,7 @@ class OptionSellStrategy(StrategyBase):
         from_date = candle_times["from_date"]
         to_date = candle_times["to_date"]
         history_data = await fetch_option_chain_and_first_candle_history(
-            self.dp, symbol, interval_minutes, max_strikes, from_date, to_date, bot_name="OptionBuy"
+            self.dp, symbol, interval_minutes, max_strikes, from_date, to_date, bot_name="OptionSell"
         )
         if not history_data or all(h is None for h in history_data):
             history_data = None
@@ -421,7 +421,7 @@ class OptionSellStrategy(StrategyBase):
                     logger.error(f"At least one hedge order broker response failed/cancelled/rejected, aborting entry. Details: {hedge_order_result}")
                     hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
                     if hedge_order_id:
-                        await self.exit_order(hedge_order_id)
+                        await self.order_manager.exit_order(hedge_order_id, exit_reason="Hedge failure")
                     return None
 
             else:
@@ -493,7 +493,20 @@ class OptionSellStrategy(StrategyBase):
                     f"Skipping signal for {strike} at {curr.get('timestamp')}: Last signal direction is also SELL, not allowing stacking same direction."
                 )
                 return None
-            threshold_entry = config.get('threshold_entry', 500)
+            
+            # Calculate threshold_entry using configured premium + max_threshold
+            today_dt = get_ist_datetime()
+            configured_premium = get_max_premium_from_config(config, self.symbol, today_dt)
+            max_premium_selection = config.get("max_premium_selection", {})
+            max_threshold = max_premium_selection.get("max_threshold", 0) if isinstance(max_premium_selection, dict) else 0
+            
+            if configured_premium is not None:
+                threshold_entry = configured_premium + max_threshold
+                logger.debug(f"Calculated threshold_entry: configured_premium={configured_premium} + max_threshold={max_threshold} = {threshold_entry} for {strike}")
+            else:
+                threshold_entry = 500  # Fallback value
+                logger.warning(f"Could not determine configured premium for {strike}, using fallback threshold_entry={threshold_entry}")
+
             if (
                 curr["supertrend_signal"] == constants.TRADE_DIRECTION_SELL
                 and prev["supertrend_signal"] == constants.TRADE_DIRECTION_SELL
