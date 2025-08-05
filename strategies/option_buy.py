@@ -38,34 +38,57 @@ from algosat.common.broker_utils import get_trade_day
 from algosat.common import constants
 import json
 import os
+import time
+import asyncio
 from algosat.core.signal import TradeSignal, SignalType
 from algosat.models.strategy_config import StrategyConfig
-from algosat.core.db import AsyncSessionLocal, get_open_orders_for_symbol_and_tradeday
+from algosat.core.db import AsyncSessionLocal, get_open_orders_for_symbol_and_tradeday, get_all_orders_for_strategy_symbol_and_tradeday
 from algosat.core.strategy_symbol_utils import get_strategy_symbol_id
-from algosat.core.db import get_open_orders_for_strategy_symbol_and_tradeday
 
 logger = get_logger(__name__)
 
 IDENTIFIED_STRIKES_FILE = "/opt/algosat/Files/cache/identified_strikes.json"
+LOCK_FILE = IDENTIFIED_STRIKES_FILE + ".lock"
 
 def ensure_cache_dir():
     cache_dir = os.path.dirname(IDENTIFIED_STRIKES_FILE)
     os.makedirs(cache_dir, exist_ok=True)
 
-def load_identified_strikes_cache():
-    ensure_cache_dir()
-    if os.path.exists(IDENTIFIED_STRIKES_FILE):
-        with open(IDENTIFIED_STRIKES_FILE, "r") as f:
-            try:
-                return json.load(f)
-            except Exception:
-                return {}
-    return {}
+async def acquire_lock(lock_file, timeout=30):
+    start_time = time.time()
+    while os.path.exists(lock_file):
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Could not acquire lock on {lock_file} within {timeout} seconds.")
+        await asyncio.sleep(0.1)
+    with open(lock_file, 'w') as f:
+        f.write(str(os.getpid()))
 
-def save_identified_strikes_cache(cache):
+def release_lock(lock_file):
+    if os.path.exists(lock_file):
+        os.remove(lock_file)
+
+async def load_identified_strikes_cache():
     ensure_cache_dir()
-    with open(IDENTIFIED_STRIKES_FILE, "w") as f:
-        json.dump(cache, f, indent=2, default=str)
+    await acquire_lock(LOCK_FILE)
+    try:
+        if os.path.exists(IDENTIFIED_STRIKES_FILE):
+            with open(IDENTIFIED_STRIKES_FILE, "r") as f:
+                try:
+                    return json.load(f)
+                except Exception:
+                    return {}
+        return {}
+    finally:
+        release_lock(LOCK_FILE)
+
+async def save_identified_strikes_cache(cache):
+    ensure_cache_dir()
+    await acquire_lock(LOCK_FILE)
+    try:
+        with open(IDENTIFIED_STRIKES_FILE, "w") as f:
+            json.dump(cache, f, indent=2, default=str)
+    finally:
+        release_lock(LOCK_FILE)
 
 def cleanup_old_strike_cache(cache, days=1):
     now = datetime.now()
@@ -150,13 +173,13 @@ class OptionBuyStrategy(StrategyBase):
         # 2. Calculate first candle data using the correct trade day
         trade_day = get_trade_day(get_ist_datetime())
         # 3. Fetch option chain and identify strikes
-        cache = load_identified_strikes_cache()
+        cache = await load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
         cleanup_old_strike_cache(cache, days=10)
         if cache_key in cache:
             self._strikes = cache[cache_key]
             logger.info(f"Loaded identified strikes from persistent cache: {self._strikes}")
-            save_identified_strikes_cache(cache)
+            await save_identified_strikes_cache(cache)
             return
         candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
         from_date = candle_times["from_date"]
@@ -175,7 +198,7 @@ class OptionBuyStrategy(StrategyBase):
             self._strikes.append(pe_strike)
         if self._strikes:
             cache[cache_key] = self._strikes
-            save_identified_strikes_cache(cache)
+            await save_identified_strikes_cache(cache)
             logger.info(f"Cached identified strikes persistently: {self._strikes}")
         if not self._strikes:
             logger.error("Failed to identify any valid strike prices. Setup failed.")
@@ -251,7 +274,8 @@ class OptionBuyStrategy(StrategyBase):
 
     async def check_trade_limits(self) -> tuple[bool, str]:
         """
-        Check if the strategy has exceeded maximum trades or maximum loss trades configured limits.
+        Check if the symbol has exceeded maximum trades or maximum loss trades configured limits.
+        Now symbol-based instead of strategy-based.
         Returns (can_trade: bool, reason: str)
         """
         try:
@@ -263,18 +287,16 @@ class OptionBuyStrategy(StrategyBase):
             if max_trades is None and max_loss_trades is None:
                 return True, "No trade limits configured"
             
-            strategy_id = getattr(self.cfg, 'strategy_id', None)
-            if not strategy_id:
-                logger.warning("No strategy_id found in config, cannot check trade limits")
-                return True, "No strategy_id found, allowing trade"
+            symbol_id = getattr(self.cfg, 'symbol_id', None)
+            if not symbol_id:
+                logger.warning("No symbol_id found in config, cannot check trade limits")
+                return True, "No symbol_id found, allowing trade"
             
             trade_day = get_trade_day(get_ist_datetime())
             
             async with AsyncSessionLocal() as session:
-                from algosat.core.db import get_all_orders_for_strategy_and_tradeday
-                
-                # Get all orders for this strategy on the current trade day
-                all_orders = await get_all_orders_for_strategy_and_tradeday(session, strategy_id, trade_day)
+                # Get all orders for this strategy symbol on the current trade day
+                all_orders = await get_all_orders_for_strategy_symbol_and_tradeday(session, symbol_id, trade_day)
                 
                 # Count completed trades (both profitable and loss trades)
                 completed_statuses = [
@@ -308,17 +330,17 @@ class OptionBuyStrategy(StrategyBase):
                 
                 # Check max_trades limit
                 if max_trades is not None and total_completed_trades >= max_trades:
-                    reason = f"Maximum trades limit reached: {total_completed_trades}/{max_trades}"
+                    reason = f"Maximum trades limit reached for symbol: {total_completed_trades}/{max_trades}"
                     logger.info(reason)
                     return False, reason
                 
                 # Check max_loss_trades limit
                 if max_loss_trades is not None and total_loss_trades >= max_loss_trades:
-                    reason = f"Maximum loss trades limit reached: {total_loss_trades}/{max_loss_trades}"
+                    reason = f"Maximum loss trades limit reached for symbol: {total_loss_trades}/{max_loss_trades}"
                     logger.info(reason)
                     return False, reason
                 
-                return True, f"Trade limits OK - Completed: {total_completed_trades}/{max_trades or 'unlimited'}, Loss: {total_loss_trades}/{max_loss_trades or 'unlimited'}"
+                return True, f"Trade limits OK for symbol - Completed: {total_completed_trades}/{max_trades or 'unlimited'}, Loss: {total_loss_trades}/{max_loss_trades or 'unlimited'}"
                 
         except Exception as e:
             logger.error(f"Error checking trade limits: {e}")

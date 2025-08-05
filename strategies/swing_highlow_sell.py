@@ -1073,83 +1073,174 @@ class SwingHighLowSellStrategy(StrategyBase):
             logger.error(f"Error in fetch_history_data: {e}", exc_info=True)
             return {}
 
-    async def process_order(self, signal_payload, data, strike):
+    async def process_order(self, signal_payload: TradeSignal, data, strike):
         """
-        Place an order using the order_manager, passing config as in option_sell.py.
-        Returns order info dict if an order is placed, else None.
-        This is a SELL strategy: sells PE on UP breakouts, sells CE on DOWN breakouts.
+        Process order using the new TradeSignal and BrokerManager logic.
+        Always pass self.cfg (StrategyConfig) as the config to order_manager.place_order for correct DB logging.
+        Returns order info dict with local DB order_id if an order is placed, else None.
+        Now also fetches hedge symbol and logs it.
         """
-        if signal_payload:
-            ts = data.iloc[-1].get('timestamp', 'N/A') if hasattr(data, 'iloc') and len(data) > 0 else signal_payload.get('timestamp', 'N/A')
-            logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
-            # Fetch hedge symbol for this strike (pass strike directly)
-            hedge_symbol = await self.fetch_hedge_symbol(self.order_manager.broker_manager, strike, self.trade)
-            if hedge_symbol:
-                logger.info(f"Hedge symbol for {strike}: {hedge_symbol}")
-                hedge_signal_payload = TradeSignal(
-                    symbol=hedge_symbol,
-                    side="BUY",
-                    signal_type=SignalType.HEDGE_ENTRY,
-                    signal_time=signal_payload.signal_time,
-                    signal_direction="hedge buy",
-                    lot_qty=signal_payload.lot_qty,
-                )
-                # Build order request for hedge
-                hedge_order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
-                    hedge_signal_payload, self.cfg
-                )
-                # Place hedge order
-                hedge_order_result = await self.order_manager.place_order(
-                    self.cfg,
-                    hedge_order_request,
-                    strategy_name=None
-                )
-                logger.debug(f"Hedge order result for {hedge_symbol}: {hedge_order_result}")
-                 # Check if any broker response is failed/cancelled/rejected
-                failed_statuses = {"FAILED", "CANCELLED", "REJECTED"}
-                broker_responses = hedge_order_result.get('broker_responses') if hedge_order_result else None
-                any_failed = False
-                if broker_responses and isinstance(broker_responses, dict):
-                    statuses = [str(resp.get('status')) if resp else None for resp in broker_responses.values()]
-                    statuses = [s.split('.')[-1].replace("'", "").replace(">", "").upper() if s else None for s in statuses]
-                    if any(s in failed_statuses for s in statuses if s):
-                        any_failed = True
-                if any_failed:
-                    logger.error(f"At least one hedge order broker response failed/cancelled/rejected, aborting entry. Details: {hedge_order_result}")
-                    hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
-                    if hedge_order_id:
-                        await self.exit_order(hedge_order_id)
-                    return None
+        if not signal_payload:
+            logger.debug(f"No signal for {strike} at {data.iloc[-1].get('timestamp', 'N/A')}")
+            return None
 
-            else:
-                logger.error(f"No hedge symbol found for {strike}")
+        # Validate that signal_payload contains a valid option symbol
+        if not signal_payload.symbol or not any(opt_type in str(signal_payload.symbol) for opt_type in [constants.OPTION_TYPE_CALL, constants.OPTION_TYPE_PUT]):
+            logger.error(f"❌ Invalid option symbol in signal_payload: {signal_payload.symbol}")
+            return None
+
+        ts = data.iloc[-1].get('timestamp', 'N/A')
+        logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
+
+        # 1. Fetch and place hedge order first
+        hedge_order_result = None
+        try:
+            # Use signal_payload.symbol (the actual option symbol) for hedge calculation
+            option_symbol = signal_payload.symbol
+            logger.info(f"🔍 Fetching hedge symbol for {option_symbol}")
+            hedge_symbol = await self.fetch_hedge_symbol(self.order_manager.broker_manager, option_symbol, self.trade)
+            if not hedge_symbol:
+                logger.error(f"❌ No hedge symbol found for {option_symbol}, aborting trade.")
                 return None
 
+            logger.info(f"🛡️ Hedge symbol identified for {option_symbol}: {hedge_symbol}")
+            
+            hedge_signal_payload = TradeSignal(
+                symbol=hedge_symbol,
+                side="BUY",
+                signal_type=SignalType.HEDGE_ENTRY,
+                signal_time=signal_payload.signal_time,
+                signal_direction="hedge buy",
+                lot_qty=signal_payload.lot_qty,
+            )
+            
+            logger.debug(f"Building hedge order request for {hedge_symbol}")
+            hedge_order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
+                hedge_signal_payload, self.cfg
+            )
+            
+            logger.info(f"📤 Placing hedge order for {hedge_symbol} (Main: {option_symbol})")
+            hedge_order_result = await self.order_manager.place_order(
+                self.cfg, hedge_order_request, strategy_name=None
+            )
+            logger.debug(f"Hedge order result for {hedge_symbol}: {hedge_order_result}")
 
+            # Check if hedge order failed
+            failed_statuses = {"FAILED", "CANCELLED", "REJECTED"}
+            broker_responses = hedge_order_result.get('broker_responses') if hedge_order_result else None
+            any_failed = False
+            
+            if broker_responses and isinstance(broker_responses, dict):
+                statuses = [str(resp.get('status')).split('.')[-1].replace("'>", "").upper() if resp else None for resp in broker_responses.values()]
+                logger.debug(f"Hedge order broker statuses for {hedge_symbol}: {statuses}")
+                
+                if any(s in failed_statuses for s in statuses if s):
+                    any_failed = True
+                    failed_hedge_brokers = [broker_id for broker_id, resp in broker_responses.items() 
+                                          if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                    logger.warning(f"❌ Hedge order has failed statuses for {hedge_symbol}: {[s for s in statuses if s in failed_statuses]}")
+                    logger.warning(f"❌ Failed hedge brokers: {failed_hedge_brokers}")
+            
+            if any_failed:
+                failed_brokers = [broker_id for broker_id, resp in broker_responses.items() 
+                                if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                logger.error(f"❌ Hedge order failed/cancelled/rejected for {hedge_symbol} (Main: {option_symbol}), aborting entire trade.")
+                logger.error(f"❌ Failed brokers: {failed_brokers}")
+                logger.error(f"❌ Hedge order details: {hedge_order_result}")
+                # No need to exit, as hedge already failed
+                return None
+            
+            hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
+            logger.info(f"✅ Hedge order placed successfully for {hedge_symbol} (Main: {option_symbol}). Hedge Order ID: {hedge_order_id}")
+
+        except Exception as e:
+            logger.error(f"💥 An exception occurred while placing the hedge order for {option_symbol}: {e}", exc_info=True)
+            logger.error(f"💥 Hedge symbol: {hedge_symbol if 'hedge_symbol' in locals() else 'Not determined'}")
+            return None  # Abort if hedge placement fails
+
+        # 2. Place main SELL order and handle potential failure
+        main_order_result = None
+        try:
+            logger.info(f"Building order request for main SELL order: {option_symbol}")
             order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
                 signal_payload, self.cfg
             )
-            result = await self.order_manager.place_order(
-                self.cfg,
-                order_request,
-                strategy_name=None
+            logger.info(f"Placing main SELL order for {option_symbol} with order_request: {order_request}")
+            
+            main_order_result = await self.order_manager.place_order(
+                self.cfg, order_request, strategy_name=None
             )
-            if result:
-                logger.info(f"Order placed successfully: {result}")
-                # Convert OrderRequest to dict for merging
-                if hasattr(order_request, 'dict'):
-                    order_request_dict = order_request.dict()
-                else:
-                    order_request_dict = dict(order_request)
-                return {**order_request_dict, **result}
+            logger.debug(f"Main SELL order result for {option_symbol}: {main_order_result}")
+            
+            # Check if main order failed
+            main_broker_responses = main_order_result.get('broker_responses') if main_order_result else None
+            main_any_failed = False
+            
+            if main_broker_responses and isinstance(main_broker_responses, dict):
+                main_statuses = [str(resp.get('status')).split('.')[-1].replace("'>", "").upper() if resp else None for resp in main_broker_responses.values()]
+                logger.debug(f"Main order broker statuses for {option_symbol}: {main_statuses}")
+                
+                if any(s in failed_statuses for s in main_statuses if s):
+                    main_any_failed = True
+                    logger.warning(f"Main SELL order has failed statuses for {option_symbol}: {[s for s in main_statuses if s in failed_statuses]}")
+
+            if main_any_failed:
+                failed_brokers = [broker_id for broker_id, resp in main_broker_responses.items() 
+                                if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                raise Exception(f"Main SELL order failed/cancelled/rejected for {option_symbol}. Failed brokers: {failed_brokers}. Details: {main_order_result}")
+
+            logger.info(f"✅ Main SELL order placed successfully for {option_symbol}. Order ID: {main_order_result.get('order_id') or main_order_result.get('id')}")
+            return main_order_result
+
+        except Exception as e:
+            logger.critical(f"🚨 CRITICAL: Main SELL order failed for {option_symbol} after hedge was placed. Attempting to exit hedge. Error: {e}", exc_info=True)
+            
+            # Extract hedge order details for cleanup
+            hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
+            hedge_broker_responses = hedge_order_result.get('broker_responses') if hedge_order_result else None
+            
+            logger.error(f"💀 Orphaned hedge order detected - Strike: {option_symbol}, Hedge Order ID: {hedge_order_id}")
+            logger.error(f"💀 Hedge order details: {hedge_order_result}")
+            
+            if hedge_order_id:
+                try:
+                    logger.warning(f"🔄 Attempting to exit orphaned hedge order {hedge_order_id} for {option_symbol}")
+                    await self.order_manager.exit_order(hedge_order_id, exit_reason="Main order failure")
+                    logger.info(f"✅ Successfully initiated exit for orphaned hedge order {hedge_order_id} (Strike: {option_symbol})")
+                    
+                    # Log hedge order exit confirmation
+                    if hedge_broker_responses:
+                        logger.info(f"📊 Hedge order cleanup details - Brokers affected: {list(hedge_broker_responses.keys())}")
+                        
+                except Exception as exit_e:
+                    logger.error(f"💥 FATAL: Failed to exit orphaned hedge order {hedge_order_id} for {option_symbol}. "
+                               f"Manual intervention required immediately! Error: {exit_e}", exc_info=True)
+                    logger.error(f"💥 MANUAL ACTION REQUIRED: Hedge order {hedge_order_id} for {option_symbol} is orphaned and could not be auto-exited")
+                    
+                    # Log additional context for manual intervention
+                    if hedge_broker_responses:
+                        logger.error(f"💥 Manual cleanup required for brokers: {list(hedge_broker_responses.keys())}")
+                        for broker_id, response in hedge_broker_responses.items():
+                            broker_order_id = response.get('broker_order_id') if response else None
+                            logger.error(f"💥 Broker {broker_id}: Order ID {broker_order_id}, Status: {response.get('status') if response else 'Unknown'}")
             else:
-                logger.error(f"Order placement failed: {result}")
-                return None
-        else:
-            logger.debug(f"No signal for {strike}.")
+                logger.error(f"💥 FATAL: Could not find order_id for orphaned hedge order for {option_symbol}. "
+                           f"Manual intervention required immediately!")
+                logger.error(f"💥 MANUAL ACTION REQUIRED: Hedge order details for manual cleanup: {hedge_order_result}")
+                
+                # Log broker-specific details for manual cleanup
+                if hedge_broker_responses:
+                    logger.error(f"💥 Manual cleanup required - Hedge brokers: {list(hedge_broker_responses.keys())}")
+                    for broker_id, response in hedge_broker_responses.items():
+                        if response:
+                            broker_order_id = response.get('broker_order_id')
+                            status = response.get('status')
+                            logger.error(f"💥 Broker {broker_id}: Order ID {broker_order_id}, Status: {status}")
+                        else:
+                            logger.error(f"💥 Broker {broker_id}: No response data available")
+            
             return None
-
-
+        
     async def evaluate_exit(self, order_row):
         """
         Evaluate exit for a given order_row with prioritized exit conditions:
@@ -1944,27 +2035,58 @@ class SwingHighLowSellStrategy(StrategyBase):
                     logger.error(f"Error calculating ATR for target: {e}")
                 
                 if atr_value is not None:
+                    target_points = float(atr_value) * float(effective_atr_multiplier)
                     if breakout_type == "CE":
-                        # For CE: Target = swing_high + (ATR * effective_multiplier)
-                        target_spot_level = float(entry_spot_swing_high) + (float(atr_value) * float(effective_atr_multiplier))
+                        # For CE SELL: Target = swing_high + entry_buffer + (ATR * effective_multiplier)
+                        target_spot_level = float(entry_spot_swing_high) + float(entry_buffer) + target_points
                     else:
-                        # For PE: Target = swing_low - (ATR * effective_multiplier)
-                        target_spot_level = float(entry_spot_swing_low) - (float(atr_value) * float(effective_atr_multiplier))
-                    logger.info(f"Target calculated using ATR : {target_spot_level} (ATR={atr_value}, multiplier={effective_atr_multiplier})")
+                        # For PE SELL: Target = swing_low - entry_buffer - (ATR * effective_multiplier)
+                        target_spot_level = float(entry_spot_swing_low) - float(entry_buffer) - target_points
+                    logger.info(f"Target calculated using ATR: {target_spot_level} (effective_multiplier={effective_atr_multiplier}, target_points={target_points})")
                 else:
                     logger.warning("Could not calculate ATR for target, using fallback")
                     target_spot_level = None
+                    target_points = None
             elif target_type == "fixed":
-                fixed_points = target_cfg.get("fixed_points", 0)
+                target_points = target_cfg.get("fixed_points", 0)
                 if breakout_type == "CE":
-                    # For CE: Target = swing_high + fixed_points
-                    target_spot_level = float(entry_spot_swing_high) + float(fixed_points)
+                    # For CE SELL: Target = swing_high + entry_buffer + fixed_points
+                    target_spot_level = float(entry_spot_swing_high) + float(entry_buffer) + float(target_points)
                 else:
-                    # For PE: Target = swing_low - fixed_points  
-                    target_spot_level = float(entry_spot_swing_low) - float(fixed_points)
-                logger.info(f"Target calculated using fixed points: {target_spot_level} (fixed_points={fixed_points})")
+                    # For PE SELL: Target = swing_low - entry_buffer - fixed_points  
+                    target_spot_level = float(entry_spot_swing_low) - float(entry_buffer) - float(target_points)
+                logger.info(f"Target calculated using fixed points: {target_spot_level} (fixed_points={target_points})")
             else:
                 target_spot_level = None
+                target_points = None
+
+            # Validate target direction and minimum distance before proceeding with RSI calculation
+            # For SELL strategy: opposite logic compared to BUY strategy
+            if target_spot_level is not None and target_points is not None:
+                # Check if entry_spot_price is in correct direction relative to target for SELL strategy
+                direction_valid = False
+                if breakout_type == "CE" and direction == "DOWN":
+                    # For CE SELL (down breakout): entry_spot_price should be above target_spot_level
+                    direction_valid = float(entry_spot_price) > float(target_spot_level)
+                elif breakout_type == "PE" and direction == "UP":
+                    # For PE SELL (up breakout): entry_spot_price should be below target_spot_level
+                    direction_valid = float(entry_spot_price) < float(target_spot_level)
+                
+                if not direction_valid:
+                    logger.info(f"🚫 Target direction validation failed for SELL {breakout_type} {direction} trade: entry_spot_price={entry_spot_price}, target_spot_level={target_spot_level}. Skipping trade.")
+                    return None
+                
+                # Check minimum distance requirement (75% of target points)
+                distance_required = float(target_points) * 0.75
+                actual_distance = abs(float(target_spot_level) - float(entry_spot_price))
+                
+                if actual_distance < distance_required:
+                    logger.info(f"🚫 Insufficient target distance for SELL {breakout_type} {direction} trade: actual_distance={actual_distance:.2f}, required={distance_required:.2f} (75% of target_points={target_points}). Skipping trade to ensure adequate room.")
+                    return None
+                
+                logger.info(f"✅ SELL Target validation passed: direction_valid={direction_valid}, actual_distance={actual_distance:.2f}, required_distance={distance_required:.2f}")
+            else:
+                logger.warning("Target spot level or target points not calculated, skipping target validation")
 
             # Calculate entry RSI using entry timeframe
             entry_rsi_value = None
@@ -2032,8 +2154,8 @@ class SwingHighLowSellStrategy(StrategyBase):
         :return: The hedge symbol or None if not found.
         """
         try:
-            # Use the passed strike symbol to infer option type
-            opp_side = constants.OPTION_TYPE_CALL if constants.OPTION_TYPE_PUT in strike else constants.OPTION_TYPE_PUT
+            # Use the passed strike symbol to infer option type - FIXED LOGIC
+            opp_side = constants.OPTION_TYPE_PUT if constants.OPTION_TYPE_CALL in strike else constants.OPTION_TYPE_CALL
             max_premium = trade_config.get("opp_side_max_premium") or self.trade.get("opp_side_max_premium")
             logger.info(f"Identifying hedge symbol for {opp_side} with max premium: {max_premium}")
             # Assume broker.get_option_chain returns all options for the relevant symbol family

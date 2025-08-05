@@ -203,7 +203,7 @@ class OrderMonitor:
                         hour, minute = map(int, square_off_time_str.split(':'))
                         square_off_time = dt_time(hour, minute)
                         
-                        if current_time_only <= square_off_time:
+                        if current_time_only >= square_off_time:
                             logger.info(f"OrderMonitor: Square-off time {square_off_time_str} reached for non-DELIVERY order_id={self.order_id}. Exiting order.")
                             try:
                                 await self.order_manager.exit_order(self.order_id, exit_reason=f"Square-off time {square_off_time_str} reached")
@@ -220,7 +220,7 @@ class OrderMonitor:
             # For DELIVERY orders: stop monitoring at 3:30 PM
             elif product_type and product_type.upper() == 'DELIVERY':
                 market_close_time = dt_time(15, 30)  # 3:30 PM
-                if current_time_only <= market_close_time:
+                if current_time_only >= market_close_time:
                     logger.info(f"OrderMonitor: Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
                     self.stop()
                     return
@@ -476,6 +476,14 @@ class OrderMonitor:
             current_order_status = last_main_status if last_main_status else current_status
             if current_order_status == OrderStatus.OPEN or current_order_status == 'OPEN':
                 await self._check_price_based_exit(order_row, strategy, current_order_status, current_ltp)
+            
+            # --- Check for PENDING exit statuses from signal monitor ---
+            # If signal monitor set a PENDING exit status, complete the exit with full broker details
+            await self._check_and_complete_pending_exits(order_row, current_order_status or last_main_status)
+            
+            # If the order monitor was stopped during PENDING exit processing, exit immediately
+            if not self._running:
+                return
                 
             # --- monitor positions if status is OPEN ---
             # Only for OPEN status, check broker positions and update order status/PnL based on positions
@@ -884,54 +892,66 @@ class OrderMonitor:
                         logger.error(f"OrderMonitor: Error in per-trade loss validation for order_id={self.order_id}: {e}")
                     
                     # If all positions are squared off, update status to CLOSED/EXITED
+                    # Only update to CLOSED if order is currently in a "running" state
                     if all_closed and entry_broker_db_orders:
-                        try:
-                            from datetime import datetime, timezone
-                            from algosat.core.db import AsyncSessionLocal, update_rows_in_table, get_broker_executions_for_order
-                            from algosat.core.dbschema import orders
-                            # Calculate VWAP exit price for each broker
-                            async with AsyncSessionLocal() as session:
-                                exit_execs = await get_broker_executions_for_order(session, self.order_id, side='EXIT')
-                            broker_vwap = {}
-                            broker_qty = {}
-                            for ex in exit_execs:
-                                broker_id = ex.get('broker_id')
-                                exec_price = float(ex.get('execution_price') or 0)
-                                exec_qty = int(ex.get('executed_quantity') or 0)
-                                if broker_id not in broker_vwap:
-                                    broker_vwap[broker_id] = 0.0
-                                    broker_qty[broker_id] = 0
-                                broker_vwap[broker_id] += exec_price * exec_qty
-                                broker_qty[broker_id] += exec_qty
-                            # Compute VWAP per broker
-                            broker_exit_prices = {}
-                            for broker_id in broker_vwap:
-                                qty = broker_qty[broker_id]
-                                vwap = broker_vwap[broker_id] / qty if qty > 0 else 0.0
-                                broker_exit_prices[broker_id] = vwap
-                            # For orders table, set exit_price as the average VWAP across all brokers
-                            total_vwap = sum(broker_vwap.values())
-                            total_qty = sum(broker_qty.values())
-                            avg_exit_price = total_vwap / total_qty if total_qty > 0 else None
-                            update_fields = {
-                                "status": "CLOSED",
-                                "exit_time": datetime.now(timezone.utc)
-                            }
-                            if avg_exit_price is not None:
-                                update_fields["exit_price"] = round(avg_exit_price, 2)
-                            await update_rows_in_table(
-                                target_table=orders,
-                                condition=orders.c.id == self.order_id,
-                                new_values=update_fields
-                            )
+                        # Get current order status to check if we should update to CLOSED
+                        current_order_status = order_row.get('status') if order_row else None
+                        allowed_statuses_for_closed = ['OPEN', 'AWAITING_ENTRY', str(OrderStatus.OPEN), str(OrderStatus.AWAITING_ENTRY)]
+                        
+                        if current_order_status in allowed_statuses_for_closed:
+                            try:
+                                from datetime import datetime, timezone
+                                from algosat.core.db import AsyncSessionLocal, update_rows_in_table, get_broker_executions_for_order
+                                from algosat.core.dbschema import orders
+                                # Calculate VWAP exit price for each broker
+                                async with AsyncSessionLocal() as session:
+                                    exit_execs = await get_broker_executions_for_order(session, self.order_id, side='EXIT')
+                                broker_vwap = {}
+                                broker_qty = {}
+                                for ex in exit_execs:
+                                    broker_id = ex.get('broker_id')
+                                    exec_price = float(ex.get('execution_price') or 0)
+                                    exec_qty = int(ex.get('executed_quantity') or 0)
+                                    if broker_id not in broker_vwap:
+                                        broker_vwap[broker_id] = 0.0
+                                        broker_qty[broker_id] = 0
+                                    broker_vwap[broker_id] += exec_price * exec_qty
+                                    broker_qty[broker_id] += exec_qty
+                                # Compute VWAP per broker
+                                broker_exit_prices = {}
+                                for broker_id in broker_vwap:
+                                    qty = broker_qty[broker_id]
+                                    vwap = broker_vwap[broker_id] / qty if qty > 0 else 0.0
+                                    broker_exit_prices[broker_id] = vwap
+                                # For orders table, set exit_price as the average VWAP across all brokers
+                                total_vwap = sum(broker_vwap.values())
+                                total_qty = sum(broker_qty.values())
+                                avg_exit_price = total_vwap / total_qty if total_qty > 0 else None
+                                update_fields = {
+                                    "status": "CLOSED",
+                                    "exit_time": datetime.now(timezone.utc)
+                                }
+                                if avg_exit_price is not None:
+                                    update_fields["exit_price"] = round(avg_exit_price, 2)
+                                await update_rows_in_table(
+                                    target_table=orders,
+                                    condition=orders.c.id == self.order_id,
+                                    new_values=update_fields
+                                )
+                                logger.info(
+                                    f"OrderMonitor: All broker positions squared off for order_id={self.order_id}. "
+                                    f"Updated orders table with {update_fields} (VWAP exit_price: {avg_exit_price})"
+                                )
+                                self.stop()
+                                return
+                            except Exception as e:
+                                logger.error(f"OrderMonitor: Error updating order status to CLOSED: {e}")
+                        else:
                             logger.info(
-                                f"OrderMonitor: All broker positions squared off for order_id={self.order_id}. "
-                                f"Updated orders table with {update_fields} (VWAP exit_price: {avg_exit_price})"
+                                f"OrderMonitor: All positions squared off for order_id={self.order_id}, "
+                                f"but current status '{current_order_status}' is not in running state. "
+                                f"Skipping CLOSED status update to preserve exit status."
                             )
-                            self.stop()
-                            return
-                        except Exception as e:
-                            logger.error(f"OrderMonitor: Error updating order status to CLOSED: {e}")
                 except Exception as e:
                     logger.error(f"OrderMonitor: Error in broker position monitoring: {e}", exc_info=True)
             await asyncio.sleep(self.price_order_monitor_seconds)
@@ -1095,6 +1115,209 @@ class OrderMonitor:
                     
         except Exception as e:
             logger.error(f"OrderMonitor: ❌ Error in price-based exit check for order_id={self.order_id}: {e}", exc_info=True)
+
+    async def _check_and_complete_pending_exits(self, order_row, current_order_status):
+        """
+        Check for PENDING exit statuses set by signal monitor and complete the exit process.
+        This method calculates exit_price, exit_time, PnL and updates the final exit status.
+        
+        Args:
+            order_row: Order data from database
+            current_order_status: Current main order status
+        """
+        try:
+            if not order_row:
+                return
+                
+            order_status = order_row.get('status')
+            if not order_status or not order_status.endswith('_PENDING'):
+                return  # Not a pending exit status
+                
+            logger.info(f"OrderMonitor: 🔄 Processing PENDING exit status for order_id={self.order_id}: {order_status}")
+            
+            # Extract the final exit status by removing _PENDING suffix
+            final_exit_status = order_status.replace('_PENDING', '')
+            exit_reason = f"Signal monitor triggered: {final_exit_status}"
+            
+            # Get all broker positions to calculate current exit details
+            all_positions = await self._get_all_broker_positions_with_cache()
+            broker_positions_map = {}
+            if all_positions and isinstance(all_positions, dict):
+                broker_positions_map = all_positions
+                
+            # Get broker executions for this order
+            from algosat.core.db import AsyncSessionLocal, get_broker_executions_for_order
+            async with AsyncSessionLocal() as session:
+                entry_broker_db_orders = await get_broker_executions_for_order(session, self.order_id, side='ENTRY')
+            
+            # Calculate exit details from current broker positions
+            total_exit_value = 0.0
+            total_exit_qty = 0.0
+            total_pnl = 0.0
+            exit_details_available = False
+            
+            for bro in entry_broker_db_orders:
+                broker_status = bro.get('status', '').upper()
+                symbol_val = bro.get('symbol', None) or bro.get('tradingsymbol', None)
+                qty = bro.get('quantity', None)
+                
+                if (broker_status == 'FAILED' or symbol_val is None or qty is None or qty == 0):
+                    continue
+                    
+                broker_id = bro.get('broker_id', None)
+                broker_name = None
+                if broker_id is not None:
+                    try:
+                        broker_name = await self._get_broker_name_with_cache(broker_id)
+                    except Exception as e:
+                        logger.error(f"OrderMonitor: Could not get broker name for broker_id={broker_id}: {e}")
+                        continue
+                
+                # Find matching position for exit price calculation
+                positions = broker_positions_map.get(broker_name.lower() if broker_name else "", None)
+                if not positions:
+                    continue
+                    
+                # Find matching position
+                matched_pos = None
+                product = bro.get('product_type', None) or bro.get('product', None)
+                
+                if broker_name and broker_name.lower() == "zerodha":
+                    for pos in positions:
+                        try:
+                            product_match = (str(pos.get('product')).upper() == str(product).upper()) if product else True
+                            if pos.get('tradingsymbol') == symbol_val and product_match:
+                                matched_pos = pos
+                                break
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: Error matching Zerodha position: {e}")
+                            
+                elif broker_name and broker_name.lower() == "fyers":
+                    for pos in positions:
+                        try:
+                            product_match = (str(pos.get('productType')).upper() == str(product).upper()) if product else True
+                            if pos.get('symbol') == symbol_val and product_match:
+                                matched_pos = pos
+                                break
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: Error matching Fyers position: {e}")
+                
+                if matched_pos:
+                    exit_details_available = True
+                    our_qty = int(qty)
+                    
+                    # Get current exit price and PnL
+                    if broker_name and broker_name.lower() == "zerodha":
+                        broker_pnl = float(matched_pos.get('pnl', 0))
+                        # Calculate current exit price (entry_price + pnl_per_unit)
+                        entry_price = bro.get('execution_price', 0) or 0
+                        if our_qty > 0:
+                            pnl_per_unit = broker_pnl / our_qty
+                            current_exit_price = float(entry_price) + pnl_per_unit
+                        else:
+                            current_exit_price = float(entry_price)
+                            
+                    elif broker_name and broker_name.lower() == "fyers":
+                        broker_pnl = float(matched_pos.get('pl', 0))
+                        # For Fyers, try to get current market price or calculate from PnL
+                        current_exit_price = matched_pos.get('ltp', 0) or matched_pos.get('marketVal', 0) or 0
+                        if current_exit_price == 0:
+                            entry_price = bro.get('execution_price', 0) or 0
+                            if our_qty > 0:
+                                pnl_per_unit = broker_pnl / our_qty
+                                current_exit_price = float(entry_price) + pnl_per_unit
+                            else:
+                                current_exit_price = float(entry_price)
+                    else:
+                        current_exit_price = 0
+                        broker_pnl = 0
+                    
+                    # Accumulate for VWAP calculation
+                    total_exit_value += current_exit_price * our_qty
+                    total_exit_qty += our_qty
+                    total_pnl += broker_pnl
+                    
+                    logger.info(f"OrderMonitor: Exit details for {broker_name}: exit_price={current_exit_price}, qty={our_qty}, pnl={broker_pnl}")
+            
+            # Calculate final exit price (VWAP) and complete the exit
+            final_exit_price = total_exit_value / total_exit_qty if total_exit_qty > 0 else None
+            
+            if exit_details_available:
+                logger.info(f"OrderMonitor: ✅ Completing PENDING exit for order_id={self.order_id}")
+                logger.info(f"    Final Exit Price (VWAP): {final_exit_price}")
+                logger.info(f"    Total PnL: {total_pnl}")
+                logger.info(f"    Final Status: {final_exit_status}")
+                
+                # Update exit details in database
+                from datetime import datetime, timezone
+                from algosat.core.db import update_rows_in_table
+                from algosat.core.dbschema import orders
+                
+                exit_time = datetime.now(timezone.utc)
+                update_fields = {
+                    "status": final_exit_status,
+                    "exit_time": exit_time,
+                    "pnl": total_pnl
+                }
+                
+                if final_exit_price is not None:
+                    update_fields["exit_price"] = round(final_exit_price, 2)
+                
+                async with AsyncSessionLocal() as session:
+                    await update_rows_in_table(
+                        target_table=orders,
+                        condition=orders.c.id == self.order_id,
+                        new_values=update_fields
+                    )
+                
+                # Call order_manager.exit_order for broker-side cleanup
+                await self.order_manager.exit_order(
+                    parent_order_id=self.order_id,
+                    exit_reason=exit_reason,
+                    ltp=final_exit_price
+                )
+                
+                logger.critical(f"OrderMonitor: ✅ Successfully completed PENDING exit for order_id={self.order_id}. Status: {final_exit_status}, Exit Price: {final_exit_price}, PnL: {total_pnl}")
+                
+                # Stop monitoring this order
+                self.stop()
+                return
+                
+            else:
+                # Fallback: No position data available, just complete with order_manager.exit_order
+                logger.warning(f"OrderMonitor: No exit details available from positions for order_id={self.order_id}. Using fallback exit.")
+                
+                # Update status to final (without exit_price/exit_time details)
+                await self.order_manager.update_order_status_in_db(self.order_id, final_exit_status)
+                
+                # Call order_manager.exit_order for broker-side cleanup
+                await self.order_manager.exit_order(
+                    parent_order_id=self.order_id,
+                    exit_reason=exit_reason
+                )
+                
+                logger.warning(f"OrderMonitor: ⚠️ Completed PENDING exit for order_id={self.order_id} with limited details. Status: {final_exit_status}")
+                
+                # Stop monitoring this order
+                self.stop()
+                return
+            
+            # Clear order strategy cache since order status has changed
+            if self.order_id in self._order_strategy_cache:
+                del self._order_strategy_cache[self.order_id]
+                
+        except Exception as e:
+            logger.error(f"OrderMonitor: ❌ Error completing PENDING exit for order_id={self.order_id}: {e}", exc_info=True)
+            
+            # Fallback: Update to final status and exit
+            try:
+                final_exit_status = order_row.get('status', '').replace('_PENDING', '') if order_row else 'EXIT_CLOSED'
+                await self.order_manager.update_order_status_in_db(self.order_id, final_exit_status)
+                await self.order_manager.exit_order(self.order_id, exit_reason="PENDING exit - error recovery")
+                logger.error(f"OrderMonitor: ⚠️ Fallback exit completed for order_id={self.order_id}")
+                self.stop()
+            except Exception as e2:
+                logger.error(f"OrderMonitor: ❌ Failed fallback exit for order_id={self.order_id}: {e2}", exc_info=True)
 
 
     def _get_cache_lookup_order_id(self, broker_order_id, broker_name, product_type):
@@ -1309,13 +1532,54 @@ class OrderMonitor:
                 continue
 
             if should_exit:
-                logger.info(f"OrderMonitor: evaluate_exit returned True for order_id={self.order_id}. Exiting order.")
+                logger.info(f"OrderMonitor: evaluate_exit returned True for order_id={self.order_id}. Converting exit status to PENDING state.")
                 try:
-                    await self.order_manager.exit_order(self.order_id)
+                    # Get the current order status after evaluate_exit to see what exit type was set
+                    order_row_updated, _, _, _ = await self._get_order_and_strategy(self.order_id)
+                    current_status = order_row_updated.get('status') if order_row_updated else None
+                    
+                    # Convert specific exit statuses to PENDING equivalents
+                    pending_status = None
+                    if current_status:
+                        from algosat.common import constants
+                        status_mapping = {
+                            constants.TRADE_STATUS_EXIT_STOPLOSS: f"{constants.TRADE_STATUS_EXIT_STOPLOSS}_PENDING",
+                            constants.TRADE_STATUS_EXIT_TARGET: f"{constants.TRADE_STATUS_EXIT_TARGET}_PENDING", 
+                            constants.TRADE_STATUS_EXIT_REVERSAL: f"{constants.TRADE_STATUS_EXIT_REVERSAL}_PENDING",
+                            constants.TRADE_STATUS_EXIT_EOD: f"{constants.TRADE_STATUS_EXIT_EOD}_PENDING",
+                            constants.TRADE_STATUS_EXIT_EXPIRY: f"{constants.TRADE_STATUS_EXIT_EXPIRY}_PENDING",
+                        }
+                        
+                        pending_status = status_mapping.get(current_status)
+                    
+                    if pending_status:
+                        # Update status to PENDING equivalent 
+                        await self.order_manager.update_order_status_in_db(self.order_id, pending_status)
+                        logger.info(f"OrderMonitor: Updated order_id={self.order_id} status from {current_status} to {pending_status}. Price monitor will complete the exit.")
+                    else:
+                        # Fallback: call exit_order directly for non-standard exit statuses
+                        logger.warning(f"OrderMonitor: Unknown exit status {current_status} for order_id={self.order_id}. Using direct exit_order.")
+                        await self.order_manager.exit_order(self.order_id, exit_reason="Signal monitor exit - unknown status")
+                        self.stop()
+                        return
+                        
                 except Exception as e:
-                    logger.error(f"OrderMonitor: Failed to exit order {self.order_id}: {e}", exc_info=True)
-                self.stop()
-                return
+                    logger.error(f"OrderMonitor: Failed to convert exit status to PENDING for order_id={self.order_id}: {e}", exc_info=True)
+                    # Fallback to direct exit
+                    try:
+                        await self.order_manager.exit_order(self.order_id, exit_reason="Signal monitor exit - error in pending conversion")
+                    except Exception as e2:
+                        logger.error(f"OrderMonitor: Failed fallback exit for order_id={self.order_id}: {e2}", exc_info=True)
+                    self.stop()
+                    return
+                
+                # Don't stop monitoring yet - let price monitor complete the exit
+                logger.info(f"OrderMonitor: Signal monitor set PENDING status for order_id={self.order_id}. Continuing monitoring for price monitor to complete exit.")
+                
+            else:
+                # Clear order strategy cache since order status may have changed
+                if self.order_id in self._order_strategy_cache:
+                    del self._order_strategy_cache[self.order_id]
 
             await asyncio.sleep(self.signal_monitor_seconds)
 

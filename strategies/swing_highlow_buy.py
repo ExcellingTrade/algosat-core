@@ -1087,7 +1087,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                         
                                         if entry_df2 is None or len(entry_df2) < 2:
                                             logger.warning("❌ Not enough entry data for re-entry atomic confirmation")
-                                            await self.order_manager.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"), exit_reason="Re-entry atomic confirmation failed")
+                                            await self.order_manager.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"), exit_reason="Re-entry atomic confirmation failed", check_live_status=True)
                                             logger.info(f"🚪 Re-entry order exited due to confirmation failure: {re_entry_order_info}")
                                             return None
                                         
@@ -1202,7 +1202,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             # Store pullback level in database
             from algosat.core.re_entry_db_helpers import create_re_entry_tracking_record
             
-            success = await cxreate_re_entry_tracking_record(order_id, pullback_level)
+            success = await create_re_entry_tracking_record(order_id, pullback_level)
             
             if success:
                 logger.info(f"✅ Pullback level calculated and stored successfully:")
@@ -1872,9 +1872,10 @@ class SwingHighLowBuyStrategy(StrategyBase):
 
     async def check_trade_limits(self) -> tuple[bool, str]:
         """
-        Check if the strategy has exceeded maximum trades or maximum loss trades configured limits.
+        Check if the symbol has exceeded maximum trades or maximum loss trades configured limits.
         For smart level enabled strategies, uses limits from smart level.
         For normal strategies, uses limits from trade config.
+        Now symbol-based instead of strategy-based.
         Returns (can_trade: bool, reason: str)
         """
         try:
@@ -1905,18 +1906,18 @@ class SwingHighLowBuyStrategy(StrategyBase):
             if max_trades is None and max_loss_trades is None:
                 return True, f"No trade limits configured in {limits_source}"
             
-            strategy_id = getattr(self.cfg, 'strategy_id', None)
-            if not strategy_id:
-                logger.warning("No strategy_id found in config, cannot check trade limits")
-                return True, "No strategy_id found, allowing trade"
+            symbol_id = getattr(self.cfg, 'symbol_id', None)
+            if not symbol_id:
+                logger.warning("No symbol_id found in config, cannot check trade limits")
+                return True, "No symbol_id found, allowing trade"
             
             trade_day = get_trade_day(get_ist_datetime())
             
             async with AsyncSessionLocal() as session:
-                from algosat.core.db import get_all_orders_for_strategy_and_tradeday
+                from algosat.core.db import get_all_orders_for_strategy_symbol_and_tradeday
                 
-                # Get all orders for this strategy on the current trade day
-                all_orders = await get_all_orders_for_strategy_and_tradeday(session, strategy_id, trade_day)
+                # Get all orders for this strategy symbol on the current trade day
+                all_orders = await get_all_orders_for_strategy_symbol_and_tradeday(session, symbol_id, trade_day)
                 
                 # Count completed trades (both profitable and loss trades)
                 completed_statuses = [
@@ -1950,17 +1951,17 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 
                 # Check max_trades limit
                 if max_trades is not None and total_completed_trades >= max_trades:
-                    reason = f"Maximum trades limit reached: {total_completed_trades}/{max_trades} (from {limits_source})"
+                    reason = f"Maximum trades limit reached for symbol: {total_completed_trades}/{max_trades} (from {limits_source})"
                     logger.info(reason)
                     return False, reason
                 
                 # Check max_loss_trades limit
                 if max_loss_trades is not None and total_loss_trades >= max_loss_trades:
-                    reason = f"Maximum loss trades limit reached: {total_loss_trades}/{max_loss_trades} (from {limits_source})"
+                    reason = f"Maximum loss trades limit reached for symbol: {total_loss_trades}/{max_loss_trades} (from {limits_source})"
                     logger.info(reason)
                     return False, reason
                 
-                return True, f"Trade limits OK - Completed: {total_completed_trades}/{max_trades or 'unlimited'}, Loss: {total_loss_trades}/{max_loss_trades or 'unlimited'} (from {limits_source})"
+                return True, f"Trade limits OK for symbol - Completed: {total_completed_trades}/{max_trades or 'unlimited'}, Loss: {total_loss_trades}/{max_loss_trades or 'unlimited'} (from {limits_source})"
                 
         except Exception as e:
             logger.error(f"Error checking trade limits: {e}")
@@ -2159,27 +2160,59 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     logger.error(f"Error calculating ATR for target: {e}")
                 
                 if atr_value is not None:
+                    target_points = float(atr_value) * float(effective_atr_multiplier)
                     if breakout_type == "CE":
-                        # For CE: Target = swing_high + (ATR * effective_multiplier)
-                        target_spot_level = float(entry_spot_swing_high) + (float(atr_value) * float(effective_atr_multiplier))
+                        # For CE: Target = swing_high + entry_buffer + (ATR * effective_multiplier)
+                        target_spot_level = float(entry_spot_swing_high) + float(entry_buffer) + target_points
                     else:
-                        # For PE: Target = swing_low - (ATR * effective_multiplier)
-                        target_spot_level = float(entry_spot_swing_low) - (float(atr_value) * float(effective_atr_multiplier))
-                    logger.info(f"Target calculated using ATR: {target_spot_level} (effective_multiplier={effective_atr_multiplier})")
+                        # For PE: Target = swing_low - entry_buffer - (ATR * effective_multiplier)
+                        target_spot_level = float(entry_spot_swing_low) - float(entry_buffer) - target_points
+                    logger.info(f"Target calculated using ATR: {target_spot_level} (effective_multiplier={effective_atr_multiplier}, target_points={target_points})")
                 else:
                     logger.warning("Could not calculate ATR for target, using fallback")
                     target_spot_level = None
+                    target_points = None
             elif target_type == "fixed":
-                fixed_points = target_cfg.get("fixed_points", 0)
+                target_points = target_cfg.get("fixed_points", 0)
                 if breakout_type == "CE":
-                    # For CE: Target = swing_high + fixed_points
-                    target_spot_level = float(entry_spot_swing_high) + float(fixed_points)
+                    # For CE: Target = swing_high + entry_buffer + fixed_points
+                    target_spot_level = float(entry_spot_swing_high) + float(entry_buffer) + float(target_points)
                 else:
-                    # For PE: Target = swing_low - fixed_points  
-                    target_spot_level = float(entry_spot_swing_low) - float(fixed_points)
-                logger.info(f"Target calculated using fixed points: {target_spot_level} (fixed_points={fixed_points})")
+                    # For PE: Target = swing_low - entry_buffer - fixed_points  
+                    target_spot_level = float(entry_spot_swing_low) - float(entry_buffer) - float(target_points)
+                logger.info(f"Target calculated using fixed points: {target_spot_level} (fixed_points={target_points})")
             else:
                 target_spot_level = None
+                target_points = None
+
+            # Validate target direction and minimum distance before proceeding with RSI calculation
+            if target_spot_level is not None and target_points is not None:
+                # Check if entry_spot_price is in correct direction relative to target
+                direction_valid = False
+                if breakout_type == "CE" and direction == "UP":
+                    # For uptrend CE: entry_spot_price should be below target_spot_level
+                    direction_valid = float(entry_spot_price) < float(target_spot_level)
+                elif breakout_type == "PE" and direction == "DOWN":
+                    # For downtrend PE: entry_spot_price should be above target_spot_level
+                    direction_valid = float(entry_spot_price) > float(target_spot_level)
+                
+                if not direction_valid:
+                    logger.info(f"🚫 Target direction validation failed for {breakout_type} {direction} trade: entry_spot_price={entry_spot_price}, target_spot_level={target_spot_level}. Skipping trade.")
+                    return None
+                
+                # Check minimum distance requirement (75% of target points)
+                distance_required = float(target_points) * 0.75
+                actual_distance = abs(float(target_spot_level) - float(entry_spot_price))
+                
+                if actual_distance < distance_required:
+                    logger.info(f"🚫 Insufficient target distance for {breakout_type} {direction} trade: actual_distance={actual_distance:.2f}, required={distance_required:.2f} (75% of target_points={target_points}). Skipping trade to ensure adequate room.")
+                    return None
+                
+                logger.info(f"✅ Target validation passed: direction_valid={direction_valid}, actual_distance={actual_distance:.2f}, required_distance={distance_required:.2f}")
+            else:
+                logger.warning("Target spot level or target points not calculated, skipping target validation")
+
+            
 
             # Calculate entry RSI using entry timeframe
             entry_rsi_value = None

@@ -39,6 +39,8 @@ from algosat.common.broker_utils import get_trade_day
 from algosat.common import constants
 import json
 import os
+import time
+import asyncio
 from algosat.core.signal import TradeSignal, SignalType
 from algosat.models.strategy_config import StrategyConfig
 from algosat.core.db import AsyncSessionLocal, get_open_orders_for_symbol_and_tradeday
@@ -48,25 +50,47 @@ from algosat.core.db import get_open_orders_for_strategy_symbol_and_tradeday
 logger = get_logger(__name__)
 
 IDENTIFIED_STRIKES_FILE = "/opt/algosat/Files/cache/identified_strikes.json"
+LOCK_FILE = IDENTIFIED_STRIKES_FILE + ".lock"
 
 def ensure_cache_dir():
     cache_dir = os.path.dirname(IDENTIFIED_STRIKES_FILE)
     os.makedirs(cache_dir, exist_ok=True)
 
-def load_identified_strikes_cache():
-    ensure_cache_dir()
-    if os.path.exists(IDENTIFIED_STRIKES_FILE):
-        with open(IDENTIFIED_STRIKES_FILE, "r") as f:
-            try:
-                return json.load(f)
-            except Exception:
-                return {}
-    return {}
+async def acquire_lock(lock_file, timeout=30):
+    start_time = time.time()
+    while os.path.exists(lock_file):
+        if time.time() - start_time > timeout:
+            raise TimeoutError(f"Could not acquire lock on {lock_file} within {timeout} seconds.")
+        await asyncio.sleep(0.1)
+    with open(lock_file, 'w') as f:
+        f.write(str(os.getpid()))
 
-def save_identified_strikes_cache(cache):
+def release_lock(lock_file):
+    if os.path.exists(lock_file):
+        os.remove(lock_file)
+
+async def load_identified_strikes_cache():
     ensure_cache_dir()
-    with open(IDENTIFIED_STRIKES_FILE, "w") as f:
-        json.dump(cache, f, indent=2, default=str)
+    await acquire_lock(LOCK_FILE)
+    try:
+        if os.path.exists(IDENTIFIED_STRIKES_FILE):
+            with open(IDENTIFIED_STRIKES_FILE, "r") as f:
+                try:
+                    return json.load(f)
+                except Exception:
+                    return {}
+        return {}
+    finally:
+        release_lock(LOCK_FILE)
+
+async def save_identified_strikes_cache(cache):
+    ensure_cache_dir()
+    await acquire_lock(LOCK_FILE)
+    try:
+        with open(IDENTIFIED_STRIKES_FILE, "w") as f:
+            json.dump(cache, f, indent=2, default=str)
+    finally:
+        release_lock(LOCK_FILE)
 
 def cleanup_old_strike_cache(cache, days=1):
     now = datetime.now()
@@ -145,13 +169,13 @@ class OptionSellStrategy(StrategyBase):
         # 2. Calculate first candle data using the correct trade day
         trade_day = get_trade_day(get_ist_datetime())
         # 3. Fetch option chain and identify strikes
-        cache = load_identified_strikes_cache()
+        cache = await load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
         cleanup_old_strike_cache(cache, days=10)
         if cache_key in cache:
             self._strikes = cache[cache_key]
             logger.info(f"Loaded identified strikes from persistent cache: {self._strikes}")
-            save_identified_strikes_cache(cache)
+            await save_identified_strikes_cache(cache)
             return
         candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
         from_date = candle_times["from_date"]
@@ -169,7 +193,7 @@ class OptionSellStrategy(StrategyBase):
             self._strikes.append(pe_strike)
         if self._strikes:
             cache[cache_key] = self._strikes
-            save_identified_strikes_cache(cache)
+            await save_identified_strikes_cache(cache)
             logger.info(f"Cached identified strikes persistently: {self._strikes}")
         if not self._strikes:
             logger.error("Failed to identify any valid strike prices. Setup failed.")
@@ -382,67 +406,90 @@ class OptionSellStrategy(StrategyBase):
         Returns order info dict with local DB order_id if an order is placed, else None.
         Now also fetches hedge symbol and logs it.
         """
-        if signal_payload:
-            ts = data.iloc[-1].get('timestamp', 'N/A')
-            logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
-            # Fetch hedge symbol for this strike (pass strike directly)
+        if not signal_payload:
+            logger.debug(f"No signal for {strike} at {data.iloc[-1].get('timestamp', 'N/A')}")
+            return None
+
+        ts = data.iloc[-1].get('timestamp', 'N/A')
+        logger.info(f"Signal formed for {strike} at {ts}: {signal_payload}")
+
+        # 1. Fetch and place hedge order first
+        hedge_order_result = None
+        try:
             hedge_symbol = await self.fetch_hedge_symbol(self.order_manager.broker_manager, strike, self.trade)
-            if hedge_symbol:
-                logger.info(f"Hedge symbol for {strike}: {hedge_symbol}")
-                hedge_signal_payload = TradeSignal(
-                    symbol=hedge_symbol,
-                    side="BUY",
-                    signal_type=SignalType.HEDGE_ENTRY,
-                    signal_time=signal_payload.signal_time,
-                    signal_direction="hedge buy",
-                    lot_qty=signal_payload.lot_qty,
-                )
-                # Build order request for hedge
-                hedge_order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
-                    hedge_signal_payload, self.cfg
-                )
-                # Place hedge order
-                hedge_order_result = await self.order_manager.place_order(
-                    self.cfg,
-                    hedge_order_request,
-                    strategy_name=None
-                )
-                logger.debug(f"Hedge order result for {hedge_symbol}: {hedge_order_result}")
-                 # Check if any broker response is failed/cancelled/rejected
-                failed_statuses = {"FAILED", "CANCELLED", "REJECTED"}
-                broker_responses = hedge_order_result.get('broker_responses') if hedge_order_result else None
-                any_failed = False
-                if broker_responses and isinstance(broker_responses, dict):
-                    statuses = [str(resp.get('status')) if resp else None for resp in broker_responses.values()]
-                    statuses = [s.split('.')[-1].replace("'", "").replace(">", "").upper() if s else None for s in statuses]
-                    if any(s in failed_statuses for s in statuses if s):
-                        any_failed = True
-                if any_failed:
-                    logger.error(f"At least one hedge order broker response failed/cancelled/rejected, aborting entry. Details: {hedge_order_result}")
-                    hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
-                    if hedge_order_id:
-                        await self.order_manager.exit_order(hedge_order_id, exit_reason="Hedge failure")
-                    return None
-
-            else:
-                logger.error(f"No hedge symbol found for {strike}")
+            if not hedge_symbol:
+                logger.error(f"No hedge symbol found for {strike}, aborting trade.")
                 return None
-            
-            
 
+            logger.info(f"Hedge symbol for {strike}: {hedge_symbol}")
+            hedge_signal_payload = TradeSignal(
+                symbol=hedge_symbol,
+                side="BUY",
+                signal_type=SignalType.HEDGE_ENTRY,
+                signal_time=signal_payload.signal_time,
+                signal_direction="hedge buy",
+                lot_qty=signal_payload.lot_qty,
+            )
+            hedge_order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
+                hedge_signal_payload, self.cfg
+            )
+            hedge_order_result = await self.order_manager.place_order(
+                self.cfg, hedge_order_request, strategy_name=None
+            )
+            logger.debug(f"Hedge order result for {hedge_symbol}: {hedge_order_result}")
+
+            # Check if hedge order failed
+            failed_statuses = {"FAILED", "CANCELLED", "REJECTED"}
+            broker_responses = hedge_order_result.get('broker_responses') if hedge_order_result else None
+            any_failed = False
+            if broker_responses and isinstance(broker_responses, dict):
+                statuses = [str(resp.get('status')).split('.')[-1].replace("'>", "").upper() if resp else None for resp in broker_responses.values()]
+                if any(s in failed_statuses for s in statuses if s):
+                    any_failed = True
             
+            if any_failed:
+                logger.error(f"Hedge order failed/cancelled/rejected, aborting entry. Details: {hedge_order_result}")
+                # No need to exit, as it already failed
+                return None
+
+        except Exception as e:
+            logger.error(f"An exception occurred while placing the hedge order for {strike}: {e}", exc_info=True)
+            return None # Abort if hedge placement fails
+
+        # 2. Place main SELL order and handle potential failure
+        main_order_result = None
+        try:
             order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
                 signal_payload, self.cfg
             )
-            # Place order(s) with broker(s) via OrderManager, which handles DB updates
-            result = await self.order_manager.place_order(
-                self.cfg,  # config (StrategyConfig, has id)
-                order_request,
-                strategy_name=None
+            main_order_result = await self.order_manager.place_order(
+                self.cfg, order_request, strategy_name=None
             )
-            return result
-        else:
-            logger.debug(f"No signal for {strike} at {data.iloc[-1].get('timestamp', 'N/A')}")
+            
+            # Check if main order failed
+            main_broker_responses = main_order_result.get('broker_responses') if main_order_result else None
+            main_any_failed = False
+            if main_broker_responses and isinstance(main_broker_responses, dict):
+                main_statuses = [str(resp.get('status')).split('.')[-1].replace("'>", "").upper() if resp else None for resp in main_broker_responses.values()]
+                if any(s in failed_statuses for s in main_statuses if s):
+                    main_any_failed = True
+
+            if main_any_failed:
+                 raise Exception(f"Main SELL order failed/cancelled/rejected. Details: {main_order_result}")
+
+            return main_order_result
+
+        except Exception as e:
+            logger.critical(f"CRITICAL: Main SELL order failed for {strike} after hedge was placed. Attempting to exit hedge. Error: {e}", exc_info=True)
+            hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
+            if hedge_order_id:
+                try:
+                    await self.order_manager.exit_order(hedge_order_id, exit_reason="Main order failure")
+                    logger.info(f"Successfully initiated exit for orphaned hedge order {hedge_order_id}.")
+                except Exception as exit_e:
+                    logger.error(f"FATAL: Failed to exit orphaned hedge order {hedge_order_id}. Manual intervention required. Error: {exit_e}", exc_info=True)
+            else:
+                logger.error(f"FATAL: Could not find order_id for orphaned hedge. Manual intervention required. Details: {hedge_order_result}")
             return None
 
     async def evaluate_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:

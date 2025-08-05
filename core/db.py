@@ -1158,6 +1158,26 @@ async def get_all_orders_for_strategy_and_tradeday(session, strategy_id: int, tr
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
 
+async def get_all_orders_for_strategy_symbol_and_tradeday(session, strategy_symbol_id: int, trade_day):
+    """
+    Return all orders for a given strategy_symbol_id and trade_day (no status filtering).
+    Args:
+        session: SQLAlchemy async session
+        strategy_symbol_id: int, the strategy symbol id
+        trade_day: date or datetime, the trade day (should match the date part of signal_time)
+    Returns:
+        List of order dicts
+    """
+    from algosat.core.dbschema import orders
+    from sqlalchemy import func
+    stmt = (
+        select(orders)
+        .where(orders.c.strategy_symbol_id == strategy_symbol_id)
+        .where(func.date(orders.c.signal_time) == trade_day.date())
+        .order_by(orders.c.signal_time.asc(), orders.c.id.asc())
+    )
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
 
 async def get_open_orders_for_strategy_symbol_and_tradeday(session, strategy_config_id: int, symbol: str, trade_day):
     """Return all open orders for a given strategy config, symbol, and trade day."""
@@ -2151,10 +2171,13 @@ async def get_per_strategy_statistics(session):
     return strategy_stats
 
 async def get_all_open_orders(session):
-    """Return all orders with open status for monitoring."""
+    """Return all orders with open status for monitoring, including EXIT_*_PENDING statuses."""
     from algosat.core.dbschema import orders
     result = await session.execute(
-        select(orders).where(orders.c.status.in_(["OPEN", "PENDING", "PLACED", "AWAITING_ENTRY"]))
+        select(orders).where(orders.c.status.in_(["OPEN", "PENDING", "PLACED", "AWAITING_ENTRY", 
+                                                  "EXIT_TARGET_PENDING", "EXIT_STOPLOSS_PENDING", 
+                                                  "EXIT_REVERSAL_PENDING", "EXIT_EOD_PENDING", 
+                                                  "EXIT_EXPIRY_PENDING"]))
     )
     return [dict(row._mapping) for row in result.fetchall()]
 
