@@ -38,7 +38,7 @@ from algosat.common.broker_utils import get_trade_day
 from algosat.common import constants
 import json
 import os
-import time
+import time as time_module
 import asyncio
 from algosat.core.signal import TradeSignal, SignalType
 from algosat.models.strategy_config import StrategyConfig
@@ -55,9 +55,9 @@ def ensure_cache_dir():
     os.makedirs(cache_dir, exist_ok=True)
 
 async def acquire_lock(lock_file, timeout=30):
-    start_time = time.time()
+    start_time = time_module.time()
     while os.path.exists(lock_file):
-        if time.time() - start_time > timeout:
+        if time_module.time() - start_time > timeout:
             raise TimeoutError(f"Could not acquire lock on {lock_file} within {timeout} seconds.")
         await asyncio.sleep(0.1)
     with open(lock_file, 'w') as f:

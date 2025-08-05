@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Optional, Any
 import asyncio
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import pytz
 from algosat.common.logger import get_logger
 from algosat.models.order_aggregate import OrderAggregate
@@ -1150,11 +1150,12 @@ class OrderMonitor:
             async with AsyncSessionLocal() as session:
                 entry_broker_db_orders = await get_broker_executions_for_order(session, self.order_id, side='ENTRY')
             
-            # Calculate exit details from current broker positions
+            # Calculate exit details from current broker positions and prepare broker_executions data
             total_exit_value = 0.0
             total_exit_qty = 0.0
             total_pnl = 0.0
             exit_details_available = False
+            broker_exit_data = []  # Store individual broker exit details for broker_executions updates
             
             for bro in entry_broker_db_orders:
                 broker_status = bro.get('status', '').upper()
@@ -1232,6 +1233,17 @@ class OrderMonitor:
                         current_exit_price = 0
                         broker_pnl = 0
                     
+                    # Store individual broker exit data for broker_executions table
+                    broker_exit_data.append({
+                        'broker_id': broker_id,
+                        'broker_order_id': bro.get('broker_order_id'),
+                        'exit_price': current_exit_price,
+                        'executed_quantity': our_qty,
+                        'product_type': product,
+                        'symbol': symbol_val,
+                        'broker_pnl': broker_pnl
+                    })
+                    
                     # Accumulate for VWAP calculation
                     total_exit_value += current_exit_price * our_qty
                     total_exit_qty += our_qty
@@ -1269,13 +1281,33 @@ class OrderMonitor:
                         condition=orders.c.id == self.order_id,
                         new_values=update_fields
                     )
-                
-                # Call order_manager.exit_order for broker-side cleanup
-                await self.order_manager.exit_order(
-                    parent_order_id=self.order_id,
-                    exit_reason=exit_reason,
-                    ltp=final_exit_price
-                )
+                    
+                    # Insert EXIT broker_executions entries directly with calculated exit details
+                    logger.info(f"OrderMonitor: Inserting {len(broker_exit_data)} EXIT broker_executions with calculated details for order_id={self.order_id}")
+                    
+                    for exit_data in broker_exit_data:
+                        try:
+                            await self.order_manager._insert_exit_broker_execution(
+                                session,
+                                parent_order_id=self.order_id,
+                                broker_id=exit_data['broker_id'],
+                                broker_order_id=exit_data['broker_order_id'],
+                                side='EXIT',
+                                status='FILLED',  # Mark as FILLED since we calculated from positions
+                                executed_quantity=exit_data['executed_quantity'],
+                                execution_price=round(exit_data['exit_price'], 2),
+                                product_type=exit_data['product_type'],
+                                order_type='MARKET',  # Assume MARKET for exits
+                                order_messages=f"PENDING exit completion: {final_exit_status}",
+                                symbol=exit_data['symbol'],
+                                execution_time=exit_time,
+                                notes=f"PENDING exit via order_monitor with calculated details. PnL: {exit_data['broker_pnl']}",
+                                action='EXIT',
+                                exit_reason=exit_reason
+                            )
+                            logger.info(f"OrderMonitor: Inserted EXIT broker_execution for broker_id={exit_data['broker_id']}, price={exit_data['exit_price']}")
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: Error inserting EXIT broker_execution for broker_id={exit_data['broker_id']}: {e}")
                 
                 logger.critical(f"OrderMonitor: ✅ Successfully completed PENDING exit for order_id={self.order_id}. Status: {final_exit_status}, Exit Price: {final_exit_price}, PnL: {total_pnl}")
                 
@@ -1284,19 +1316,48 @@ class OrderMonitor:
                 return
                 
             else:
-                # Fallback: No position data available, just complete with order_manager.exit_order
-                logger.warning(f"OrderMonitor: No exit details available from positions for order_id={self.order_id}. Using fallback exit.")
+                # Fallback: No position data available, create basic EXIT entries for audit trail
+                logger.warning(f"OrderMonitor: No exit details available from positions for order_id={self.order_id}. Creating basic EXIT entries.")
                 
-                # Update status to final (without exit_price/exit_time details)
+                # Get basic broker execution data for EXIT entries
+                exit_time = datetime.now(timezone.utc)
+                
+                # Update orders table with basic exit details
                 await self.order_manager.update_order_status_in_db(self.order_id, final_exit_status)
                 
-                # Call order_manager.exit_order for broker-side cleanup
-                await self.order_manager.exit_order(
-                    parent_order_id=self.order_id,
-                    exit_reason=exit_reason
-                )
+                # Insert basic EXIT broker_executions entries for audit trail
+                async with AsyncSessionLocal() as session:
+                    logger.info(f"OrderMonitor: Creating basic EXIT broker_executions entries for order_id={self.order_id}")
+                    
+                    for bro in entry_broker_db_orders:
+                        broker_status = bro.get('status', '').upper()
+                        if broker_status == 'FAILED':
+                            continue
+                            
+                        try:
+                            await self.order_manager._insert_exit_broker_execution(
+                                session,
+                                parent_order_id=self.order_id,
+                                broker_id=bro.get('broker_id'),
+                                broker_order_id=bro.get('broker_order_id'),
+                                side='EXIT',
+                                status='CLOSED',  # Mark as CLOSED since no position details
+                                executed_quantity=bro.get('quantity', 0),
+                                execution_price=bro.get('execution_price', 0),  # Use entry price as fallback
+                                product_type=bro.get('product_type'),
+                                order_type='MARKET',
+                                order_messages=f"PENDING exit completion (fallback): {final_exit_status}",
+                                symbol=bro.get('symbol') or bro.get('tradingsymbol'),
+                                execution_time=exit_time,
+                                notes=f"Fallback exit - no position data available",
+                                action='EXIT',
+                                exit_reason=exit_reason
+                            )
+                            logger.info(f"OrderMonitor: Inserted fallback EXIT broker_execution for broker_id={bro.get('broker_id')}")
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: Error inserting fallback EXIT broker_execution for broker_id={bro.get('broker_id')}: {e}")
                 
-                logger.warning(f"OrderMonitor: ⚠️ Completed PENDING exit for order_id={self.order_id} with limited details. Status: {final_exit_status}")
+                logger.warning(f"OrderMonitor: ⚠️ Completed PENDING exit for order_id={self.order_id} with basic details. Status: {final_exit_status}")
                 
                 # Stop monitoring this order
                 self.stop()
@@ -1309,11 +1370,50 @@ class OrderMonitor:
         except Exception as e:
             logger.error(f"OrderMonitor: ❌ Error completing PENDING exit for order_id={self.order_id}: {e}", exc_info=True)
             
-            # Fallback: Update to final status and exit
+            # Fallback: Update to final status and create basic EXIT entries for error recovery
             try:
                 final_exit_status = order_row.get('status', '').replace('_PENDING', '') if order_row else 'EXIT_CLOSED'
+                
+                # Update status
                 await self.order_manager.update_order_status_in_db(self.order_id, final_exit_status)
-                await self.order_manager.exit_order(self.order_id, exit_reason="PENDING exit - error recovery")
+                
+                # Insert basic EXIT broker_executions for error recovery audit trail
+                from datetime import datetime, timezone
+                async with AsyncSessionLocal() as session:
+                    logger.info(f"OrderMonitor: Creating error recovery EXIT broker_executions entries for order_id={self.order_id}")
+                    
+                    # Get entry broker executions for basic EXIT entries
+                    from algosat.core.db import get_broker_executions_for_order
+                    entry_broker_db_orders = await get_broker_executions_for_order(session, self.order_id, side='ENTRY')
+                    
+                    exit_time = datetime.now(timezone.utc)
+                    for bro in entry_broker_db_orders:
+                        broker_status = bro.get('status', '').upper()
+                        if broker_status == 'FAILED':
+                            continue
+                            
+                        try:
+                            await self.order_manager._insert_exit_broker_execution(
+                                session,
+                                parent_order_id=self.order_id,
+                                broker_id=bro.get('broker_id'),
+                                broker_order_id=bro.get('broker_order_id'),
+                                side='EXIT',
+                                status='CLOSED',
+                                executed_quantity=bro.get('quantity', 0),
+                                execution_price=bro.get('execution_price', 0),
+                                product_type=bro.get('product_type'),
+                                order_type='MARKET',
+                                order_messages=f"Error recovery exit: {final_exit_status}",
+                                symbol=bro.get('symbol') or bro.get('tradingsymbol'),
+                                execution_time=exit_time,
+                                notes=f"Error recovery - PENDING exit processing failed",
+                                action='EXIT',
+                                exit_reason="PENDING exit - error recovery"
+                            )
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: Error inserting error recovery EXIT broker_execution: {e}")
+                
                 logger.error(f"OrderMonitor: ⚠️ Fallback exit completed for order_id={self.order_id}")
                 self.stop()
             except Exception as e2:

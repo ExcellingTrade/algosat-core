@@ -60,9 +60,8 @@ ZERODHA_STATUS_MAP = {
 }
 
 class OrderManager:
-    def __init__(self, broker_manager: BrokerManager, order_cache=None):
+    def __init__(self, broker_manager: BrokerManager):
         self.broker_manager: BrokerManager = broker_manager
-        self.order_cache = order_cache  # Optional OrderCache for live status checking
         # Initialize data_manager lazily for broker name lookups
         self._data_manager = None
 
@@ -73,10 +72,6 @@ class OrderManager:
             self._data_manager = DataManager(broker_manager=self.broker_manager)
             await self._data_manager.ensure_broker()
         return self._data_manager
-
-    def set_order_cache(self, order_cache):
-        """Set the OrderCache instance for live status checking."""
-        self.order_cache = order_cache
 
     @staticmethod
     def extract_strategy_config_id(config: StrategyConfig | dict) -> int | None:
@@ -1017,13 +1012,15 @@ class OrderManager:
     def _get_cache_lookup_order_id(broker_order_id, broker_name, product_type):
         """
         Helper to determine cache key for broker order id (handles Fyers intraday hack).
+        Fyers uses 'MARGIN' for intraday orders.
         """
         if (
             product_type
-            and product_type.lower() == 'intraday'
+            and product_type.lower() in ('intraday', 'margin')
             and broker_name
             and broker_name.lower() == 'fyers'
             and broker_order_id
+            and not broker_order_id.endswith('-BO-1')
         ):
             return f"{broker_order_id}-BO-1"
         return broker_order_id
@@ -1130,29 +1127,52 @@ class OrderManager:
                         
                 cache_lookup_order_id = self._get_cache_lookup_order_id(broker_order_id, broker_name, product_type)
                 
-                # Check live status if requested
+                # Check live status if requested using existing normalized method
                 live_broker_status = None
-                if check_live_status and broker_name and self.order_cache:
+                if check_live_status and broker_name:
                     try:
                         logger.info(f"OrderManager: Checking live status for broker_exec_id={broker_exec_id}, broker_name={broker_name}, cache_lookup_order_id={cache_lookup_order_id}")
-                        live_broker_status = await self.order_cache.get_order_status_by_id(broker_name, cache_lookup_order_id)
                         
-                        if live_broker_status:
+                        # Get all broker orders using existing normalized method
+                        all_broker_orders = await self.get_all_broker_order_details()
+                        broker_orders = all_broker_orders.get(broker_name, [])
+                        
+                        # Find matching order in broker response
+                        matching_order = None
+                        if broker_orders:
+                            for order in broker_orders:
+                                broker_order_id_from_response = order.get('order_id')
+                                
+                                # Handle Fyers intraday order ID matching
+                                if (broker_name.lower() == 'fyers' and 
+                                    cache_lookup_order_id and 
+                                    cache_lookup_order_id.endswith('-BO-1')):
+                                    # Strip -BO-1 suffix for matching
+                                    original_order_id = cache_lookup_order_id[:-6]
+                                    if broker_order_id_from_response == original_order_id:
+                                        matching_order = order
+                                        break
+                                elif broker_order_id_from_response == cache_lookup_order_id:
+                                    matching_order = order
+                                    break
+                        
+                        if matching_order:
+                            live_broker_status = matching_order.get('status')
                             logger.info(f"OrderManager: Live status check - DB status: '{status}', Live status: '{live_broker_status}' for broker_exec_id={broker_exec_id}")
                             
                             # Update DB status if different from live status
-                            if live_broker_status.upper() != status:
+                            if live_broker_status and live_broker_status.upper() != status:
                                 logger.info(f"OrderManager: Updating broker_exec_id={broker_exec_id} status from '{status}' to '{live_broker_status}' based on live data")
                                 await self.update_broker_exec_status_in_db(broker_exec_id, live_broker_status)
                                 status = live_broker_status.upper()  # Use live status for exit decisions
                             else:
                                 logger.debug(f"OrderManager: Live status matches DB status '{status}' for broker_exec_id={broker_exec_id}")
                         else:
-                            logger.warning(f"OrderManager: Could not retrieve live status for broker_exec_id={broker_exec_id}, using DB status '{status}'")
+                            logger.warning(f"OrderManager: Could not find matching order in broker response for broker_exec_id={broker_exec_id}, using DB status '{status}'")
                     except Exception as e:
                         logger.error(f"OrderManager: Error checking live status for broker_exec_id={broker_exec_id}: {e}, using DB status '{status}'")
                 elif check_live_status:
-                    logger.warning(f"OrderManager: Live status check requested but order_cache not available or broker_name missing for broker_exec_id={broker_exec_id}")
+                    logger.warning(f"OrderManager: Live status check requested but broker_name missing for broker_exec_id={broker_exec_id}")
                 
                 logger.info(f"OrderManager: Processing broker_execution id={broker_exec_id} (broker_id={broker_id}, broker_order_id={broker_order_id}, symbol={symbol}, product_type={product_type}, final_status={status})")
                 # Action based on status

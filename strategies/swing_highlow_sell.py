@@ -20,31 +20,50 @@ import asyncio
 
 logger = get_logger(__name__)
 
-def get_nse_holidays():
-    """Get NSE holiday list - fallback implementation"""
-    try:
-        # Try to import from the actual location first
-        from algosat.api.routes.nse_data import get_nse_holiday_list
-        return get_nse_holiday_list()
-    except ImportError:
-        # Fallback to basic weekend check
-        logger.warning("NSE holiday data not available, using basic weekend check")
-        return []
-
 def is_holiday_or_weekend(check_date):
     """
-    Check if given date is a holiday or weekend.
+    Check if given date is a holiday or weekend using centralized broker_utils.
     """
     try:
         # Check weekend (Saturday = 5, Sunday = 6)
         if check_date.weekday() >= 5:
             return True
         
-        # Check holidays
-        holidays = get_nse_holidays()
-        return check_date.date() if hasattr(check_date, 'date') else check_date in holidays
+        # Use centralized holiday checking from broker_utils
+        from algosat.common.broker_utils import get_nse_holiday_list
+        holidays = get_nse_holiday_list()
+        if holidays is None:
+            logger.warning("NSE holiday data not available, using basic weekend check")
+            return False
+        
+        # Convert check_date to string format used by NSE API (DD-MMM-YYYY)
+        check_date_str = check_date.strftime("%d-%b-%Y")
+        return check_date_str in holidays
+        
     except Exception as e:
         logger.error(f"Error checking holiday/weekend: {e}")
+        return False
+
+def is_tomorrow_holiday():
+    """
+    Check if tomorrow is a holiday.
+    Simple check for holiday exit logic - exit today if tomorrow is a holiday.
+    
+    Returns:
+        bool: True if tomorrow is a holiday, False otherwise
+    """
+    try:
+        from algosat.core.time_utils import get_ist_datetime
+        from datetime import timedelta
+        
+        current_datetime = get_ist_datetime()
+        tomorrow = current_datetime + timedelta(days=1)
+        
+        # Check if tomorrow is a holiday or weekend
+        return is_holiday_or_weekend(tomorrow)
+        
+    except Exception as e:
+        logger.error(f"Error checking if tomorrow is holiday: {e}")
         return False
 
 class SwingHighLowSellStrategy(StrategyBase):
@@ -1291,104 +1310,104 @@ class SwingHighLowSellStrategy(StrategyBase):
             signal_direction = order_row.get("signal_direction") or order_row.get("direction", "").upper()
             
             # PRIORITY 1: NEXT DAY STOPLOSS UPDATE (UPDATE ONLY, DON'T EXIT)
-            carry_forward_config = trade_config.get("carry_forward", {})
-            if carry_forward_config.get("enabled", False):
-                try:
-                    from algosat.core.time_utils import get_ist_datetime
-                    from algosat.common.broker_utils import get_trade_day
-                    from datetime import datetime, timedelta
+            # Always check for next day logic if order exists from previous trading day
+            # This ensures proper stoploss management even if carry_forward is disabled after position creation
+            try:
+                from algosat.core.time_utils import get_ist_datetime
+                from algosat.common.broker_utils import get_trade_day
+                from datetime import datetime, timedelta
+                
+                # Get order entry date and current date
+                current_datetime = get_ist_datetime()
+                current_trade_day = get_trade_day(current_datetime)
+                
+                # Get order entry date
+                order_timestamp = order_row.get("signal_time") or order_row.get("created_at") or order_row.get("timestamp")
+                if order_timestamp:
+                    if isinstance(order_timestamp, str):
+                        order_datetime = datetime.fromisoformat(order_timestamp.replace('Z', '+00:00'))
+                    else:
+                        order_datetime = order_timestamp
                     
-                    # Get order entry date and current date
-                    current_datetime = get_ist_datetime()
-                    current_trade_day = get_trade_day(current_datetime)
+                    # Convert order_datetime to IST for consistent trade day calculation
+                    # (database timestamps are typically in UTC)
+                    order_datetime_ist = to_ist(order_datetime)
+                    order_trade_day = get_trade_day(order_datetime_ist)
                     
-                    # Get order entry date
-                    order_timestamp = order_row.get("signal_time") or order_row.get("created_at") or order_row.get("timestamp")
-                    if order_timestamp:
-                        if isinstance(order_timestamp, str):
-                            order_datetime = datetime.fromisoformat(order_timestamp.replace('Z', '+00:00'))
-                        else:
-                            order_datetime = order_timestamp
+                    # Check if it's next trading day (compare dates only, not datetime)
+                    if current_trade_day.date() > order_trade_day.date():
+                        # Calculate first candle completion time based on stoploss timeframe
+                        market_open_time = current_datetime.replace(hour=9, minute=15, second=0, microsecond=0)
+                        first_candle_end_time = market_open_time + timedelta(minutes=self.stoploss_minutes)
                         
-                        # Convert order_datetime to IST for consistent trade day calculation
-                        # (database timestamps are typically in UTC)
-                        order_datetime_ist = to_ist(order_datetime)
-                        order_trade_day = get_trade_day(order_datetime_ist)
+                        logger.info(f"evaluate_exit: Next day detected - order_id={order_id}, entry_day={order_trade_day}, current_day={current_trade_day}, first_candle_end_time={first_candle_end_time}, current_time={current_datetime}")
                         
-                        # Check if it's next trading day (compare dates only, not datetime)
-                        if current_trade_day.date() > order_trade_day.date():
-                            # Calculate first candle completion time based on stoploss timeframe
-                            market_open_time = current_datetime.replace(hour=9, minute=15, second=0, microsecond=0)
-                            first_candle_end_time = market_open_time + timedelta(minutes=self.stoploss_minutes)
+                        # Check if first candle of the day is completed
+                        if current_datetime >= first_candle_end_time:
+                            # Get first candle data to update stoploss
+                            first_candle_history = await self.fetch_history_data(
+                                self.dp, [spot_symbol], self.stoploss_minutes
+                            )
+                            first_candle_df = first_candle_history.get(str(spot_symbol))
                             
-                            logger.info(f"evaluate_exit: Next day detected - order_id={order_id}, entry_day={order_trade_day}, current_day={current_trade_day}, first_candle_end_time={first_candle_end_time}, current_time={current_datetime}")
-                            
-                            # Check if first candle of the day is completed
-                            if current_datetime >= first_candle_end_time:
-                                # Get first candle data to update stoploss
-                                first_candle_history = await self.fetch_history_data(
-                                    self.dp, [spot_symbol], self.stoploss_minutes
-                                )
-                                first_candle_df = first_candle_history.get(str(spot_symbol))
+                            if first_candle_df is not None and len(first_candle_df) > 0:
+                                # Get today's first candle (9:15 - first_candle_end_time)
+                                first_candle_df = first_candle_df.copy()
+                                first_candle_df['timestamp'] = pd.to_datetime(first_candle_df['timestamp'])
                                 
-                                if first_candle_df is not None and len(first_candle_df) > 0:
-                                    # Get today's first candle (9:15 - first_candle_end_time)
-                                    first_candle_df = first_candle_df.copy()
-                                    first_candle_df['timestamp'] = pd.to_datetime(first_candle_df['timestamp'])
+                                # Convert market_open_time and first_candle_end_time to pandas Timestamp, ensuring timezone compatibility
+                                market_open_ts = pd.to_datetime(market_open_time)
+                                first_candle_end_ts = pd.to_datetime(first_candle_end_time)
+                                
+                                # Ensure all timestamps are timezone-naive for comparison
+                                if first_candle_df['timestamp'].dt.tz is not None:
+                                    first_candle_df['timestamp'] = first_candle_df['timestamp'].dt.tz_localize(None)
+                                if market_open_ts.tz is not None:
+                                    market_open_ts = market_open_ts.tz_localize(None)
+                                if first_candle_end_ts.tz is not None:
+                                    first_candle_end_ts = first_candle_end_ts.tz_localize(None)
+                                
+                                today_candles = first_candle_df[
+                                    (first_candle_df['timestamp'] >= market_open_ts) & 
+                                    (first_candle_df['timestamp'] <= first_candle_end_ts)
+                                ]
+                                
+                                if len(today_candles) > 0:
+                                    first_candle = today_candles.iloc[0]  # First candle of the day
+                                    first_candle_open = first_candle.get("open")
+                                    current_stoploss = stoploss_spot_level  # Current stoploss (could be swing low/high)
                                     
-                                    # Convert market_open_time and first_candle_end_time to pandas Timestamp, ensuring timezone compatibility
-                                    market_open_ts = pd.to_datetime(market_open_time)
-                                    first_candle_end_ts = pd.to_datetime(first_candle_end_time)
+                                    # Check if market opened beyond current stoploss and update accordingly
+                                    should_update_stoploss = False
                                     
-                                    # Ensure all timestamps are timezone-naive for comparison
-                                    if first_candle_df['timestamp'].dt.tz is not None:
-                                        first_candle_df['timestamp'] = first_candle_df['timestamp'].dt.tz_localize(None)
-                                    if market_open_ts.tz is not None:
-                                        market_open_ts = market_open_ts.tz_localize(None)
-                                    if first_candle_end_ts.tz is not None:
-                                        first_candle_end_ts = first_candle_end_ts.tz_localize(None)
-                                    
-                                    today_candles = first_candle_df[
-                                        (first_candle_df['timestamp'] >= market_open_ts) & 
-                                        (first_candle_df['timestamp'] <= first_candle_end_ts)
-                                    ]
-                                    
-                                    if len(today_candles) > 0:
-                                        first_candle = today_candles.iloc[0]  # First candle of the day
-                                        first_candle_open = first_candle.get("open")
-                                        current_stoploss = stoploss_spot_level  # Current stoploss (could be swing low/high)
+                                    if signal_direction == "UP":  # CE trade
+                                        # For CE: Update stoploss if market opened below current stoploss
+                                        if first_candle_open and current_stoploss and first_candle_open < float(current_stoploss):
+                                            should_update_stoploss = True
+                                            updated_stoploss = first_candle.get("low")
+                                            update_reason = f"market opened {first_candle_open} below stoploss {current_stoploss}"
                                         
-                                        # Check if market opened beyond current stoploss and update accordingly
-                                        should_update_stoploss = False
-                                        
-                                        if signal_direction == "UP":  # CE trade
-                                            # For CE: Update stoploss if market opened below current stoploss
-                                            if first_candle_open and current_stoploss and first_candle_open < float(current_stoploss):
-                                                should_update_stoploss = True
-                                                updated_stoploss = first_candle.get("low")
-                                                update_reason = f"market opened {first_candle_open} below stoploss {current_stoploss}"
-                                            
-                                        elif signal_direction == "DOWN":  # PE trade  
-                                            # For PE: Update stoploss if market opened above current stoploss
-                                            if first_candle_open and current_stoploss and first_candle_open > float(current_stoploss):
-                                                should_update_stoploss = True
-                                                updated_stoploss = first_candle.get("high")
-                                                update_reason = f"market opened {first_candle_open} above stoploss {current_stoploss}"
-                                        
-                                        if should_update_stoploss and updated_stoploss:
-                                            stoploss_spot_level = updated_stoploss  # Update for subsequent checks
-                                            logger.info(f"evaluate_exit: Next day {signal_direction} - UPDATED stoploss to first candle {'low' if signal_direction == 'UP' else 'high'} {updated_stoploss} (was {current_stoploss}) - {update_reason}")
-                                            # Update DB with new stoploss
-                                            await self.update_stoploss_in_db(order_id, updated_stoploss)
-                                        else:
-                                            logger.info(f"evaluate_exit: Next day - Stoploss NOT updated. Market opened at {first_candle_open}, current stoploss={current_stoploss}, direction={signal_direction}")
-                                else:
-                                    logger.warning(f"evaluate_exit: Could not get first candle data for next day stoploss update")
+                                    elif signal_direction == "DOWN":  # PE trade  
+                                        # For PE: Update stoploss if market opened above current stoploss
+                                        if first_candle_open and current_stoploss and first_candle_open > float(current_stoploss):
+                                            should_update_stoploss = True
+                                            updated_stoploss = first_candle.get("high")
+                                            update_reason = f"market opened {first_candle_open} above stoploss {current_stoploss}"
+                                    
+                                    if should_update_stoploss and updated_stoploss:
+                                        stoploss_spot_level = updated_stoploss  # Update for subsequent checks
+                                        logger.info(f"evaluate_exit: Next day {signal_direction} - UPDATED stoploss to first candle {'low' if signal_direction == 'UP' else 'high'} {updated_stoploss} (was {current_stoploss}) - {update_reason}")
+                                        # Update DB with new stoploss
+                                        await self.update_stoploss_in_db(order_id, updated_stoploss)
+                                    else:
+                                        logger.info(f"evaluate_exit: Next day - Stoploss NOT updated. Market opened at {first_candle_open}, current stoploss={current_stoploss}, direction={signal_direction}")
                             else:
-                                logger.info(f"evaluate_exit: Waiting for first candle completion. Current: {current_datetime}, First candle ends: {first_candle_end_time}")
+                                logger.warning(f"evaluate_exit: Could not get first candle data for next day stoploss update")
+                        else:
+                            logger.info(f"evaluate_exit: Waiting for first candle completion. Current: {current_datetime}, First candle ends: {first_candle_end_time}")
                                 
-                except Exception as e:
-                    logger.error(f"Error in next day stoploss update logic: {e}")
+            except Exception as e:
+                logger.error(f"Error in next day stoploss update logic: {e}")
             
             # PRIORITY 2: TWO-CANDLE STOPLOSS CONFIRMATION CHECK
             if stoploss_spot_level is not None and len(history_df) >= 2:
@@ -1602,33 +1621,27 @@ class SwingHighLowSellStrategy(StrategyBase):
                     from algosat.core.time_utils import get_ist_datetime
                     
                     current_datetime = get_ist_datetime()
-                    exit_before_days = holiday_exit_config.get("exit_before_days", 0)
                     
-                    # Check next few days for holidays
-                    from datetime import timedelta
-                    for i in range(1, exit_before_days + 2):  # Check tomorrow and day after
-                        check_date = current_datetime + timedelta(days=i)
-                        
-                        if is_holiday_or_weekend(check_date):
-                            # Check if current time is after exit time
-                            exit_time = holiday_exit_config.get("exit_time", "14:30")
-                            try:
-                                exit_hour, exit_minute = map(int, exit_time.split(":"))
-                                exit_datetime = current_datetime.replace(
-                                    hour=exit_hour, minute=exit_minute, second=0, microsecond=0
+                    # Simple check: if tomorrow is a holiday, exit today after specified time
+                    if is_tomorrow_holiday():
+                        # Use square_off_time from trade config since holiday_exit doesn't have exit_time
+                        exit_time = trade_config.get("square_off_time", "15:10")
+                        try:
+                            exit_hour, exit_minute = map(int, exit_time.split(":"))
+                            exit_datetime = current_datetime.replace(
+                                hour=exit_hour, minute=exit_minute, second=0, microsecond=0
+                            )
+                            
+                            if current_datetime >= exit_datetime:
+                                # Update order status to EXIT_HOLIDAY (more specific than EXIT_EOD)
+                                await self.order_manager.update_order_status_in_db(
+                                    order_id=order_id,
+                                    status=constants.TRADE_STATUS_EXIT_HOLIDAY
                                 )
-                                
-                                if current_datetime >= exit_datetime:
-                                    # Update order status to EXIT_EOD
-                                    await self.order_manager.update_order_status_in_db(
-                                        order_id=order_id,
-                                        status=constants.TRADE_STATUS_EXIT_EOD
-                                    )
-                                    logger.info(f"evaluate_exit: HOLIDAY exit triggered. order_id={order_id}, upcoming_holiday={check_date.strftime('%Y-%m-%d')}, time={current_datetime.strftime('%H:%M')} - Status updated to EXIT_EOD")
-                                    return True
-                            except Exception as e:
-                                logger.error(f"Error parsing holiday exit time {exit_time}: {e}")
-                            break  # Exit on first holiday found
+                                logger.info(f"evaluate_exit: HOLIDAY exit triggered. order_id={order_id}, tomorrow_is_holiday=True, time={current_datetime.strftime('%H:%M')}, square_off_time={exit_time} - Status updated to EXIT_HOLIDAY")
+                                return True
+                        except Exception as e:
+                            logger.error(f"Error parsing square_off_time {exit_time}: {e}")
                                 
                 except Exception as e:
                     logger.error(f"Error in holiday exit logic: {e}")
@@ -1669,12 +1682,12 @@ class SwingHighLowSellStrategy(StrategyBase):
                                 else:
                                     # Normal RSI exit logic
                                     if current_rsi >= target_level:
-                                        # Update order status to EXIT_TARGET
+                                        # Update order status to EXIT_RSI_TARGET
                                         await self.order_manager.update_order_status_in_db(
                                             order_id=order_id,
-                                            status=constants.TRADE_STATUS_EXIT_TARGET
+                                            status=constants.TRADE_STATUS_EXIT_RSI_TARGET
                                         )
-                                        logger.info(f"evaluate_exit: RSI exit for CE trade. order_id={order_id}, rsi={current_rsi} >= target_level={target_level} - Status updated to EXIT_TARGET")
+                                        logger.info(f"evaluate_exit: RSI exit for CE trade. order_id={order_id}, rsi={current_rsi} >= target_level={target_level} - Status updated to EXIT_RSI_TARGET")
                                         return True
                                         
                             elif signal_direction == "DOWN":  # PE trade
@@ -1688,12 +1701,12 @@ class SwingHighLowSellStrategy(StrategyBase):
                                 else:
                                     # Normal RSI exit logic
                                     if current_rsi <= target_level:
-                                        # Update order status to EXIT_TARGET
+                                        # Update order status to EXIT_RSI_TARGET
                                         await self.order_manager.update_order_status_in_db(
                                             order_id=order_id,
-                                            status=constants.TRADE_STATUS_EXIT_TARGET
+                                            status=constants.TRADE_STATUS_EXIT_RSI_TARGET
                                         )
-                                        logger.info(f"evaluate_exit: RSI exit for PE trade. order_id={order_id}, rsi={current_rsi} <= target_level={target_level} - Status updated to EXIT_TARGET")
+                                        logger.info(f"evaluate_exit: RSI exit for PE trade. order_id={order_id}, rsi={current_rsi} <= target_level={target_level} - Status updated to EXIT_RSI_TARGET")
                                         return True
                         else:
                             logger.warning(f"evaluate_exit: Could not calculate current RSI - missing RSI column")
@@ -1719,14 +1732,18 @@ class SwingHighLowSellStrategy(StrategyBase):
                     else:
                         expiry_dt = expiry_date
                     
-                    # Check if today is the expiry date
-                    if current_datetime.date() == expiry_dt.date():
-                        # Get expiry exit time from config (default to 15:15)
-                        expiry_exit_time = expiry_exit_config.get("expiry_exit_time", "15:15")
+                    # Calculate effective expiry date considering days_before_expiry
+                    days_before_expiry = int(expiry_exit_config.get("days_before_expiry", 0))
+                    effective_expiry_dt = expiry_dt - pd.Timedelta(days=days_before_expiry)
+                    
+                    # Check if today is the effective expiry date (or later)
+                    if current_datetime.date() >= effective_expiry_dt.date():
+                        # Use square_off_time from trade config for expiry exit time
+                        square_off_time = trade_config.get("square_off_time", "15:10")
                         
                         try:
-                            # Parse expiry_exit_time (format: "HH:MM")
-                            exit_hour, exit_minute = map(int, expiry_exit_time.split(":"))
+                            # Parse square_off_time (format: "HH:MM")
+                            exit_hour, exit_minute = map(int, square_off_time.split(":"))
                             exit_time = current_datetime.replace(
                                 hour=exit_hour, minute=exit_minute, second=0, microsecond=0
                             )
@@ -1737,13 +1754,43 @@ class SwingHighLowSellStrategy(StrategyBase):
                                     order_id=order_id,
                                     status=constants.TRADE_STATUS_EXIT_EXPIRY
                                 )
-                                logger.info(f"evaluate_exit: EXPIRY exit triggered. order_id={order_id}, expiry_date={expiry_date}, current_time={current_datetime.strftime('%H:%M')}, exit_time={expiry_exit_time} - Status updated to EXIT_EXPIRY")
+                                logger.info(f"evaluate_exit: EXPIRY exit triggered. order_id={order_id}, expiry_date={expiry_date}, effective_expiry_date={effective_expiry_dt.date()}, days_before_expiry={days_before_expiry}, current_time={current_datetime.strftime('%H:%M')}, square_off_time={square_off_time} - Status updated to EXIT_EXPIRY")
                                 return True
                         except Exception as e:
-                            logger.error(f"Error parsing expiry exit time {expiry_exit_time}: {e}")
+                            logger.error(f"Error parsing square_off_time {square_off_time}: {e}")
                             
                 except Exception as e:
                     logger.error(f"Error in expiry exit logic: {e}")
+            
+            # PRIORITY 9: SQUARE OFF TIME EXIT (when carry_forward is not enabled)
+            carry_forward_config = trade_config.get("carry_forward", {})
+            if not carry_forward_config.get("enabled", False):
+                try:
+                    from algosat.core.time_utils import get_ist_datetime
+                    
+                    current_datetime = get_ist_datetime()
+                    square_off_time = trade_config.get("square_off_time", "15:10")
+                    
+                    try:
+                        # Parse square_off_time (format: "HH:MM")
+                        exit_hour, exit_minute = map(int, square_off_time.split(":"))
+                        exit_datetime = current_datetime.replace(
+                            hour=exit_hour, minute=exit_minute, second=0, microsecond=0
+                        )
+                        
+                        if current_datetime >= exit_datetime:
+                            # Update order status to EXIT_EOD
+                            await self.order_manager.update_order_status_in_db(
+                                order_id=order_id,
+                                status=constants.TRADE_STATUS_EXIT_EOD
+                            )
+                            logger.info(f"evaluate_exit: SQUARE OFF TIME exit triggered. order_id={order_id}, carry_forward_enabled=False, time={current_datetime.strftime('%H:%M')}, square_off_time={square_off_time} - Status updated to EXIT_EOD")
+                            return True
+                    except Exception as e:
+                        logger.error(f"Error parsing square_off_time {square_off_time}: {e}")
+                        
+                except Exception as e:
+                    logger.error(f"Error in square off time exit logic: {e}")
             
             # No exit condition met
             logger.debug(f"evaluate_exit: No exit condition met for order_id={order_id}")
