@@ -1634,9 +1634,18 @@ class OrderMonitor:
             if should_exit:
                 logger.info(f"OrderMonitor: evaluate_exit returned True for order_id={self.order_id}. Converting exit status to PENDING state.")
                 try:
+                    # Small delay to ensure DB transaction is committed before fetching updated status
+                    await asyncio.sleep(0.1)
+                    
+                    # Clear cache to ensure we get fresh order data after evaluate_exit updated the status
+                    if self.order_id in self._order_strategy_cache:
+                        del self._order_strategy_cache[self.order_id]
+                    
                     # Get the current order status after evaluate_exit to see what exit type was set
                     order_row_updated, _, _, _ = await self._get_order_and_strategy(self.order_id)
                     current_status = order_row_updated.get('status') if order_row_updated else None
+                    
+                    logger.debug(f"OrderMonitor: After evaluate_exit, fetched current_status={current_status} for order_id={self.order_id}")
                     
                     # Convert specific exit statuses to PENDING equivalents
                     pending_status = None
@@ -1645,8 +1654,11 @@ class OrderMonitor:
                         status_mapping = {
                             constants.TRADE_STATUS_EXIT_STOPLOSS: f"{constants.TRADE_STATUS_EXIT_STOPLOSS}_PENDING",
                             constants.TRADE_STATUS_EXIT_TARGET: f"{constants.TRADE_STATUS_EXIT_TARGET}_PENDING", 
+                            constants.TRADE_STATUS_EXIT_RSI_TARGET: f"{constants.TRADE_STATUS_EXIT_RSI_TARGET}_PENDING",
                             constants.TRADE_STATUS_EXIT_REVERSAL: f"{constants.TRADE_STATUS_EXIT_REVERSAL}_PENDING",
                             constants.TRADE_STATUS_EXIT_EOD: f"{constants.TRADE_STATUS_EXIT_EOD}_PENDING",
+                            constants.TRADE_STATUS_EXIT_HOLIDAY: f"{constants.TRADE_STATUS_EXIT_HOLIDAY}_PENDING",
+                            constants.TRADE_STATUS_EXIT_MAX_LOSS: f"{constants.TRADE_STATUS_EXIT_MAX_LOSS}_PENDING",
                             constants.TRADE_STATUS_EXIT_EXPIRY: f"{constants.TRADE_STATUS_EXIT_EXPIRY}_PENDING",
                         }
                         

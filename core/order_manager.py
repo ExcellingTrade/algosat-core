@@ -1272,7 +1272,7 @@ class OrderManager:
                         )
                         logger.info(f"OrderManager: Successfully inserted EXIT broker_execution for PARTIALLY_FILLED order")
                         
-                    elif status in ('AWAITING_ENTRY', 'PENDING'):
+                    elif status in ('AWAITING_ENTRY', 'PENDING', 'TRIGGER_PENDING'):
                         logger.info(f"OrderManager: PENDING/AWAITING_ENTRY status detected - initiating cancel for broker_execution id={broker_exec_id}")
                         logger.info(f"OrderManager: Calling broker_manager.cancel_order(broker_id={broker_id}, broker_order_id={cache_lookup_order_id}, symbol={symbol}, product_type={product_type})")
                         
