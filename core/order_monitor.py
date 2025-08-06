@@ -1293,7 +1293,7 @@ class OrderMonitor:
                                 session, 
                                 self.order_id, 
                                 side='EXIT',
-                                broker_id=exit_data['broker_id']
+                                
                             )
                             
                             # Filter to check if this specific broker_order_id already has an EXIT entry
@@ -1383,13 +1383,14 @@ class OrderMonitor:
                                 session, 
                                 self.order_id, 
                                 side='EXIT',
-                                broker_id=bro.get('broker_id')
+                               
                             )
                             
                             # Filter to check if this specific broker_order_id already has an EXIT entry
                             existing_exit = None
                             for exit_entry in existing_exits:
-                                if exit_entry.get('broker_order_id') == bro.get('broker_order_id'):
+                                # if exit_entry.get('broker_order_id') == bro.get('broker_order_id'):
+                                if exit_entry.get('broker_order_id') == bro.get('broker_order_id') and exit_entry.get('broker_id') == bro.get('broker_id'):
                                     existing_exit = exit_entry
                                     break
                             
@@ -1481,13 +1482,13 @@ class OrderMonitor:
                                 session, 
                                 self.order_id, 
                                 side='EXIT',
-                                broker_id=bro.get('broker_id')
+            
                             )
                             
                             # Filter to check if this specific broker_order_id already has an EXIT entry
                             existing_exit = None
                             for exit_entry in existing_exits:
-                                if exit_entry.get('broker_order_id') == bro.get('broker_order_id'):
+                                if exit_entry.get('broker_order_id') == bro.get('broker_order_id') and exit_entry.get('broker_id') == bro.get('broker_id'):
                                     existing_exit = exit_entry
                                     break
                             
@@ -1755,8 +1756,15 @@ class OrderMonitor:
                 continue
 
             if should_exit:
-                logger.info(f"OrderMonitor: evaluate_exit returned True for order_id={self.order_id}. Converting exit status to PENDING state.")
+                logger.critical(f"OrderMonitor: ✅ evaluate_exit returned True for order_id={self.order_id}. Calling exit_order first, then converting to PENDING.")
                 try:
+                    # Call exit_order immediately when strategy decides to exit
+                    await self.order_manager.exit_order(
+                        parent_order_id=self.order_id,
+                        exit_reason="Signal monitor triggered exit"
+                    )
+                    logger.info(f"OrderMonitor: Successfully called exit_order for order_id={self.order_id}")
+                    
                     # Small delay to ensure DB transaction is committed before fetching updated status
                     await asyncio.sleep(0.1)
                     
@@ -1783,6 +1791,7 @@ class OrderMonitor:
                             constants.TRADE_STATUS_EXIT_HOLIDAY: f"{constants.TRADE_STATUS_EXIT_HOLIDAY}_PENDING",
                             constants.TRADE_STATUS_EXIT_MAX_LOSS: f"{constants.TRADE_STATUS_EXIT_MAX_LOSS}_PENDING",
                             constants.TRADE_STATUS_EXIT_EXPIRY: f"{constants.TRADE_STATUS_EXIT_EXPIRY}_PENDING",
+                            constants.TRADE_STATUS_EXIT_ATOMIC_FAILED: f"{constants.TRADE_STATUS_EXIT_ATOMIC_FAILED}_PENDING",
                         }
                         
                         pending_status = status_mapping.get(current_status)

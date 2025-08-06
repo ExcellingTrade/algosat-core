@@ -150,17 +150,19 @@ class OptionSellStrategy(StrategyBase):
         if self._strikes:
             return
         trade = self.trade
-        # 1. Wait for first candle completion
-        await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
-        asyncio.sleep(2)  # Give some time for the first candle to complete
-        logger.info('First candle completed, proceeding with setup...')
         interval_minutes = trade.get("interval_minutes", 5)
         first_candle_time = trade.get("first_candle_time", "09:15")
-        max_strikes = trade.get("max_strikes", 40)
         symbol = self.symbol
         if not symbol:
             logger.error("No symbol configured for OptionSell strategy.")
             return
+        # 1. Wait for first candle completion
+        await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
+        asyncio.sleep(2)  # Give some time for the first candle to complete
+        logger.info('First candle completed, proceeding with setup...')
+        
+        max_strikes = trade.get("max_strikes", 40)
+       
         today_dt = get_ist_datetime()
         # Dynamically select max_premium (expiry_type is auto-detected inside)
         max_premium = get_max_premium_from_config(trade, symbol, today_dt)

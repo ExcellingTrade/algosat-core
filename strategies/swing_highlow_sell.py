@@ -768,8 +768,17 @@ class SwingHighLowSellStrategy(StrategyBase):
                     # Unable to confirm, exit order for safety
                     # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
                     await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed",check_live_status=True)
+                    
+                    # Update status to EXIT_ATOMIC_FAILED_PENDING
+                    from algosat.common import constants
+                    logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
+                    await self.order_manager.update_order_status_in_db(
+                        order_id=order_info.get("order_id") or order_info.get("id"),
+                        status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                    )
+                    
                     logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}")
-                    return None
+                    return order_info
                 entry_df2_sorted = entry_df2.sort_values("timestamp")
                 latest_entry = entry_df2_sorted.iloc[-1]
                 # Confirm based on the breakout direction
@@ -782,8 +791,17 @@ class SwingHighLowSellStrategy(StrategyBase):
                     logger.info("Breakout failed atomic confirmation, exiting order.")
                     # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
                     await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed",check_live_status=True)
+                    
+                    # Update status to EXIT_ATOMIC_FAILED_PENDING
+                    from algosat.common import constants
+                    logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
+                    await self.order_manager.update_order_status_in_db(
+                        order_id=order_info.get("order_id") or order_info.get("id"),
+                        status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                    )
+                    
                     logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}")
-                    return None
+                    return order_info
             else:
                 logger.error("Order placement failed in dual timeframe breakout.")
                 return None
@@ -1006,7 +1024,15 @@ class SwingHighLowSellStrategy(StrategyBase):
                             if entry_df2 is None or len(entry_df2) < 2:
                                 logger.warning("❌ Not enough entry_df data for re-entry atomic confirmation")
                                 await self.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"))
-                                return None
+                                
+                                # Update status to EXIT_ATOMIC_FAILED_PENDING
+                                from algosat.common import constants
+                                await self.order_manager.update_order_status_in_db(
+                                    order_id=re_entry_order_info.get("order_id") or re_entry_order_info.get("id"),
+                                    status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                                )
+                                
+                                return re_entry_order_info
                             
                             entry_df2_sorted = entry_df2.sort_values("timestamp")
                             latest_entry = entry_df2_sorted.iloc[-1]
@@ -1020,7 +1046,16 @@ class SwingHighLowSellStrategy(StrategyBase):
                             else:
                                 logger.info(f"❌ Re-entry atomic confirmation FAILED for order_id={order_id}")
                                 await self.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"))
-                                return None
+                                
+                                # Update status to EXIT_ATOMIC_FAILED_PENDING
+                                from algosat.common import constants
+                                logger.info(f"Re-entry atomic confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {re_entry_order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
+                                await self.order_manager.update_order_status_in_db(
+                                    order_id=re_entry_order_info.get("order_id") or re_entry_order_info.get("id"),
+                                    status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                                )
+                                
+                                return re_entry_order_info
                         else:
                             logger.error(f"❌ Re-entry order placement failed for order_id={order_id}")
                             return None
@@ -1382,14 +1417,14 @@ class SwingHighLowSellStrategy(StrategyBase):
                                     # Check if market opened beyond current stoploss and update accordingly
                                     should_update_stoploss = False
                                     
-                                    if signal_direction == "UP":  # CE trade
+                                    if signal_direction == "UP":  # PE trade
                                         # For CE: Update stoploss if market opened below current stoploss
                                         if first_candle_open and current_stoploss and first_candle_open < float(current_stoploss):
                                             should_update_stoploss = True
                                             updated_stoploss = first_candle.get("low")
                                             update_reason = f"market opened {first_candle_open} below stoploss {current_stoploss}"
                                         
-                                    elif signal_direction == "DOWN":  # PE trade  
+                                    elif signal_direction == "DOWN":  # CE trade  
                                         # For PE: Update stoploss if market opened above current stoploss
                                         if first_candle_open and current_stoploss and first_candle_open > float(current_stoploss):
                                             should_update_stoploss = True
@@ -1907,11 +1942,12 @@ class SwingHighLowSellStrategy(StrategyBase):
                 right_bars=entry_right
             )
             last_hh, last_ll, last_hl, last_lh = swing_utils.get_last_swing_points(swing_df)
-            logger.info(f"{self.cfg.symbol}'s Latest swing points: HH={last_hh}, LL={last_ll}, HL={last_hl}, LH={last_lh}")
+            # logger.info(f"{self.cfg.symbol}'s Latest swing points: HH={last_hh}, LL={last_ll}, HL={last_hl}, LH={last_lh}")
             last_hh, last_ll = swing_utils.get_latest_confirmed_high_low(swing_df)
             if not last_hh or not last_ll:
                 logger.info("No HH/LL pivot available for breakout evaluation.")
                 return None
+            logger.info(f"Latest confirmed HH: {last_hh}, LL: {last_ll} for {self.cfg.symbol}")
             entry_buffer = self.entry_buffer
             breakout_high_level = last_hh["price"] + entry_buffer
             breakout_low_level = last_ll["price"] - entry_buffer
@@ -1939,12 +1975,14 @@ class SwingHighLowSellStrategy(StrategyBase):
             direction = None
             signal_price = None
             if prev_candle["close"] > breakout_high_level and last_candle["close"] > prev_candle["close"]:
-                breakout_type = "PE"
+                # PE sell if swing high breakout
+                breakout_type = "PE" # to sell
                 trend = "UP"
                 direction = "UP"
                 signal_price = breakout_high_level
             elif prev_candle["close"] < breakout_low_level and last_candle["close"] < prev_candle["close"]:
-                breakout_type = "CE"
+                # CE sell if swing low breakout
+                breakout_type = "CE"  #to sell 
                 trend = "DOWN"
                 direction = "DOWN"
                 signal_price = breakout_low_level
@@ -1987,14 +2025,20 @@ class SwingHighLowSellStrategy(StrategyBase):
                 logger.info(f"💰 Using config quantity: {lot_qty}")
             
             # Set stoploss levels for SELL strategy
-            if breakout_type == "CE":
-                stoploss_spot_level = last_ll["price"]  # Stoploss is swing low for CE
+            if breakout_type == "PE":
+                # For PE sell, stoploss is swing low
+                stoploss_spot_level = last_ll["price"]  
             else:
-                stoploss_spot_level = last_hh["price"]  # Stoploss is swing high for PE
+                # For CE sell, stoploss is swing high
+                stoploss_spot_level = last_hh["price"]  
 
             entry_spot_price = spot_price
             entry_spot_swing_high = last_hh["price"]
             entry_spot_swing_low = last_ll["price"]
+            logger.info(f"Entry signal detected: {breakout_type} {direction} at spot_price={spot_price}, "
+                        f"entry_spot_swing_high={entry_spot_swing_high}, entry_spot_swing_low={entry_spot_swing_low}, "
+                        f"stoploss_spot_level={stoploss_spot_level}, strike={strike}, expiry_date={expiry_date}, "
+                        f"lot_qty={lot_qty}")
 
             # --- Regime detection and quantity adjustment logic ---
             # Check if regime_reference is available, if not try to get it
@@ -2085,11 +2129,9 @@ class SwingHighLowSellStrategy(StrategyBase):
                 
                 if atr_value is not None:
                     target_points = float(atr_value) * float(effective_atr_multiplier)
-                    if breakout_type == "CE":
-                        # For CE SELL: Target = swing_high + entry_buffer + (ATR * effective_multiplier)
+                    if breakout_type == "PE":
                         target_spot_level = float(entry_spot_swing_high) + float(entry_buffer) + target_points
                     else:
-                        # For PE SELL: Target = swing_low - entry_buffer - (ATR * effective_multiplier)
                         target_spot_level = float(entry_spot_swing_low) - float(entry_buffer) - target_points
                     logger.info(f"Target calculated using ATR: {target_spot_level} (effective_multiplier={effective_atr_multiplier}, target_points={target_points})")
                 else:
@@ -2098,11 +2140,11 @@ class SwingHighLowSellStrategy(StrategyBase):
                     target_points = None
             elif target_type == "fixed":
                 target_points = target_cfg.get("fixed_points", 0)
-                if breakout_type == "CE":
-                    # For CE SELL: Target = swing_high + entry_buffer + fixed_points
+                if breakout_type == "PE":
+                    
                     target_spot_level = float(entry_spot_swing_high) + float(entry_buffer) + float(target_points)
                 else:
-                    # For PE SELL: Target = swing_low - entry_buffer - fixed_points  
+                    
                     target_spot_level = float(entry_spot_swing_low) - float(entry_buffer) - float(target_points)
                 logger.info(f"Target calculated using fixed points: {target_spot_level} (fixed_points={target_points})")
             else:

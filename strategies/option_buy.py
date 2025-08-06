@@ -147,16 +147,18 @@ class OptionBuyStrategy(StrategyBase):
             return
         trade = self.trade
         # 1. Wait for first candle completion
-        await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
-        asyncio.sleep(2)  # Give some time for the first candle to complete
-        logger.info('First candle completed, proceeding with setup...')
         interval_minutes = trade.get("interval_minutes", 5)
         first_candle_time = trade.get("first_candle_time", "09:15")
-        max_strikes = trade.get("max_strikes", 40)
         symbol = self.symbol
         if not symbol:
             logger.error("No symbol configured for OptionBuy strategy.")
             return
+        await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
+        asyncio.sleep(2)  # Give some time for the first candle to complete
+        logger.info('First candle completed, proceeding with setup...')
+        
+        max_strikes = trade.get("max_strikes", 40)
+       
         today_dt = get_ist_datetime()
         self.regime_reference = await get_regime_reference_points(
             self.dp,
@@ -308,6 +310,7 @@ class OptionBuyStrategy(StrategyBase):
                     constants.TRADE_STATUS_EXIT_REVERSAL,
                     constants.TRADE_STATUS_EXIT_EOD,
                     constants.TRADE_STATUS_EXIT_MAX_LOSS,
+                    constants.TRADE_STATUS_EXIT_ATOMIC_FAILED,
                     constants.TRADE_STATUS_ENTRY_CANCELLED,
                     constants.TRADE_STATUS_EXIT_CLOSED
                     

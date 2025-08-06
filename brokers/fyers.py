@@ -1311,10 +1311,12 @@ class FyersWrapper(BrokerInterface):
             if product_type:
                 exit_id = f"{symbol}-{product_type}"
             else:
-                exit_id = f"{symbol}-BO"  # fallback for backward compatibility
+                logger.error(f"Fyers exit_order: product_type is required for exit. Cannot exit order {broker_order_id} for symbol {symbol} without product_type.")
+                return {"status": False, "message": "product_type is required for Fyers exit_order", "code": "MISSING_PRODUCT_TYPE"}
         else:
             logger.error("Symbol must be provided to exit order.")
-            return None
+            return {"status": False, "message": "Symbol is required for Fyers exit_order", "code": "MISSING_SYMBOL"}
+        
         data = {"id": exit_id}
         if exit_reason:
             logger.info(f"Exiting Fyers order {broker_order_id} for symbol {symbol} with reason: {exit_reason}")

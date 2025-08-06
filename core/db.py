@@ -806,6 +806,7 @@ async def get_all_orders(session: AsyncSession):
             orders.c.executed_quantity,  # Add this line to select executed_quantity
             strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
             strategies.c.name.label('strategy_name'),  # Join to get the strategy name
+            strategy_symbols.c.enable_smart_levels.label('smart_level_enabled'),  # Add smart level enabled flag
         )
         .select_from(
             orders
@@ -862,10 +863,48 @@ async def get_all_orders(session: AsyncSession):
 
 async def get_order_by_id(session: AsyncSession, order_id: int):
     """
-    Retrieve a specific order by its ID (logical order only, no broker join).
+    Retrieve a specific order by its ID with strategy and symbol information.
     """
-    from algosat.core.dbschema import orders
-    stmt = select(orders).where(orders.c.id == order_id)
+    from algosat.core.dbschema import strategies
+    stmt = (
+        select(
+            orders.c.id,
+            orders.c.strategy_symbol_id,
+            orders.c.strike_symbol,
+            orders.c.pnl,
+            orders.c.candle_range,
+            orders.c.entry_price,
+            orders.c.stop_loss,
+            orders.c.target_price,
+            orders.c.current_price,
+            orders.c.price_last_updated,
+            orders.c.signal_time,
+            orders.c.entry_time,
+            orders.c.exit_time,
+            orders.c.exit_price,
+            orders.c.status,
+            orders.c.reason,
+            orders.c.atr,
+            orders.c.supertrend_signal,
+            orders.c.lot_qty,
+            orders.c.side,
+            orders.c.qty,
+            orders.c.executed_quantity,
+            orders.c.created_at,
+            orders.c.updated_at,
+            # Add required fields for OrderDetailResponse
+            strategy_symbols.c.symbol.label('symbol'),  # Required field
+            strategy_symbols.c.config_id.label('strategy_config_id'),  # Required field
+            strategies.c.name.label('strategy_name'),
+            strategy_symbols.c.enable_smart_levels.label('smart_level_enabled'),
+        )
+        .select_from(
+            orders
+            .outerjoin(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
+            .outerjoin(strategies, strategy_symbols.c.strategy_id == strategies.c.id)
+        )
+        .where(orders.c.id == order_id)
+    )
     result = await session.execute(stmt)
     row = result.first()
     return dict(row._mapping) if row else None
@@ -873,9 +912,26 @@ async def get_order_by_id(session: AsyncSession, order_id: int):
 async def get_orders_by_broker(session: AsyncSession, broker_name: str):
     """
     Retrieve orders filtered by broker_name with broker execution details.
-    Joins orders with broker_credentials.
+    Since orders don't have a direct broker_id, we need to filter through broker_executions.
     """
     from algosat.core.dbschema import broker_executions, strategies
+    
+    # First, get order IDs that have executions from the specified broker
+    broker_orders_stmt = (
+        select(broker_executions.c.parent_order_id.distinct())
+        .select_from(
+            broker_executions.join(broker_credentials, broker_executions.c.broker_id == broker_credentials.c.id)
+        )
+        .where(broker_credentials.c.broker_name == broker_name)
+    )
+    
+    result = await session.execute(broker_orders_stmt)
+    order_ids = [row[0] for row in result.fetchall()]
+    
+    if not order_ids:
+        return []
+    
+    # Now get the full order details for these order IDs
     stmt = (
         select(
             orders.c.id,
@@ -902,16 +958,16 @@ async def get_orders_by_broker(session: AsyncSession, broker_name: str):
             orders.c.created_at,
             orders.c.updated_at,
             orders.c.executed_quantity,  # Add this field
-            broker_credentials.c.broker_name,
             strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
             strategies.c.name.label('strategy_name'),  # Join to get the strategy name
+            strategy_symbols.c.enable_smart_levels.label('smart_level_enabled'),  # Add smart level enabled flag
         )
         .select_from(
-            orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id)
+            orders
             .outerjoin(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
             .outerjoin(strategies, strategy_symbols.c.strategy_id == strategies.c.id)
         )
-        .where(broker_credentials.c.broker_name == broker_name)
+        .where(orders.c.id.in_(order_ids))
         .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
     )
     result = await session.execute(stmt)
@@ -955,9 +1011,26 @@ async def get_orders_by_broker(session: AsyncSession, broker_name: str):
 async def get_orders_by_broker_and_strategy(session: AsyncSession, broker_name: str, strategy_config_id: int):
     """
     Retrieve orders filtered by both broker_name and strategy_config_id with broker execution details.
-    Joins orders with broker_credentials.
+    Since orders don't have a direct broker_id, we need to filter through broker_executions.
     """
     from algosat.core.dbschema import broker_executions, strategies
+    
+    # First, get order IDs that have executions from the specified broker
+    broker_orders_stmt = (
+        select(broker_executions.c.parent_order_id.distinct())
+        .select_from(
+            broker_executions.join(broker_credentials, broker_executions.c.broker_id == broker_credentials.c.id)
+        )
+        .where(broker_credentials.c.broker_name == broker_name)
+    )
+    
+    result = await session.execute(broker_orders_stmt)
+    order_ids = [row[0] for row in result.fetchall()]
+    
+    if not order_ids:
+        return []
+    
+    # Now get the full order details for these order IDs, filtered by strategy_config_id
     stmt = (
         select(
             orders.c.id,
@@ -984,17 +1057,17 @@ async def get_orders_by_broker_and_strategy(session: AsyncSession, broker_name: 
             orders.c.created_at,
             orders.c.updated_at,
             orders.c.executed_quantity,  # Add this field
-            broker_credentials.c.broker_name,
             strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
             strategies.c.name.label('strategy_name'),  # Join to get the strategy name
+            strategy_symbols.c.enable_smart_levels.label('smart_level_enabled'),  # Add smart level enabled flag
         )
         .select_from(
-            orders.join(broker_credentials, orders.c.broker_id == broker_credentials.c.id)
+            orders
             .outerjoin(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
             .outerjoin(strategies, strategy_symbols.c.strategy_id == strategies.c.id)
         )
-        .where(broker_credentials.c.broker_name == broker_name)
-        .where(orders.c.strategy_config_id == strategy_config_id)
+        .where(orders.c.id.in_(order_ids))
+        .where(strategy_symbols.c.config_id == strategy_config_id)
         .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
     )
     result = await session.execute(stmt)
@@ -1659,7 +1732,7 @@ async def get_orders_by_strategy_symbol_id(session: AsyncSession, strategy_symbo
     Retrieve all orders for a specific strategy_symbol_id with broker execution details.
     Uses the same logic as get_all_orders but filters by strategy_symbol_id.
     """
-    from algosat.core.dbschema import broker_executions, broker_credentials
+    from algosat.core.dbschema import broker_executions, broker_credentials, strategies
     stmt = (
         select(
             orders.c.id,
@@ -1686,6 +1759,14 @@ async def get_orders_by_strategy_symbol_id(session: AsyncSession, strategy_symbo
             orders.c.created_at,
             orders.c.updated_at,
             orders.c.executed_quantity,  # Add this line to select executed_quantity
+            strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
+            strategies.c.name.label('strategy_name'),  # Join to get the strategy name
+            strategy_symbols.c.enable_smart_levels.label('smart_level_enabled'),  # Add smart level enabled flag
+        )
+        .select_from(
+            orders
+            .outerjoin(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
+            .outerjoin(strategies, strategy_symbols.c.strategy_id == strategies.c.id)
         )
         .where(orders.c.strategy_symbol_id == strategy_symbol_id)
         .order_by(orders.c.signal_time.desc().nullslast(), orders.c.id.desc())
@@ -2177,7 +2258,7 @@ async def get_all_open_orders(session):
         select(orders).where(orders.c.status.in_(["OPEN", "PENDING", "PLACED", "AWAITING_ENTRY", 
                                                   "EXIT_TARGET_PENDING", "EXIT_STOPLOSS_PENDING", 
                                                   "EXIT_REVERSAL_PENDING", "EXIT_EOD_PENDING", 
-                                                  "EXIT_EXPIRY_PENDING"]))
+                                                  "EXIT_EXPIRY_PENDING", "EXIT_ATOMIC_FAILED_PENDING"]))
     )
     return [dict(row._mapping) for row in result.fetchall()]
 

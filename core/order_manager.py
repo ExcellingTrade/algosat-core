@@ -1158,15 +1158,30 @@ class OrderManager:
                         
                         if matching_order:
                             live_broker_status = matching_order.get('status')
-                            logger.info(f"OrderManager: Live status check - DB status: '{status}', Live status: '{live_broker_status}' for broker_exec_id={broker_exec_id}")
+                            live_product_type = matching_order.get('product_type')
+                            logger.info(f"OrderManager: Live status check - DB status: '{status}', Live status: '{live_broker_status}', Live product_type: '{live_product_type}' for broker_exec_id={broker_exec_id}")
                             
-                            # Update DB status if different from live status
+                            # Update DB status and product_type if different from live data
+                            update_needed = False
                             if live_broker_status and live_broker_status.upper() != status:
-                                logger.info(f"OrderManager: Updating broker_exec_id={broker_exec_id} status from '{status}' to '{live_broker_status}' based on live data")
-                                await self.update_broker_exec_status_in_db(broker_exec_id, live_broker_status)
+                                update_needed = True
                                 status = live_broker_status.upper()  # Use live status for exit decisions
+                                logger.info(f"OrderManager: Status update needed for broker_exec_id={broker_exec_id}: '{status}' -> '{live_broker_status}'")
+                            
+                            if live_product_type and live_product_type != product_type:
+                                update_needed = True
+                                product_type = live_product_type  # Use live product_type for exit decisions
+                                logger.info(f"OrderManager: Product_type update needed for broker_exec_id={broker_exec_id}: '{product_type}' -> '{live_product_type}'")
+                            
+                            if update_needed:
+                                logger.info(f"OrderManager: Updating broker_exec_id={broker_exec_id} with live data: status='{live_broker_status}', product_type='{live_product_type}'")
+                                await self.update_broker_exec_status_in_db(
+                                    broker_exec_id, 
+                                    live_broker_status,
+                                    product_type=live_product_type
+                                )
                             else:
-                                logger.debug(f"OrderManager: Live status matches DB status '{status}' for broker_exec_id={broker_exec_id}")
+                                logger.debug(f"OrderManager: Live data matches DB data for broker_exec_id={broker_exec_id}")
                         else:
                             logger.warning(f"OrderManager: Could not find matching order in broker response for broker_exec_id={broker_exec_id}, using DB status '{status}'")
                     except Exception as e:
@@ -1216,7 +1231,7 @@ class OrderManager:
                             action = exit_action,
                             executed_quantity=be.get('executed_quantity', 0),
                             execution_price=ltp or 0.0,
-                            product_type=product_type,
+                            product_type=product_type,  # Use updated product_type from live data
                             order_type='MARKET',
                             order_messages=f"Exit order placed. Reason: {exit_reason}",
                             symbol=symbol,
@@ -1263,7 +1278,7 @@ class OrderManager:
                             status='FILLED',
                             executed_quantity=be.get('executed_quantity', 0),
                             execution_price=ltp or 0.0,
-                            product_type=product_type,
+                            product_type=product_type,  # Use updated product_type from live data
                             order_type='MARKET',
                             order_messages=f"Exit and cancel placed for PARTIALLY_FILLED. Reason: {exit_reason}",
                             symbol=symbol,

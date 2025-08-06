@@ -499,6 +499,10 @@ async def get_orders_by_symbol_endpoint(
         if rows:
             print(f"DEBUG: first order: {rows[0]}")
         
+        # Add order_id field (alias for id) to each row
+        for row in rows:
+            row['order_id'] = row['id']
+        
         orders = [OrderListResponse(**row) for row in rows]
         return sorted(orders, key=lambda o: o.signal_time or "", reverse=True)
         

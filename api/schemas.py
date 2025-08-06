@@ -222,6 +222,7 @@ class OrderListResponse(BaseModel):
     created_at: Optional[datetime] = None
     traded_price: Optional[float] = Field(default=0.0, description="Actual traded price")
     broker_executions: Optional[List[Dict[str, Any]]] = Field(default=[], description="List of broker executions for this order")
+    smart_level_enabled: Optional[bool] = Field(default=False, description="Whether smart levels are enabled for this strategy symbol")
 
     @field_serializer("signal_time", "entry_time", "exit_time", "created_at", "price_last_updated")
     def serialize_dt(self, v):

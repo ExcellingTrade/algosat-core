@@ -835,9 +835,18 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     logger.warning("Not enough entry_df data for atomic confirmation after order.")
                     # Unable to confirm, exit order for safety
                     await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed",check_live_status=True)
+                    
+                    # Update status to EXIT_ATOMIC_FAILED_PENDING
+                    from algosat.common import constants
+                    logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
+                    await self.order_manager.update_order_status_in_db(
+                        order_id=order_info.get("order_id") or order_info.get("id"),
+                        status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                    )
+                    
                     # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
                     logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}")
-                    return None
+                    return order_info
                 entry_df2_sorted = entry_df2.sort_values("timestamp")
                 latest_entry = entry_df2_sorted.iloc[-1]
                 # Confirm based on the breakout direction
@@ -856,9 +865,18 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 else:
                     logger.info("Breakout failed atomic confirmation, exiting order.")
                     await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed", check_live_status=True)
+                    
+                    # Update status to EXIT_ATOMIC_FAILED_PENDING
+                    from algosat.common import constants
+                    logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
+                    await self.order_manager.update_order_status_in_db(
+                        order_id=order_info.get("order_id") or order_info.get("id"),
+                        status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                    )
+                    
                     # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
                     logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}")
-                    return None
+                    return order_info
             else:
                 logger.error("Order placement failed in dual timeframe breakout.")
                 return None
@@ -1109,8 +1127,17 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                         if entry_df2 is None or len(entry_df2) < 2:
                                             logger.warning("❌ Not enough entry data for re-entry atomic confirmation")
                                             await self.order_manager.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"), exit_reason="Re-entry atomic confirmation failed", check_live_status=True)
+                                            
+                                            # Update status to EXIT_ATOMIC_FAILED_PENDING  
+                                            from algosat.common import constants
+                                            logger.info(f"Re-entry confirmation failed due to missing data. Order exited: {re_entry_order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
+                                            await self.order_manager.update_order_status_in_db(
+                                                order_id=re_entry_order_info.get("order_id") or re_entry_order_info.get("id"),
+                                                status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                                            )
+                                            
                                             logger.info(f"🚪 Re-entry order exited due to confirmation failure: {re_entry_order_info}")
-                                            return None
+                                            return re_entry_order_info
                                         
                                         entry_df2_sorted = entry_df2.sort_values("timestamp")
                                         latest_entry = entry_df2_sorted.iloc[-1]
@@ -1124,8 +1151,17 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                         else:
                                             logger.info("❌ Re-entry breakout failed atomic confirmation, exiting order")
                                             await self.order_manager.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"), exit_reason="Re-entry atomic confirmation failed")
+                                            
+                                            # Update status to EXIT_ATOMIC_FAILED_PENDING
+                                            from algosat.common import constants
+                                            logger.info(f"Re-entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {re_entry_order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
+                                            await self.order_manager.update_order_status_in_db(
+                                                order_id=re_entry_order_info.get("order_id") or re_entry_order_info.get("id"),
+                                                status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                                            )
+                                            
                                             logger.info(f"🚪 Re-entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {re_entry_order_info}")
-                                            return None
+                                            return re_entry_order_info
                                     else:
                                         logger.error(f"❌ Re-entry order placement failed for order_id={order_id}")
                                         continue
@@ -1978,6 +2014,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     constants.TRADE_STATUS_EXIT_REVERSAL,
                     constants.TRADE_STATUS_EXIT_EOD,
                     constants.TRADE_STATUS_EXIT_MAX_LOSS,
+                    constants.TRADE_STATUS_EXIT_ATOMIC_FAILED,
                     constants.TRADE_STATUS_ENTRY_CANCELLED,
                     constants.TRADE_STATUS_EXIT_CLOSED
                     
@@ -2122,6 +2159,9 @@ class SwingHighLowBuyStrategy(StrategyBase):
             entry_spot_price = spot_price
             entry_spot_swing_high = last_hh["price"]
             entry_spot_swing_low = last_ll["price"]
+            logger.info(f"Evaluating {breakout_type} breakout: spot_price={spot_price}, entry_spot_swing_high={entry_spot_swing_high}, "
+                        f"entry_spot_swing_low={entry_spot_swing_low}, stoploss_spot_level={stoploss_spot_level}, "
+                        f"signal_price={signal_price}, lot_qty={lot_qty}, strike={strike}, expiry_date={expiry_date}")
 
             # --- Regime detection and quantity adjustment logic ---
             # Check if regime_reference is available, if not try to get it

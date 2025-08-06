@@ -334,6 +334,7 @@ def combine_backtest_results(backtest_dir, output_file, start_date, end_date, lo
                         constants.TRADE_STATUS_EXIT_REVERSAL,
                         constants.TRADE_STATUS_EXIT_EOD,
                         constants.TRADE_STATUS_EXIT_MAX_LOSS,
+                        constants.TRADE_STATUS_EXIT_ATOMIC_FAILED,
                         constants.TRADE_REASON_MARKET_CLOSED
                     ]
                     else 0,
