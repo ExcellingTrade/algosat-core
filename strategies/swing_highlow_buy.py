@@ -176,6 +176,8 @@ class SwingHighLowBuyStrategy(StrategyBase):
             first_candle_time = self.trade.get("first_candle_time", "09:15")
             # 1. Wait for first candle completion
             await wait_for_first_candle_completion(self.entry_minutes, first_candle_time, self.symbol)
+            asyncio.sleep(2)  # Give some time for the first candle to complete
+            logger.info('First candle completed, proceeding with regime reference setup...')
             self.regime_reference = await get_regime_reference_points(
                 self.dp,
                 self.symbol,

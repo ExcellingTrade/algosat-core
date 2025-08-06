@@ -1046,8 +1046,8 @@ class OrderManager:
         if 's' in cancel_resp:
             s_status = cancel_resp.get('s')
             code = cancel_resp.get('code', 0)
-            # Fyers success: s='ok' and code=200 (or similar success codes)
-            return s_status == 'ok' and code == 200
+            # Fyers success: s='ok' indicates success, code can vary (200, 1103, etc.)
+            return s_status == 'ok'
             
         # Fallback: if neither format is recognized, assume failure for safety
         logger.warning(f"OrderManager: Unrecognized cancel response format: {cancel_resp}")
@@ -1295,6 +1295,9 @@ class OrderManager:
                         else:
                             cancel_error = cancel_resp.get('message', 'Unknown error') if cancel_resp else 'No response received'
                             logger.warning(f"OrderManager: Cancel failed for broker_exec_id={broker_exec_id}: {cancel_error}. Status will remain {status}.")
+                    else:
+                        logger.warning(f"OrderManager: Unhandled status '{status}' for broker_execution id={broker_exec_id}. No action taken.")
+                        continue
                         
                 except Exception as e:
                     logger.error(f"OrderManager: Error exiting/cancelling order for broker_id={broker_id}, broker_order_id={cache_lookup_order_id}, broker_exec_id={broker_exec_id}: {e}")

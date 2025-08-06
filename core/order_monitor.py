@@ -1283,10 +1283,52 @@ class OrderMonitor:
                     )
                     
                     # Insert EXIT broker_executions entries directly with calculated exit details
-                    logger.info(f"OrderMonitor: Inserting {len(broker_exit_data)} EXIT broker_executions with calculated details for order_id={self.order_id}")
+                    logger.info(f"OrderMonitor: Checking and inserting {len(broker_exit_data)} EXIT broker_executions with calculated details for order_id={self.order_id}")
                     
                     for exit_data in broker_exit_data:
                         try:
+                            # Check if EXIT entry already exists for this broker_order_id
+                            from algosat.core.db import get_broker_executions_for_order
+                            existing_exits = await get_broker_executions_for_order(
+                                session, 
+                                self.order_id, 
+                                side='EXIT',
+                                broker_id=exit_data['broker_id']
+                            )
+                            
+                            # Filter to check if this specific broker_order_id already has an EXIT entry
+                            existing_exit = None
+                            for exit_entry in existing_exits:
+                                if exit_entry.get('broker_order_id') == exit_data['broker_order_id']:
+                                    existing_exit = exit_entry
+                                    break
+                            
+                            if existing_exit:
+                                logger.info(f"OrderMonitor: EXIT broker_execution already exists for broker_id={exit_data['broker_id']}, broker_order_id={exit_data['broker_order_id']}. Updating execution_price and execution_time.")
+                                
+                                # Update existing EXIT entry with calculated execution details
+                                from algosat.core.db import update_rows_in_table
+                                from algosat.core.dbschema import broker_executions
+                                
+                                await update_rows_in_table(
+                                    target_table=broker_executions,
+                                    condition=(
+                                        (broker_executions.c.parent_order_id == self.order_id) &
+                                        (broker_executions.c.broker_id == exit_data['broker_id']) &
+                                        (broker_executions.c.broker_order_id == exit_data['broker_order_id']) &
+                                        (broker_executions.c.side == 'EXIT')
+                                    ),
+                                    new_values={
+                                        "execution_price": round(exit_data['exit_price'], 2),
+                                        "execution_time": exit_time,
+                                        "notes": f"PENDING exit updated with calculated details. PnL: {exit_data['broker_pnl']}",
+                                        "status": 'FILLED'  # Ensure status is FILLED since we have calculated details
+                                    }
+                                )
+                                logger.info(f"OrderMonitor: Updated existing EXIT broker_execution for broker_id={exit_data['broker_id']}, new_price={exit_data['exit_price']}")
+                                continue
+                            
+                            # No existing EXIT entry found, proceed with insertion
                             await self.order_manager._insert_exit_broker_execution(
                                 session,
                                 parent_order_id=self.order_id,
@@ -1305,7 +1347,7 @@ class OrderMonitor:
                                 action='EXIT',
                                 exit_reason=exit_reason
                             )
-                            logger.info(f"OrderMonitor: Inserted EXIT broker_execution for broker_id={exit_data['broker_id']}, price={exit_data['exit_price']}")
+                            logger.info(f"OrderMonitor: Inserted new EXIT broker_execution for broker_id={exit_data['broker_id']}, price={exit_data['exit_price']}")
                         except Exception as e:
                             logger.error(f"OrderMonitor: Error inserting EXIT broker_execution for broker_id={exit_data['broker_id']}: {e}")
                 
@@ -1327,7 +1369,7 @@ class OrderMonitor:
                 
                 # Insert basic EXIT broker_executions entries for audit trail
                 async with AsyncSessionLocal() as session:
-                    logger.info(f"OrderMonitor: Creating basic EXIT broker_executions entries for order_id={self.order_id}")
+                    logger.info(f"OrderMonitor: Checking and creating basic EXIT broker_executions entries for order_id={self.order_id}")
                     
                     for bro in entry_broker_db_orders:
                         broker_status = bro.get('status', '').upper()
@@ -1335,6 +1377,47 @@ class OrderMonitor:
                             continue
                             
                         try:
+                            # Check if EXIT entry already exists for this broker_order_id
+                            from algosat.core.db import get_broker_executions_for_order
+                            existing_exits = await get_broker_executions_for_order(
+                                session, 
+                                self.order_id, 
+                                side='EXIT',
+                                broker_id=bro.get('broker_id')
+                            )
+                            
+                            # Filter to check if this specific broker_order_id already has an EXIT entry
+                            existing_exit = None
+                            for exit_entry in existing_exits:
+                                if exit_entry.get('broker_order_id') == bro.get('broker_order_id'):
+                                    existing_exit = exit_entry
+                                    break
+                            
+                            if existing_exit:
+                                logger.info(f"OrderMonitor: EXIT broker_execution already exists for broker_id={bro.get('broker_id')}, broker_order_id={bro.get('broker_order_id')}. Updating execution_time for fallback.")
+                                
+                                # Update existing EXIT entry with execution time (fallback case)
+                                from algosat.core.db import update_rows_in_table
+                                from algosat.core.dbschema import broker_executions
+                                
+                                await update_rows_in_table(
+                                    target_table=broker_executions,
+                                    condition=(
+                                        (broker_executions.c.parent_order_id == self.order_id) &
+                                        (broker_executions.c.broker_id == bro.get('broker_id')) &
+                                        (broker_executions.c.broker_order_id == bro.get('broker_order_id')) &
+                                        (broker_executions.c.side == 'EXIT')
+                                    ),
+                                    new_values={
+                                        "execution_time": exit_time,
+                                        "notes": f"Fallback exit updated - no position data available",
+                                        "status": 'CLOSED'  # Keep CLOSED status for fallback
+                                    }
+                                )
+                                logger.info(f"OrderMonitor: Updated existing EXIT broker_execution (fallback) for broker_id={bro.get('broker_id')}")
+                                continue
+                            
+                            # No existing EXIT entry found, proceed with fallback insertion
                             await self.order_manager._insert_exit_broker_execution(
                                 session,
                                 parent_order_id=self.order_id,
@@ -1380,7 +1463,7 @@ class OrderMonitor:
                 # Insert basic EXIT broker_executions for error recovery audit trail
                 from datetime import datetime, timezone
                 async with AsyncSessionLocal() as session:
-                    logger.info(f"OrderMonitor: Creating error recovery EXIT broker_executions entries for order_id={self.order_id}")
+                    logger.info(f"OrderMonitor: Checking and creating error recovery EXIT broker_executions entries for order_id={self.order_id}")
                     
                     # Get entry broker executions for basic EXIT entries
                     from algosat.core.db import get_broker_executions_for_order
@@ -1393,6 +1476,46 @@ class OrderMonitor:
                             continue
                             
                         try:
+                            # Check if EXIT entry already exists for this broker_order_id
+                            existing_exits = await get_broker_executions_for_order(
+                                session, 
+                                self.order_id, 
+                                side='EXIT',
+                                broker_id=bro.get('broker_id')
+                            )
+                            
+                            # Filter to check if this specific broker_order_id already has an EXIT entry
+                            existing_exit = None
+                            for exit_entry in existing_exits:
+                                if exit_entry.get('broker_order_id') == bro.get('broker_order_id'):
+                                    existing_exit = exit_entry
+                                    break
+                            
+                            if existing_exit:
+                                logger.info(f"OrderMonitor: EXIT broker_execution already exists for broker_id={bro.get('broker_id')}, broker_order_id={bro.get('broker_order_id')}. Updating execution_time for error recovery.")
+                                
+                                # Update existing EXIT entry with execution time (error recovery case)
+                                from algosat.core.db import update_rows_in_table
+                                from algosat.core.dbschema import broker_executions
+                                
+                                await update_rows_in_table(
+                                    target_table=broker_executions,
+                                    condition=(
+                                        (broker_executions.c.parent_order_id == self.order_id) &
+                                        (broker_executions.c.broker_id == bro.get('broker_id')) &
+                                        (broker_executions.c.broker_order_id == bro.get('broker_order_id')) &
+                                        (broker_executions.c.side == 'EXIT')
+                                    ),
+                                    new_values={
+                                        "execution_time": exit_time,
+                                        "notes": f"Error recovery - PENDING exit processing failed",
+                                        "status": 'CLOSED'  # Keep CLOSED status for error recovery
+                                    }
+                                )
+                                logger.info(f"OrderMonitor: Updated existing EXIT broker_execution (error recovery) for broker_id={bro.get('broker_id')}")
+                                continue
+                            
+                            # No existing EXIT entry found, proceed with error recovery insertion
                             await self.order_manager._insert_exit_broker_execution(
                                 session,
                                 parent_order_id=self.order_id,

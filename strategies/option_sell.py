@@ -150,6 +150,10 @@ class OptionSellStrategy(StrategyBase):
         if self._strikes:
             return
         trade = self.trade
+        # 1. Wait for first candle completion
+        await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
+        asyncio.sleep(2)  # Give some time for the first candle to complete
+        logger.info('First candle completed, proceeding with setup...')
         interval_minutes = trade.get("interval_minutes", 5)
         first_candle_time = trade.get("first_candle_time", "09:15")
         max_strikes = trade.get("max_strikes", 40)
@@ -164,8 +168,7 @@ class OptionSellStrategy(StrategyBase):
             logger.error(f"Failed to determine max_premium for {symbol} on {today_dt}. Check configuration.")
             self._setup_failed = True
             return
-        # 1. Wait for first candle completion
-        await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
+        
         # 2. Calculate first candle data using the correct trade day
         trade_day = get_trade_day(get_ist_datetime())
         # 3. Fetch option chain and identify strikes
