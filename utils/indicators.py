@@ -183,6 +183,10 @@ def calculate_vwap(df_ma):
     if not isinstance(df_ma.index, pd.DatetimeIndex):
         if 'timestamp' in df_ma.columns:
             df_ma['timestamp'] = pd.to_datetime(df_ma['timestamp'])  # Convert to datetime if not already
+            
+            # Handle duplicate timestamps by dropping duplicates (keep first occurrence)
+            df_ma = df_ma.drop_duplicates(subset=['timestamp'], keep='first')
+            
             df_ma.set_index('timestamp', inplace=True)
         else:
             raise ValueError("DataFrame must contain a 'timestamp' column to calculate VWAP.")

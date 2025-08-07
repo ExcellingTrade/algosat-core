@@ -196,13 +196,16 @@ OPTION_TYPE_PUT = "PE"
 # Determine the root directory dynamically (assumes this script is in a subdirectory of the root)
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
+# Workspace root for logs (up one more level from ROOT_DIR)
+WORKSPACE_ROOT = os.path.abspath(os.path.join(ROOT_DIR, ".."))
+
 # Paths relative to the root directory
 CACHE_DIR = os.path.join(ROOT_DIR, "Files/cache")
 TRADE_RECORDS_DIR = os.path.join(ROOT_DIR, "Files/trades")
 BACKTEST_RESULTS_DIR = os.path.join(ROOT_DIR, "Files/backtest_results")
 
-LOG_DIR = os.path.join(ROOT_DIR, "Files/logs")
-FYER_LOG_DIR = os.path.join(ROOT_DIR, "Files/logs/Fyer")
+LOG_DIR = os.path.join(WORKSPACE_ROOT, "logs")
+FYER_LOG_DIR = os.path.join(LOG_DIR, "Fyer")
 CONFIG_DIR = os.path.join(ROOT_DIR, "Files/Config")
 
 os.makedirs(LOG_DIR, exist_ok=True)

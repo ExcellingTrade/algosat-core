@@ -4,7 +4,7 @@ import asyncio
 import time
 from datetime import datetime, timezone
 import pytz
-from algosat.common.logger import get_logger
+from algosat.common.logger import get_logger, set_strategy_context
 from algosat.models.order_aggregate import OrderAggregate
 
 from algosat.core.data_manager import DataManager
@@ -87,6 +87,17 @@ class OrderMonitor:
         except Exception as e:
             logger.error(f"OrderMonitor: Error calling strategy method '{method_name}': {e}", exc_info=True)
             return None
+
+    def _clear_order_cache(self, reason: str = "Order updated"):
+        """
+        Clear the order strategy cache to ensure fresh data is fetched after order updates.
+        
+        Args:
+            reason: Optional reason for cache clearing (for logging)
+        """
+        if self.order_id in self._order_strategy_cache:
+            del self._order_strategy_cache[self.order_id]
+            logger.debug(f"OrderMonitor: Cleared order cache for order_id={self.order_id}. Reason: {reason}")
 
     async def _get_order_and_strategy(self, order_id: int):
         """
@@ -210,6 +221,7 @@ class OrderMonitor:
                                 # Update status to EOD exit
                                 from algosat.common import constants
                                 await self.order_manager.update_order_status_in_db(self.order_id, constants.TRADE_STATUS_EXIT_EOD)
+                                self._clear_order_cache("Square-off time exit status updated")
                                 self.stop()
                                 return
                             except Exception as e:
@@ -235,6 +247,7 @@ class OrderMonitor:
                     await self.order_manager.exit_order(self.order_id, reason="AWAITING_ENTRY order exit at 15:25")
                     # Update status to CANCELLED
                     await self.order_manager.update_order_status_in_db(self.order_id, "CANCELLED")
+                    self._clear_order_cache("AWAITING_ENTRY exit status updated")
                     self.stop()
                     return
                 except Exception as e:
@@ -462,9 +475,11 @@ class OrderMonitor:
                         condition=orders.c.id == self.order_id,
                         new_values={"entry_time": entry_time}
                     )
+                    self._clear_order_cache("Order status updated to OPEN with entry_time")
                 else:
                     logger.info(f"OrderMonitor: Updating order_id={self.order_id} to {main_status}")
                     await self.order_manager.update_order_status_in_db(self.order_id, main_status)
+                    self._clear_order_cache(f"Order status updated to {main_status}")
                 last_main_status = main_status
                 if main_status in (OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.FAILED):
                     logger.info(f"OrderMonitor: Order {self.order_id} reached terminal status {main_status}. Stopping monitor.")
@@ -881,6 +896,7 @@ class OrderMonitor:
                             # Update status to max loss exit
                             from algosat.common import constants
                             await self.order_manager.update_order_status_in_db(self.order_id, constants.TRADE_STATUS_EXIT_MAX_LOSS)
+                            self._clear_order_cache("Per-trade loss limit exit status updated")
                             logger.critical(f"🚨 Exited order_id={self.order_id} due to per-trade loss limit breach")
                             self.stop()
                             return
@@ -938,6 +954,7 @@ class OrderMonitor:
                                     condition=orders.c.id == self.order_id,
                                     new_values=update_fields
                                 )
+                                await self._clear_order_cache()  # Clear cache after order status update
                                 logger.info(
                                     f"OrderMonitor: All broker positions squared off for order_id={self.order_id}. "
                                     f"Updated orders table with {update_fields} (VWAP exit_price: {avg_exit_price})"
@@ -954,6 +971,8 @@ class OrderMonitor:
                             )
                 except Exception as e:
                     logger.error(f"OrderMonitor: Error in broker position monitoring: {e}", exc_info=True)
+            logger.debug(f"OrderMonitor: Broker position monitoring completed for order_id={self.order_id}")
+            logger.debug("Next check in {self.price_order_monitor_seconds} seconds...")
             await asyncio.sleep(self.price_order_monitor_seconds)
         logger.info(f"OrderMonitor: Stopping price monitor for order_id={self.order_id} (last status: {last_main_status})")
     
@@ -973,7 +992,7 @@ class OrderMonitor:
             
             # Only check for OPEN orders
             if current_main_status != 'OPEN':
-                logger.info(f"OrderMonitor: ⏸️ SKIP: Price check skipped - order_id={self.order_id} status is '{current_main_status}', not 'OPEN'")
+                logger.debug(f"OrderMonitor: ⏸️ SKIP: Price check skipped - order_id={self.order_id} status is '{current_main_status}', not 'OPEN'")
                 return
             
             # Only for OptionBuy and OptionSell strategies
@@ -986,7 +1005,7 @@ class OrderMonitor:
             logger.info(f"OrderMonitor: 📋 Price check - order_id={self.order_id}, strategy='{strategy_name}'")
             
             if strategy_name not in ['optionbuy', 'optionsell']:
-                logger.info(f"OrderMonitor: ⏸️ SKIP: Price check skipped - order_id={self.order_id} strategy '{strategy_name}' not supported for price-based exits. Supported: [optionbuy, optionsell]")
+                # logger.debug(f"OrderMonitor: ⏸️ SKIP: Price check skipped - order_id={self.order_id} strategy '{strategy_name}' not supported for price-based exits. Supported: [optionbuy, optionsell]")
                 return
                 
             # Get required values from order
@@ -1281,6 +1300,7 @@ class OrderMonitor:
                         condition=orders.c.id == self.order_id,
                         new_values=update_fields
                     )
+                    await self._clear_order_cache()  # Clear cache after order status update
                     
                     # Insert EXIT broker_executions entries directly with calculated exit details
                     logger.info(f"OrderMonitor: Checking and inserting {len(broker_exit_data)} EXIT broker_executions with calculated details for order_id={self.order_id}")
@@ -1325,6 +1345,7 @@ class OrderMonitor:
                                         "status": 'FILLED'  # Ensure status is FILLED since we have calculated details
                                     }
                                 )
+                                await self._clear_order_cache()  # Clear cache after broker execution update
                                 logger.info(f"OrderMonitor: Updated existing EXIT broker_execution for broker_id={exit_data['broker_id']}, new_price={exit_data['exit_price']}")
                                 continue
                             
@@ -1415,6 +1436,7 @@ class OrderMonitor:
                                         "status": 'CLOSED'  # Keep CLOSED status for fallback
                                     }
                                 )
+                                await self._clear_order_cache()  # Clear cache after broker execution update
                                 logger.info(f"OrderMonitor: Updated existing EXIT broker_execution (fallback) for broker_id={bro.get('broker_id')}")
                                 continue
                             
@@ -1513,6 +1535,7 @@ class OrderMonitor:
                                         "status": 'CLOSED'  # Keep CLOSED status for error recovery
                                     }
                                 )
+                                await self._clear_order_cache()  # Clear cache after broker execution update
                                 logger.info(f"OrderMonitor: Updated existing EXIT broker_execution (error recovery) for broker_id={bro.get('broker_id')}")
                                 continue
                             
@@ -1625,6 +1648,7 @@ class OrderMonitor:
                         "price_last_updated": price_last_updated
                     }
                 )
+                await self._clear_order_cache()  # Clear cache after order price update
                 
             logger.debug(f"OrderMonitor: Updated current_price={current_price} for order_id={self.order_id}, symbol={strike_symbol}")
             
@@ -1757,6 +1781,7 @@ class OrderMonitor:
 
             if should_exit:
                 logger.critical(f"OrderMonitor: ✅ evaluate_exit returned True for order_id={self.order_id}. Calling exit_order first, then converting to PENDING.")
+                await self._clear_order_cache()  # Clear cache when evaluate_exit returns True
                 try:
                     # Call exit_order immediately when strategy decides to exit
                     await self.order_manager.exit_order(
@@ -1824,82 +1849,106 @@ class OrderMonitor:
                 # Clear order strategy cache since order status may have changed
                 if self.order_id in self._order_strategy_cache:
                     del self._order_strategy_cache[self.order_id]
-
+            logger.debug(f"OrderMonitor: evaluate_exit returned False for order_id={self.order_id}, continuing monitoring.")
+            # Sleep for the configured signal monitor interval
+            logger.debug(f"OrderMonitor: Sleeping for {self.signal_monitor_seconds} seconds before next signal check for order_id={self.order_id}")
             await asyncio.sleep(self.signal_monitor_seconds)
 
     async def start(self) -> None:
-        # Fetch signal_monitor_seconds from strategy config if not set
-        if self.signal_monitor_seconds is None:
-            # Use strategy instance if available, otherwise fetch from database
+        # Get strategy context for logging
+        strategy_context = None
+        try:
+            # Try to get strategy context from strategy instance first
             if self.strategy_instance is not None:
-                strategy = self.strategy_instance
-                # Still need strategy_config and strategy_symbol from database for strategy_id
-                _, strategy_symbol, strategy_config, _ = await self._get_order_and_strategy(self.order_id)
-                logger.debug(f"OrderMonitor: Using passed strategy instance for signal_monitor_seconds calculation")
-            else:
-                # Use unified cache-based access for strategy_config and strategy
-                _, strategy_symbol, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
-                logger.debug(f"OrderMonitor: Using database strategy for signal_monitor_seconds calculation")
-                
-            # Get strategy_id from multiple sources (priority order)
-            strategy_id = None
+                strategy_context = getattr(self.strategy_instance.cfg, 'strategy_key', None)
             
-            # Priority 1: Use strategy_id passed to constructor (most efficient)
-            if self.strategy_id is not None:
-                strategy_id = self.strategy_id
-                logger.debug(f"OrderMonitor: Using constructor strategy_id={strategy_id} for order_id={self.order_id}")
-            # Priority 2: Get from strategy_symbol (most reliable from database)
-            elif strategy_symbol:
-                strategy_id = strategy_symbol.get('strategy_id')
-                logger.debug(f"OrderMonitor: Found strategy_id={strategy_id} from strategy_symbol for order_id={self.order_id}")
-            else:
-                logger.warning(f"OrderMonitor: No strategy_id available for order_id={self.order_id}, using fallback signal_monitor_seconds")
-                
-            logger.info(f"OrderMonitor: Using strategy_id={strategy_id} for signal_monitor_seconds calculation")
+            # If no strategy instance, try to get from database
+            if strategy_context is None:
+                _, _, _, strategy = await self._get_order_and_strategy(self.order_id)
+                if strategy:
+                    strategy_context = strategy.get('strategy_key', None)
             
-            import json
-            trade_param = strategy_config.get('trade') if strategy_config else None
-            if strategy_id in (1, 2):
-                # For strategy_id 1, 2: use interval_minutes from trade param
-                interval_minutes = None
-                if trade_param:
-                    try:
-                        trade_param_dict = json.loads(trade_param) if isinstance(trade_param, str) else trade_param
-                        interval_minutes = trade_param_dict.get('interval_minutes')
-                    except Exception as e:
-                        logger.error(f"OrderMonitor: Could not parse trade_param for order_id={self.order_id}: {e}")
-                if interval_minutes:
-                    self.signal_monitor_seconds = int(interval_minutes) * 60
+            # Normalize strategy context to lowercase
+            if strategy_context:
+                strategy_context = strategy_context.lower()
+        except Exception as e:
+            logger.error(f"OrderMonitor: Error getting strategy context for order_id={self.order_id}: {e}")
+            strategy_context = None
+        
+        # Set strategy context for all OrderMonitor operations
+        with set_strategy_context(strategy_context) if strategy_context else set_strategy_context("order_monitor"):
+            # Fetch signal_monitor_seconds from strategy config if not set
+            if self.signal_monitor_seconds is None:
+                # Use strategy instance if available, otherwise fetch from database
+                if self.strategy_instance is not None:
+                    strategy = self.strategy_instance
+                    # Still need strategy_config and strategy_symbol from database for strategy_id
+                    _, strategy_symbol, strategy_config, _ = await self._get_order_and_strategy(self.order_id)
+                    logger.debug(f"OrderMonitor: Using passed strategy instance for signal_monitor_seconds calculation")
                 else:
-                    self.signal_monitor_seconds = 5 * 60  # fallback default
-            elif strategy_id in (3, 4):
-                # For strategy_id 3, 4: use stoploss.timeframe from trade param
-                stoploss_timeframe = None
-                if trade_param:
-                    try:
-                        trade_param_dict = json.loads(trade_param) if isinstance(trade_param, str) else trade_param
-                        stoploss_section = trade_param_dict.get('stoploss', {})
-                        stoploss_timeframe = stoploss_section.get('timeframe')
-                    except Exception as e:
-                        logger.error(f"OrderMonitor: Could not parse stoploss section for order_id={self.order_id}: {e}")
-                if stoploss_timeframe:
-                    # Remove 'm' prefix if present and convert to int
-                    if isinstance(stoploss_timeframe, str) and stoploss_timeframe.endswith('m'):
-                        stoploss_timeframe = stoploss_timeframe[:-1]
-                    try:
-                        self.signal_monitor_seconds = int(stoploss_timeframe) * 60
-                    except Exception as e:
-                        logger.error(f"OrderMonitor: Could not convert stoploss_timeframe to int for order_id={self.order_id}: {e}")
+                    # Use unified cache-based access for strategy_config and strategy
+                    _, strategy_symbol, strategy_config, strategy = await self._get_order_and_strategy(self.order_id)
+                    logger.debug(f"OrderMonitor: Using database strategy for signal_monitor_seconds calculation")
+                    
+                # Get strategy_id from multiple sources (priority order)
+                strategy_id = None
+                
+                # Priority 1: Use strategy_id passed to constructor (most efficient)
+                if self.strategy_id is not None:
+                    strategy_id = self.strategy_id
+                    logger.debug(f"OrderMonitor: Using constructor strategy_id={strategy_id} for order_id={self.order_id}")
+                # Priority 2: Get from strategy_symbol (most reliable from database)
+                elif strategy_symbol:
+                    strategy_id = strategy_symbol.get('strategy_id')
+                    logger.debug(f"OrderMonitor: Found strategy_id={strategy_id} from strategy_symbol for order_id={self.order_id}")
+                else:
+                    logger.warning(f"OrderMonitor: No strategy_id available for order_id={self.order_id}, using fallback signal_monitor_seconds")
+                    
+                logger.info(f"OrderMonitor: Using strategy_id={strategy_id} for signal_monitor_seconds calculation")
+                
+                import json
+                trade_param = strategy_config.get('trade') if strategy_config else None
+                if strategy_id in (1, 2):
+                    # For strategy_id 1, 2: use interval_minutes from trade param
+                    interval_minutes = None
+                    if trade_param:
+                        try:
+                            trade_param_dict = json.loads(trade_param) if isinstance(trade_param, str) else trade_param
+                            interval_minutes = trade_param_dict.get('interval_minutes')
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: Could not parse trade_param for order_id={self.order_id}: {e}")
+                    if interval_minutes:
+                        self.signal_monitor_seconds = int(interval_minutes) * 60
+                    else:
+                        self.signal_monitor_seconds = 5 * 60  # fallback default
+                elif strategy_id in (3, 4):
+                    # For strategy_id 3, 4: use stoploss.timeframe from trade param
+                    stoploss_timeframe = None
+                    if trade_param:
+                        try:
+                            trade_param_dict = json.loads(trade_param) if isinstance(trade_param, str) else trade_param
+                            stoploss_section = trade_param_dict.get('stoploss', {})
+                            stoploss_timeframe = stoploss_section.get('timeframe')
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: Could not parse stoploss section for order_id={self.order_id}: {e}")
+                    if stoploss_timeframe:
+                        # Remove 'm' prefix if present and convert to int
+                        if isinstance(stoploss_timeframe, str) and stoploss_timeframe.endswith('m'):
+                            stoploss_timeframe = stoploss_timeframe[:-1]
+                        try:
+                            self.signal_monitor_seconds = int(stoploss_timeframe) * 60
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: Could not convert stoploss_timeframe to int for order_id={self.order_id}: {e}")
+                            self.signal_monitor_seconds = 5 * 60
+                    else:
                         self.signal_monitor_seconds = 5 * 60
                 else:
+                    # fallback default
+                    logger.info(f"OrderMonitor: Using fallback signal_monitor_seconds (300) for order_id={self.order_id}")
                     self.signal_monitor_seconds = 5 * 60
-            else:
-                # fallback default
-                logger.info(f"OrderMonitor: Using fallback signal_monitor_seconds (300) for order_id={self.order_id}")
-                self.signal_monitor_seconds = 5 * 60
-        logger.info(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_seconds}s)")
-        await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
-        # await asyncio.gather( self._signal_monitor())
+            logger.info(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_seconds}s)")
+            await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
+            # await asyncio.gather( self._signal_monitor())
 
     def stop(self) -> None:
         self._running = False

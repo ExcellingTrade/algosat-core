@@ -10,7 +10,7 @@ from algosat.core.dbschema import strategy_configs
 from algosat.core.order_manager import OrderManager
 from algosat.core.broker_manager import BrokerManager
 from algosat.core.order_request import Side
-from algosat.core.db import AsyncSessionLocal, get_order_by_id
+from algosat.core.db import AsyncSessionLocal, get_all_orders_for_strategy_symbol_and_tradeday, get_order_by_id
 from algosat.core.signal import TradeSignal, SignalType
 from algosat.common.strategy_utils import (
     calculate_end_date,
@@ -158,7 +158,7 @@ class OptionSellStrategy(StrategyBase):
             return
         # 1. Wait for first candle completion
         await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
-        asyncio.sleep(2)  # Give some time for the first candle to complete
+        await asyncio.sleep(2)  # Give some time for the first candle to complete
         logger.info('First candle completed, proceeding with setup...')
         
         max_strikes = trade.get("max_strikes", 40)
@@ -287,6 +287,82 @@ class OptionSellStrategy(StrategyBase):
 
             logger.debug(f"Synced positions for strategy {strategy_id}: {list(self._positions.keys())}")
             logger.debug(f"Synced last_signal_direction: {self._last_signal_direction}")
+
+    async def check_trade_limits(self) -> tuple[bool, str]:
+        """
+        Check if the symbol has exceeded maximum trades or maximum loss trades configured limits.
+        Now symbol-based instead of strategy-based.
+        Returns (can_trade: bool, reason: str)
+        """
+        try:
+            trade_config = self.trade
+            max_trades = trade_config.get('max_trades', None)
+            max_loss_trades = trade_config.get('max_loss_trades', None)
+            
+            # If no limits are configured, allow trading
+            if max_trades is None and max_loss_trades is None:
+                return True, "No trade limits configured"
+            
+            symbol_id = getattr(self.cfg, 'symbol_id', None)
+            if not symbol_id:
+                logger.warning("No symbol_id found in config, cannot check trade limits")
+                return True, "No symbol_id found, allowing trade"
+            
+            trade_day = get_trade_day(get_ist_datetime())
+            
+            async with AsyncSessionLocal() as session:
+                # Get all orders for this strategy symbol on the current trade day
+                all_orders = await get_all_orders_for_strategy_symbol_and_tradeday(session, symbol_id, trade_day)
+                
+                # Count completed trades (both profitable and loss trades)
+                completed_statuses = [
+                    constants.TRADE_STATUS_EXIT_TARGET,
+                    constants.TRADE_STATUS_EXIT_STOPLOSS,
+                    constants.TRADE_STATUS_EXIT_REVERSAL,
+                    constants.TRADE_STATUS_EXIT_EOD,
+                    constants.TRADE_STATUS_EXIT_MAX_LOSS,
+                    constants.TRADE_STATUS_EXIT_ATOMIC_FAILED,
+                    constants.TRADE_STATUS_ENTRY_CANCELLED,
+                    constants.TRADE_STATUS_EXIT_CLOSED
+                    
+                ]
+                
+                completed_trades = [order for order in all_orders if order.get('status') in completed_statuses]
+                total_completed_trades = len(completed_trades)
+                
+                # Count loss trades (excluding profitable trades)
+                loss_statuses = [
+                    constants.TRADE_STATUS_EXIT_STOPLOSS,
+                    constants.TRADE_STATUS_EXIT_MAX_LOSS,
+                    constants.TRADE_STATUS_ENTRY_CANCELLED
+                ]
+                
+                loss_trades = [order for order in completed_trades if order.get('status') in loss_statuses]
+                total_loss_trades = len(loss_trades)
+                
+                logger.debug(f"Trade limits check - Total completed trades: {total_completed_trades}, Loss trades: {total_loss_trades}")
+                logger.debug(f"Trade limits config - Max trades: {max_trades}, Max loss trades: {max_loss_trades}")
+                logger.debug(f"Completed trade statuses found: {[order.get('status') for order in completed_trades]}")
+                logger.debug(f"Loss trade statuses found: {[order.get('status') for order in loss_trades]}")
+                
+                # Check max_trades limit
+                if max_trades is not None and total_completed_trades >= max_trades:
+                    reason = f"Maximum trades limit reached for symbol: {total_completed_trades}/{max_trades}"
+                    logger.info(reason)
+                    return False, reason
+                
+                # Check max_loss_trades limit
+                if max_loss_trades is not None and total_loss_trades >= max_loss_trades:
+                    reason = f"Maximum loss trades limit reached for symbol: {total_loss_trades}/{max_loss_trades}"
+                    logger.info(reason)
+                    return False, reason
+                
+                return True, f"Trade limits OK for symbol - Completed: {total_completed_trades}/{max_trades or 'unlimited'}, Loss: {total_loss_trades}/{max_loss_trades or 'unlimited'}"
+                
+        except Exception as e:
+            logger.error(f"Error checking trade limits: {e}")
+            # On error, allow trading to avoid blocking legitimate trades
+            return True, f"Error checking trade limits, allowing trade: {e}"
             
 
     async def process_cycle(self) -> Optional[dict]:
@@ -298,6 +374,15 @@ class OptionSellStrategy(StrategyBase):
         if getattr(self, '_setup_failed', False) or not self._strikes:
             logger.warning("process_cycle aborted: setup failed or no strikes available.")
             return None
+        
+        # Check trade limits before proceeding with any new trades
+        can_trade, limit_reason = await self.check_trade_limits()
+        if not can_trade:
+            logger.warning(f"process_cycle aborted: {limit_reason}")
+            return None
+        
+        logger.debug(f"Trade limits check passed: {limit_reason}")
+
         trade_config = self.trade
         interval_minutes = trade_config.get('interval_minutes', 5)
         trade_day = get_trade_day(get_ist_datetime())#  - timedelta(days=4)

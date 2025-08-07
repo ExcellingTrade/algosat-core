@@ -9,13 +9,18 @@ Features:
 - Supports rotating file logs by size (2.3 MB max per file) and retaining up to 7 days of logs.
 - Includes console logging with colored output for better readability.
 - Allows module-specific log levels configurable via constants.
+- Strategy-aware logging: Automatically routes logs to strategy-specific files based on execution context.
 
 Usage:
-    from common.logger import get_logger
+    from common.logger import get_logger, set_strategy_context
     
-    logger = get_logger(__name__)  # Pass the module name for log level configuration
+    # Basic usage
+    logger = get_logger(__name__)
     logger.info("This is an INFO message.")
-    logger.debug("This is a DEBUG message.")
+    
+    # Strategy-aware usage
+    with set_strategy_context("option_buy"):
+        logger.info("This will go to option_buy-YYYY-MM-DD.log")
 """
 import glob
 import logging
@@ -31,6 +36,9 @@ import traceback
 from datetime import datetime, timezone, timedelta
 from logging.handlers import RotatingFileHandler, TimedRotatingFileHandler
 from pathlib import Path
+from contextvars import ContextVar
+from contextlib import contextmanager
+from typing import Optional
 
 from rich.console import Console
 from rich.logging import RichHandler
@@ -195,11 +203,35 @@ MAX_LOG_FILE_SIZE = int(2.3 * 1024 * 1024)  # 2.3 MB
 BACKUP_COUNT = 7
 DEFAULT_LOG_LEVEL = logging.INFO
 
+# Strategy context variable for async-safe strategy tracking
+_strategy_context: ContextVar[Optional[str]] = ContextVar('strategy_context', default=None)
+
 # Create a dictionary to store configured loggers (module_name -> logger)
 _LOGGERS = {}
 
 # Root logger configuration (done once)
 _ROOT_LOGGER_CONFIGURED = False
+
+
+@contextmanager
+def set_strategy_context(strategy_name: str):
+    """
+    Context manager to set the current strategy context for logging.
+    
+    Usage:
+        with set_strategy_context("option_buy"):
+            logger.info("This will go to option_buy-YYYY-MM-DD.log")
+    """
+    token = _strategy_context.set(strategy_name.lower())
+    try:
+        yield
+    finally:
+        _strategy_context.reset(token)
+
+
+def get_current_strategy_context() -> Optional[str]:
+    """Get the current strategy context, if any."""
+    return _strategy_context.get(None)
 
 
 # --- Console Handler Improvements: RichHandler with custom colors and minimal output ---
@@ -289,6 +321,35 @@ def get_log_file():
     return log_file
 
 
+def get_strategy_aware_log_file(module_name: str) -> str:
+    """
+    Get the appropriate log file based on module name and current strategy context.
+    
+    Priority:
+    1. API modules -> api-YYYY-MM-DD.log (ignores strategy context)
+    2. Broker monitor -> broker_monitor-YYYY-MM-DD.log (ignores strategy context)
+    3. Strategy context (if set) -> strategy_name-YYYY-MM-DD.log
+    4. Default -> algosat-YYYY-MM-DD.log
+    """
+    today = get_ist_now().strftime('%Y-%m-%d')
+    date_dir = os.path.join(constants.LOG_DIR, today)
+    os.makedirs(date_dir, exist_ok=True)
+    
+    # API and broker_monitor always get their own files (ignore strategy context)
+    if module_name.startswith("api."):
+        return os.path.join(date_dir, f"api-{today}.log")
+    elif module_name == "broker_monitor":
+        return os.path.join(date_dir, f"broker_monitor-{today}.log")
+    
+    # Check strategy context for other modules
+    strategy_context = get_current_strategy_context()
+    if strategy_context:
+        return os.path.join(date_dir, f"{strategy_context}-{today}.log")
+    
+    # Default fallback
+    return os.path.join(date_dir, f"algosat-{today}.log")
+
+
 class ISTFormatter(logging.Formatter):
     """Custom formatter to display log times in IST (Asia/Kolkata)."""
     def formatTime(self, record, datefmt=None):
@@ -353,56 +414,98 @@ def configure_root_logger():
     _ROOT_LOGGER_CONFIGURED = True
 
 
+class StrategyAwareFileHandler(logging.FileHandler):
+    """
+    Custom FileHandler that dynamically routes logs to strategy-specific files
+    based on the current strategy context at the time of logging.
+    """
+    
+    def __init__(self, module_name: str, mode='a', encoding=None, delay=False):
+        self.module_name = module_name
+        self.current_file = None
+        self.current_stream = None
+        # Initialize with default log file
+        default_file = get_strategy_aware_log_file(module_name)
+        super().__init__(default_file, mode, encoding, delay)
+    
+    def _get_current_log_file(self):
+        """Get the appropriate log file based on current strategy context."""
+        return get_strategy_aware_log_file(self.module_name)
+    
+    def emit(self, record):
+        """
+        Emit a record, dynamically routing to the correct file based on current context.
+        """
+        # Get the log file for current context
+        target_file = self._get_current_log_file()
+        
+        # If target file changed, switch the stream
+        if target_file != self.current_file:
+            # Close current stream if it exists
+            if self.current_stream:
+                self.current_stream.close()
+            
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(target_file), exist_ok=True)
+            
+            # Open new stream
+            self.current_file = target_file
+            self.baseFilename = target_file  # Update baseFilename for logging framework
+            self.current_stream = open(target_file, self.mode, encoding=self.encoding)
+            self.stream = self.current_stream
+        
+        # Emit the record using parent class logic
+        super().emit(record)
+        
+        # Ensure immediate write
+        if self.stream:
+            self.stream.flush()
+    
+    def close(self):
+        """Close the handler and clean up streams."""
+        if self.current_stream:
+            self.current_stream.close()
+            self.current_stream = None
+        super().close()
+
+
 def get_logger(module_name: str) -> logging.Logger:
     """
-    Get or configure a logger for the specified module.
-    - All loggers whose name starts with 'api.' will log to logs/YYYY-MM-DD/api-YYYY-MM-DD.log
-    - broker_monitor logs to logs/YYYY-MM-DD/broker_monitor-YYYY-MM-DD.log  
-    - All others log to logs/YYYY-MM-DD/algosat-YYYY-MM-DD.log
-    - NO SIZE-BASED ROLLOVER - Only daily file rotation based on date
+    Get or configure a logger for the specified module with strategy-aware routing.
+    
+    Uses a custom handler that dynamically routes logs based on current strategy context
+    at the time each log message is written (not when logger is created).
+    
+    - Strategy context logs: logs/YYYY-MM-DD/strategy_name-YYYY-MM-DD.log
+    - API logs: logs/YYYY-MM-DD/api-YYYY-MM-DD.log
+    - Broker monitor logs: logs/YYYY-MM-DD/broker_monitor-YYYY-MM-DD.log  
+    - Default logs: logs/YYYY-MM-DD/algosat-YYYY-MM-DD.log
     """
     logger = logging.getLogger(module_name)
     
-    # Always check if we need to update the log file for today's date
-    # This handles cases where the process runs across midnight
-    today = get_ist_now().strftime('%Y-%m-%d')
-    date_dir = os.path.join(log_dir, today)
-    os.makedirs(date_dir, exist_ok=True)
+    # Check if logger already has our custom handler
+    has_strategy_handler = any(
+        isinstance(handler, StrategyAwareFileHandler) 
+        for handler in logger.handlers
+    )
     
-    if module_name.startswith("api."):
-        expected_log_file = os.path.join(date_dir, f"api-{today}.log")
-    elif module_name == "broker_monitor":
-        expected_log_file = os.path.join(date_dir, f"broker_monitor-{today}.log")
-    else:
-        expected_log_file = os.path.join(date_dir, f"algosat-{today}.log")
-    
-    # Check if logger needs new handler for today's date
-    needs_new_handler = True
-    if logger.handlers:
-        for handler in logger.handlers:
-            # Check for any file handler pointing to the expected file
-            if hasattr(handler, 'baseFilename') and handler.baseFilename == expected_log_file:
-                needs_new_handler = False
-                break
-            else:
-                # Remove old handler with wrong date or wrong type
+    if not has_strategy_handler:
+        # Remove any existing file handlers to avoid duplicates
+        for handler in list(logger.handlers):
+            if isinstance(handler, (logging.FileHandler, logging.handlers.RotatingFileHandler)):
                 logger.removeHandler(handler)
                 handler.close()
-    
-    if needs_new_handler:
-        # Use simple FileHandler with NO ROLLOVER - just daily files based on date
-        file_handler = logging.FileHandler(
-            expected_log_file,
-            mode='a',
-            encoding="utf-8"
-        )
-        file_handler.setLevel(logging.DEBUG)
+        
+        # Add our strategy-aware handler
+        strategy_handler = StrategyAwareFileHandler(module_name)
+        strategy_handler.setLevel(logging.DEBUG)
+        
         file_formatter = ISTFormatter(
             "%(asctime)s - %(name)s - %(filename)s:%(lineno)d - %(levelname)s - %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S"
         )
-        file_handler.setFormatter(file_formatter)
-        logger.addHandler(file_handler)
+        strategy_handler.setFormatter(file_formatter)
+        logger.addHandler(strategy_handler)
         logger.setLevel(logging.DEBUG)
     
     return logger

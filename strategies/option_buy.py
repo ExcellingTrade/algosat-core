@@ -154,7 +154,7 @@ class OptionBuyStrategy(StrategyBase):
             logger.error("No symbol configured for OptionBuy strategy.")
             return
         await wait_for_first_candle_completion(interval_minutes, first_candle_time, symbol)
-        asyncio.sleep(2)  # Give some time for the first candle to complete
+        await asyncio.sleep(2)  # Give some time for the first candle to complete
         logger.info('First candle completed, proceeding with setup...')
         
         max_strikes = trade.get("max_strikes", 40)

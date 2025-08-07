@@ -30,7 +30,7 @@ class MarketHours:
     def get_market_hours():
         """Get default market hours (can be made configurable later)"""
         return datetime.time(9, 0), datetime.time(15, 30)  # 9:00 AM - 3:30 PM
-        # return datetime.time(9, 0), datetime.time(23, 30)  # 9:00 AM - 3:30 PM
+        # return datetime.time(4, 0), datetime.time(23, 30)  # 9:00 AM - 3:30 PM
     
     @staticmethod
     def is_market_open(current_time: datetime.time = None) -> bool:
@@ -390,10 +390,11 @@ config_timestamps: Dict[int, datetime.datetime] = {}
 order_cache = None  # Will be initialized in run_poll_loop
 risk_manager = None  # Will be initialized in run_poll_loop
 
-async def get_or_create_strategy_instance(symbol_id: int, config: StrategyConfig, data_manager: DataManager, order_manager: OrderManager):
+async def create_lightweight_strategy_instance(symbol_id: int, config: StrategyConfig, data_manager: DataManager, order_manager: OrderManager):
     """
-    Get strategy instance from cache if exists, otherwise create new instance.
-    Used for active strategy launches to ensure instance sharing.
+    Create a lightweight strategy instance WITHOUT setup() - just instantiation.
+    Setup will be handled by the strategy runner task itself.
+    Used for active strategy launches to ensure non-blocking task creation.
     """
     global strategy_cache
     
@@ -402,13 +403,13 @@ async def get_or_create_strategy_instance(symbol_id: int, config: StrategyConfig
         logger.debug(f"Retrieved strategy instance from cache for symbol_id={symbol_id}")
         return strategy_cache[symbol_id]
     
-    # Create new strategy instance
-    strategy_instance = await initialize_strategy_instance(config, data_manager, order_manager)
+    # Create lightweight strategy instance (no setup)
+    strategy_instance = await create_strategy_instance_only(config, data_manager, order_manager)
     
     # Store in cache if successfully created
     if strategy_instance:
         strategy_cache[symbol_id] = strategy_instance
-        logger.debug(f"Cached new strategy instance for symbol_id={symbol_id}")
+        logger.debug(f"Cached new lightweight strategy instance for symbol_id={symbol_id}")
     
     return strategy_instance
 
@@ -455,7 +456,7 @@ async def get_strategy_for_order(order_id: str, data_manager: DataManager, order
         config = StrategyConfig(**config_dict)
         
         # Get or create strategy instance using caching
-        strategy_instance = await get_or_create_strategy_instance(symbol_id, config, data_manager, order_manager)
+        strategy_instance = await create_lightweight_strategy_instance(symbol_id, config, data_manager, order_manager)
         
         return strategy_instance
         
@@ -474,72 +475,44 @@ def remove_strategy_from_cache(symbol_id: int):
         del strategy_cache[symbol_id]
         logger.debug(f"Removed strategy instance from cache for symbol_id={symbol_id}")
 
-async def initialize_strategy_instance(config: StrategyConfig, data_manager: DataManager, order_manager: OrderManager):
+async def create_strategy_instance_only(config: StrategyConfig, data_manager: DataManager, order_manager: OrderManager):
     """
-    Initialize a strategy instance with proper setup including broker initialization and symbol resolution.
-    This function moves the initialization logic from strategy_runner.py to strategy_manager.py
-    to enable strategy instance sharing between multiple files.
+    Create strategy instance WITHOUT setup - just basic instantiation.
+    This is lightweight and non-blocking. Setup will be handled by strategy runner.
     """
     strategy_name = getattr(config, "strategy_key", None)
-    logger.debug(f"Config id: {getattr(config, 'id', None)}, strategy_name resolved: '{strategy_name}'")
+    logger.debug(f"Creating lightweight strategy instance: '{strategy_name}' for config {config.symbol}")
     
     StrategyClass = STRATEGY_MAP.get(strategy_name)
     if not StrategyClass:
         logger.debug(f"No strategy class found for '{strategy_name}'")
         return None
 
-    # --- Ensure broker is initialized and resolve symbol/token upfront ---
+    # Basic broker initialization (lightweight)
     symbol = config.symbol
     instrument_type = config.instrument
     await data_manager.ensure_broker()  # Ensure broker is initialized
     broker_name = data_manager.get_current_broker_name()
-    resolved_symbol = symbol
+    
+    # Get symbol info for strategy
+    symbol_info = None
     if broker_name and symbol:
-        # Use DataManager's get_broker_symbol to resolve
         symbol_info = await data_manager.get_broker_symbol(symbol, instrument_type)
-        resolved_symbol = symbol_info.get('instrument_token', symbol_info.get('symbol', symbol))
 
-    # Pass StrategyConfig to strategy
+    # Create strategy instance (lightweight - no setup)
     try:
-        logger.debug(f"Instantiating strategy class {StrategyClass} with config type: {type(config)}")
         config_for_strategy = config.copy().dict()
-        # Get symbol_info from broker
-        symbol_info = None
-        if broker_name and symbol:
-            symbol_info = await data_manager.get_broker_symbol(symbol, instrument_type)
         config_for_strategy['symbol_info'] = symbol_info
-        # Optionally, for backward compatibility, set 'symbol' to symbol_info['symbol'] if present
         if symbol_info and 'symbol' in symbol_info:
             config_for_strategy['symbol'] = symbol_info['symbol']
+        
         strategy = StrategyClass(StrategyConfig(**config_for_strategy), data_manager, order_manager)
+        logger.debug(f"✅ Created lightweight strategy instance: '{strategy_name}'")
+        return strategy
+        
     except Exception as e:
-        logger.error(f"Exception during strategy instantiation: {e}", exc_info=True)
+        logger.error(f"Exception during lightweight strategy instantiation: {e}", exc_info=True)
         return None
-
-    logger.info(f"Starting strategy '{strategy_name}' for config {config.symbol}")
-
-    # One-time setup with infinite exponential backoff retry if setup fails
-    backoff = 5  # initial seconds
-    max_backoff = 600  # max 10 minutes
-    while True:
-        try:
-            await strategy.setup()
-        except Exception as e:
-            logger.error(f"Error during setup of '{strategy_name}': {e}", exc_info=True)
-            # Always retry on any setup error
-            logger.info(f"Retrying setup for '{strategy_name}' after {backoff} seconds (exception)...")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, max_backoff)
-            continue
-        # Check for OptionBuyStrategy._setup_failed or similar flag
-        if getattr(strategy, '_setup_failed', False):
-            logger.warning(f"Setup failed for '{strategy_name}' (e.g., could not identify strikes). Retrying after {backoff} seconds...")
-            await asyncio.sleep(backoff)
-            backoff = min(backoff * 2, max_backoff)
-            continue
-        break  # setup succeeded
-
-    return strategy
 
 async def order_monitor_loop(order_queue, data_manager, order_manager):
     global order_cache
@@ -709,6 +682,7 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                             # Unified schedule: 9:00 AM - 3:30 PM for both INTRADAY and DELIVERY
                             # Use configurable times with fallbacks
                             trade_config = row.trade_config or {}
+                            # start_time_str = "04:00" #trade_config.get("start_time", "09:00")  # 9:00 AM default
                             start_time_str = trade_config.get("start_time", "09:00")  # 9:00 AM default
                             square_off_time_str = trade_config.get("square_off_time", "15:30")  # 3:30 PM default
                             # square_off_time_str = "23:30" #trade_config.get("square_off_time", "15:30")  # 3:30 PM default
@@ -751,8 +725,8 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                                         'enable_smart_levels': row.enable_smart_levels
                                     }
                                     config = StrategyConfig(**config_dict)
-                                    # Get or create strategy instance with caching
-                                    strategy_instance = await get_or_create_strategy_instance(symbol_id, config, data_manager, order_manager)
+                                    # Create lightweight strategy instance (no blocking setup)
+                                    strategy_instance = await create_lightweight_strategy_instance(symbol_id, config, data_manager, order_manager)
                                     if strategy_instance:
                                         task = asyncio.create_task(run_strategy_config(strategy_instance, order_queue))
                                         running_tasks[symbol_id] = task

@@ -33,6 +33,7 @@ LOG_PATTERNS = {
     "api": r"api-(\d{4}-\d{2}-\d{2})\.log",
     "algosat": r"algosat-(\d{4}-\d{2}-\d{2})\.log",
     "broker-monitor": r"broker_monitor-(\d{4}-\d{2}-\d{2})\.log",
+    "strategy": r"([a-zA-Z0-9_]+)-(\d{4}-\d{2}-\d{2})\.log",  # Strategy-specific logs
 }
 
 # Log type mappings for consistent UI filtering
@@ -114,8 +115,10 @@ def get_log_files_for_date(date: str) -> List[LogFile]:
                 if log_file.is_file():
                     try:
                         stat = log_file.stat()
-                        # Determine log type from filename - only include application logs for UI
+                        # Determine log type from filename - include application logs for UI
                         log_type = None
+                        strategy_name = None
+                        
                         if log_file.name.startswith("api-") and log_file.name.endswith(".log"):
                             log_type = "api"
                         elif log_file.name.startswith("algosat-") and log_file.name.endswith(".log"):
@@ -123,17 +126,29 @@ def get_log_files_for_date(date: str) -> List[LogFile]:
                         elif log_file.name.startswith("broker_monitor-") and log_file.name.endswith(".log"):
                             log_type = "broker-monitor"  # Normalize to UI naming
                         else:
-                            # Skip PM2 logs and other files - don't show in UI
-                            continue
+                            # Check if it's a strategy log file
+                            strategy_pattern = r"([a-zA-Z0-9_]+)-\d{4}-\d{2}-\d{2}\.log$"
+                            strategy_match = re.match(strategy_pattern, log_file.name)
+                            if strategy_match:
+                                strategy_name = strategy_match.group(1)
+                                # Skip known system logs, only include actual strategies
+                                if strategy_name not in ['api', 'algosat', 'broker_monitor', 'app']:
+                                    log_type = f"strategy-{strategy_name}"
+                                else:
+                                    continue  # Skip system logs that match strategy pattern
+                            else:
+                                # Skip PM2 logs, app.log and other files - don't show in UI
+                                continue
                         
-                        log_files.append(LogFile(
-                            name=log_file.name,
-                            path=str(log_file),
-                            size=stat.st_size,
-                            modified=datetime.fromtimestamp(stat.st_mtime),
-                            type=log_type,
-                            date=date
-                        ))
+                        if log_type:
+                            log_files.append(LogFile(
+                                name=log_file.name,
+                                path=str(log_file),
+                                size=stat.st_size,
+                                modified=datetime.fromtimestamp(stat.st_mtime),
+                                type=log_type,
+                                date=date
+                            ))
                     except (OSError, IOError) as e:
                         logger.warning(f"Cannot access log file {log_file}: {e}")
                         continue
@@ -174,8 +189,27 @@ def get_log_files_for_date(date: str) -> List[LogFile]:
                             except (OSError, IOError) as e:
                                 logger.warning(f"Cannot access log file {log_file}: {e}")
                                 continue
+                    elif pattern_name == "strategy":
+                        # For strategy files: ([a-zA-Z0-9_]+)-(\d{4}-\d{2}-\d{2})\.log
+                        strategy_name = match.group(1)  # strategy name
+                        file_date = match.group(2)  # date
+                        if file_date == date and strategy_name not in ['api', 'algosat', 'broker_monitor', 'app']:
+                            try:
+                                stat = log_file.stat()
+                                log_files.append(LogFile(
+                                    name=log_file.name,
+                                    path=str(log_file),
+                                    size=stat.st_size,
+                                    modified=datetime.fromtimestamp(stat.st_mtime),
+                                    type=f"strategy-{strategy_name}",
+                                    date=file_date
+                                ))
+                                file_matched = True
+                            except (OSError, IOError) as e:
+                                logger.warning(f"Cannot access log file {log_file}: {e}")
+                                continue
                     else:
-                        # For regular files: (api|algosat)-(\d{4}-\d{2}-\d{2})\.log
+                        # For regular files: (api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log
                         file_date = match.group(1)
                         if file_date == date:
                             try:
@@ -230,6 +264,13 @@ def get_available_log_dates() -> List[str]:
                         # For rollover files: (api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d+)
                         # Or legacy: (api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log\.(\d{4}-\d{2}-\d{2})
                         date_str = match.group(2)  # date is group 2 for rollover
+                    elif pattern_name == "strategy":
+                        # For strategy files: ([a-zA-Z0-9_]+)-(\d{4}-\d{2}-\d{2})\.log
+                        strategy_name = match.group(1)  # strategy name
+                        date_str = match.group(2)  # date is group 2 for strategy
+                        # Skip system logs that might match strategy pattern
+                        if strategy_name in ['api', 'algosat', 'broker_monitor', 'app']:
+                            break
                     else:
                         # For regular files: (api|algosat|broker_monitor)-(\d{4}-\d{2}-\d{2})\.log
                         date_str = match.group(1)  # date is group 1 for regular
@@ -343,6 +384,40 @@ async def get_log_dates(
         logger.error(f"Error getting log dates: {e}")
         raise HTTPException(status_code=500, detail="Failed to get log dates")
 
+@router.get("/strategies")
+async def get_available_strategies(
+    date: Optional[str] = Query(None, description="Optional date filter in YYYY-MM-DD format"),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get list of available strategies that have log files"""
+    try:
+        strategies = set()
+        
+        # If date is provided, only check that specific date
+        if date:
+            try:
+                datetime.strptime(date, "%Y-%m-%d")
+                dates_to_check = [date]
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+        else:
+            # Check all available dates
+            dates_to_check = get_available_log_dates()
+        
+        for check_date in dates_to_check:
+            log_files = get_log_files_for_date(check_date)
+            for log_file in log_files:
+                if log_file.type.startswith("strategy-"):
+                    strategy_name = log_file.type.replace("strategy-", "")
+                    strategies.add(strategy_name)
+        
+        return {"strategies": sorted(list(strategies))}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting available strategies: {e}")
+        raise HTTPException(status_code=500, detail="Failed to get available strategies")
+
 @router.get("/files/{date}")
 async def get_log_files(
     date: str,
@@ -375,7 +450,7 @@ async def get_log_files(
 @router.get("/content/{date}")
 async def get_log_content(
     date: str,
-    log_type: Optional[str] = Query(None, description="Log type: api, algosat, all"),
+    log_type: Optional[str] = Query(None, description="Log type: api, algosat, broker-monitor, strategy-{name}, all"),
     limit: int = Query(1000, description="Maximum number of lines"),
     offset: int = Query(0, description="Number of lines to skip"),
     level: Optional[str] = Query(None, description="Filter by log level"),
@@ -412,6 +487,9 @@ async def get_log_content(
             # Handle both broker_monitor and broker-monitor naming
             if log_type == "broker-monitor":
                 target_files = [f for f in log_files if f.type == "broker-monitor"]
+            elif log_type.startswith("strategy-"):
+                # Handle strategy-specific logs
+                target_files = [f for f in log_files if f.type == log_type]
             else:
                 target_files = [f for f in log_files if f.type == log_type]
         
@@ -478,7 +556,7 @@ async def get_log_content(
 
 @router.post("/stream/session")
 async def create_log_stream_session(
-    log_type: Optional[str] = Query(None, description="Log type: api, algosat, all"),
+    log_type: Optional[str] = Query(None, description="Log type: api, algosat, broker-monitor, strategy-{name}, all"),
     level: Optional[str] = Query(None, description="Filter by log level"),
     current_user: dict = Depends(get_current_user)
 ):
@@ -534,6 +612,14 @@ async def stream_live_logs(
                 algosat_log = date_dir / f"algosat-{today}.log"
                 broker_log = date_dir / f"broker_monitor-{today}.log"
                 log_files_to_monitor = [api_log, algosat_log, broker_log]
+                
+                # Also add all strategy logs
+                for log_file in date_dir.glob("*.log"):
+                    if log_file.name not in [f"api-{today}.log", f"algosat-{today}.log", f"broker_monitor-{today}.log", "app.log"]:
+                        # Check if it's a strategy log
+                        strategy_pattern = r"([a-zA-Z0-9_]+)-\d{4}-\d{2}-\d{2}\.log$"
+                        if re.match(strategy_pattern, log_file.name):
+                            log_files_to_monitor.append(log_file)
             else:
                 # Fallback to legacy flat structure
                 api_log = LOGS_BASE_DIR / f"api-{today}.log"
@@ -550,6 +636,13 @@ async def stream_live_logs(
                 log_files_to_monitor = [date_dir / f"broker_monitor-{today}.log"]
             else:
                 log_files_to_monitor = [LOGS_BASE_DIR / f"broker_monitor-{today}.log"]
+        elif log_type.startswith("strategy-"):
+            # Handle strategy-specific logs
+            strategy_name = log_type.replace("strategy-", "")
+            if date_dir.exists():
+                log_files_to_monitor = [date_dir / f"{strategy_name}-{today}.log"]
+            else:
+                log_files_to_monitor = [LOGS_BASE_DIR / f"{strategy_name}-{today}.log"]
         else:
             # Default to algosat logs
             if date_dir.exists():
@@ -678,7 +771,7 @@ async def get_log_stats(
 @router.get("/download")
 async def download_logs(
     date: str = Query(..., description="Log date in YYYY-MM-DD format"),
-    log_type: Optional[str] = Query(None, description="Log type filter (api, algosat, rollover)"),
+    log_type: Optional[str] = Query(None, description="Log type filter (api, algosat, broker-monitor, strategy-{name})"),
     current_user: dict = Depends(get_current_user)
 ):
     """Download log files for a specific date as a text file"""
