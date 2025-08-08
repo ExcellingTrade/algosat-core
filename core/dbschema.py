@@ -191,6 +191,7 @@ orders = Table(
     "orders", metadata,
     Column("id", Integer, primary_key=True, autoincrement=True),
     Column("strategy_symbol_id", Integer, ForeignKey("strategy_symbols.id"), nullable=False, index=True),
+    Column("parent_order_id", Integer, ForeignKey("orders.id"), nullable=True, index=True),  # NEW: Reference to parent order (e.g., hedge order for main order)
     Column("strike_symbol", String(100), nullable=True, index=True),  # NEW: Actual tradeable symbol (e.g., "NSE:NIFTY50-25JUN25-23400-CE")
     Column("pnl", Numeric(15, 2), nullable=True, index=True),  # NEW: Profit/Loss for this order
     Column("candle_range",  Float, nullable=True),
@@ -235,6 +236,7 @@ broker_executions = Table(
     
     # Core execution details - one execution per row
     Column("broker_order_id", String(100), nullable=False, index=True),  # Single broker order ID for this execution
+    Column("exit_broker_order_id", String(100), nullable=True),  # Actual exit order ID returned by broker (for EXIT orders)
     Column("side", String(10), nullable=False, index=True),  # 'ENTRY' or 'EXIT'
     Column("action", String(20), nullable=False, server_default=text("'BUY'")),  # NEW: Action column (BUY/SELL/EXIT/etc.)
     Column("execution_price", Numeric(15, 4), nullable=False),  # Actual traded price for this execution

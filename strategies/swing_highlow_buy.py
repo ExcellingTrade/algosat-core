@@ -855,12 +855,16 @@ class SwingHighLowBuyStrategy(StrategyBase):
                    (signal.signal_direction == "DOWN" and latest_entry["close"] < confirm_last_close):
                     logger.info("Breakout confirmed after atomic check, holding position.")
                     
-                    # Calculate and store pullback level for re-entry logic
-                    pullback_success = await self.calculate_and_store_pullback_level(order_info, signal)
-                    if pullback_success:
-                        logger.info(f"✅ Pullback level stored successfully for order_id={order_info.get('order_id')}")
+                    # Calculate and store pullback level for re-entry logic - ONLY if smart levels enabled
+                    if self.is_smart_levels_enabled():
+                        pullback_success = await self.calculate_and_store_pullback_level(order_info, signal)
+                        if pullback_success:
+                            logger.info(f"✅ Pullback level stored successfully for order_id={order_info.get('order_id')}")
+                        else:
+                            logger.warning(f"⚠️ Failed to store pullback level for order_id={order_info.get('order_id')}")
                     else:
-                        logger.warning(f"⚠️ Failed to store pullback level for order_id={order_info.get('order_id')}")
+                        logger.debug("🔄 Pullback calculation skipped - smart levels not enabled")
+                        
                     return order_info
                 else:
                     logger.info("Breakout failed atomic confirmation, exiting order.")
@@ -927,266 +931,323 @@ class SwingHighLowBuyStrategy(StrategyBase):
 
     async def check_re_entry_logic(self) -> Optional[dict]:
         """
-        Check for re-entry opportunities based on pullback detection.
-        Called when open positions exist and smart levels are enabled.
+        Check for re-entry opportunities when existing positions are found.
+        This implements pullback-based re-entry logic using smart levels configuration.
+        
+        Re-entry Logic:
+        1. For each open position, check if pullback has occurred (50% retracement)
+        2. If pullback touched, wait for price to move back toward original direction
+        3. Place re-entry order using remaining lots from smart level
+        4. Update re-entry tracking in database
         
         Returns:
-            dict: Order info if re-entry order is placed, None otherwise
+            dict: Order info if re-entry placed, None otherwise
         """
         try:
-            logger.info("🔄 Starting re-entry logic check...")
+            logger.info("🔄 Starting re-entry logic check for existing positions")
             
-            # Get all open orders for this strategy
-            open_orders = []
-            for positions_list in self._positions.values():
-                open_orders.extend(positions_list)
-            
-            if not open_orders:
-                logger.warning("❌ Re-entry check called but no open orders found")
+            if not self.is_smart_levels_enabled():
+                logger.debug("❌ Re-entry logic skipped: Smart levels not enabled")
                 return None
             
-            logger.info(f"📊 Found {len(open_orders)} open order(s) for re-entry analysis")
+            # Get smart level configuration
+            smart_level = self.get_active_smart_level()
+            if not smart_level:
+                logger.debug("❌ Re-entry logic skipped: No active smart level")
+                return None
             
-            # Process each open order for re-entry opportunities
-            for order in open_orders:
-                order_id = order.get('id') or order.get('order_id')
-                signal_direction = order.get('signal_direction') or order.get('direction', '').upper()
-                
-                logger.info(f"🔍 Analyzing order_id={order_id}, direction={signal_direction} for re-entry")
-                
-                try:
-                    # Check if re-entry tracking exists for this order
-                    from algosat.core.db import AsyncSessionLocal
-                    from sqlalchemy import text
+            pullback_percentage = smart_level.get('pullback_percentage')
+            if not pullback_percentage or pullback_percentage <= 0:
+                logger.debug(f"❌ Re-entry logic skipped: Invalid pullback_percentage={pullback_percentage}")
+                return None
+            
+            logger.info(f"📊 Re-entry logic parameters: pullback_percentage={pullback_percentage}%")
+            
+            # Process each open position for re-entry opportunities
+            for symbol, position_list in self._positions.items():
+                for position in position_list:
+                    order_id = position.get('id') or position.get('order_id')
                     
-                    async with AsyncSessionLocal() as session:
-                        # Query re_entry_tracking table
-                        query = """
-                            SELECT parent_order_id, pullback_level, pullback_touched, re_entry_attempted
-                            FROM re_entry_tracking 
-                            WHERE parent_order_id = :order_id
-                        """
-                        result = await session.execute(text(query), {"order_id": order_id})
-                        re_entry_record = result.fetchone()
-                        
-                        if not re_entry_record:
-                            logger.warning(f"❌ No re-entry tracking record found for order_id={order_id}")
-                            continue
-                        
-                        pullback_level = float(re_entry_record.pullback_level)
-                        pullback_touched = re_entry_record.pullback_touched
-                        re_entry_attempted = re_entry_record.re_entry_attempted
-                        
-                        logger.info(f"📋 Re-entry Status for order_id={order_id}:")
-                        logger.info(f"    Pullback Level: {pullback_level}")
-                        logger.info(f"    Pullback Touched: {pullback_touched}")
-                        logger.info(f"    Re-entry Attempted: {re_entry_attempted}")
-                        
-                        # Skip if re-entry already attempted
-                        if re_entry_attempted:
-                            logger.info(f"⏭️ Re-entry already attempted for order_id={order_id}, skipping")
-                            continue
-                        
-                        # Get current spot price
-                        history_dict = await self.fetch_history_data(
-                            self.dp, [self.symbol], self.confirm_minutes
-                        )
-                        history_df = history_dict.get(self.symbol)
-                        
-                        if history_df is None or len(history_df) < 1:
-                            logger.warning(f"❌ Insufficient price data for re-entry check on order_id={order_id}")
-                            continue
-                        
-                        current_spot_price = float(history_df.iloc[-1]['close'])
-                        logger.info(f"💰 Current spot price: {current_spot_price} for re-entry analysis")
-                        
-                        # Check if pullback level has been touched
-                        if not pullback_touched:
-                            # Check if current price has reached pullback level
-                            pullback_reached = False
-                            
-                            if signal_direction == "UP":
-                                # For UP trades, pullback is when price goes DOWN to pullback_level
-                                if current_spot_price <= pullback_level:
-                                    pullback_reached = True
-                                    logger.info(f"📉 Pullback reached for UP trade: current_price={current_spot_price} <= pullback_level={pullback_level}")
-                            elif signal_direction == "DOWN":
-                                # For DOWN trades, pullback is when price goes UP to pullback_level
-                                if current_spot_price >= pullback_level:
-                                    pullback_reached = True
-                                    logger.info(f"📈 Pullback reached for DOWN trade: current_price={current_spot_price} >= pullback_level={pullback_level}")
-                            
-                            if pullback_reached:
-                                # Update pullback_touched flag in database
-                                update_query = """
-                                    UPDATE re_entry_tracking 
-                                    SET pullback_touched = TRUE, updated_at = CURRENT_TIMESTAMP
-                                    WHERE parent_order_id = :order_id
-                                """
-                                await session.execute(text(update_query), {"order_id": order_id})
-                                await session.commit()
-                                
-                                logger.info(f"✅ Pullback level touched for order_id={order_id}, database updated")
-                                pullback_touched = True
-                            else:
-                                logger.debug(f"⏳ Pullback level not yet reached for order_id={order_id}")
-                                continue
-                        
-                        # If pullback has been touched, check for re-entry signal
-                        if pullback_touched:
-                            logger.info(f"🎯 Pullback touched for order_id={order_id}, checking for re-entry signal...")
-                            
-                            # Set re-entry mode
-                            self._is_re_entry_mode = True
-                            logger.info(f"🔄 Re-entry mode ENABLED for order_id={order_id}")
-                            
-                            try:
-                                # Get entry timeframe data for signal evaluation
-                                entry_history_dict = await self.fetch_history_data(
-                                    self.dp, [self.symbol], self.entry_minutes
-                                )
-                                entry_df = entry_history_dict.get(self.symbol)
-                                if entry_df is not None and not isinstance(entry_df, pd.DataFrame):
-                                    entry_df = pd.DataFrame(entry_df)
-                                
-                                if entry_df is None or len(entry_df) < 10:
-                                    logger.warning(f"❌ Insufficient entry data for re-entry signal evaluation on order_id={order_id}")
-                                    continue
-                                
-                                # Get confirm timeframe data
-                                confirm_history_dict = await self.fetch_history_data(
-                                    self.dp, [self.symbol], self.confirm_minutes
-                                )
-                                confirm_df = confirm_history_dict.get(self.symbol)
-                                if confirm_df is not None and not isinstance(confirm_df, pd.DataFrame):
-                                    confirm_df = pd.DataFrame(confirm_df)
-                                
-                                if confirm_df is None or len(confirm_df) < 2:
-                                    logger.warning(f"❌ Insufficient confirm data for re-entry signal evaluation on order_id={order_id}")
-                                    continue
-                                
-                                # Process confirm data similar to main process_cycle
-                                now = pd.Timestamp.now(tz="Asia/Kolkata").floor("min")
-                                df = confirm_df.copy()
-                                if "timestamp" in df.columns:
-                                    df["timestamp"] = pd.to_datetime(df["timestamp"])
-                                    df = df.sort_values("timestamp")
-                                    df = df.set_index("timestamp")
-                                else:
-                                    logger.error("confirm_df missing 'timestamp' column for re-entry.")
-                                    continue
-                                if df.index.tz is None:
-                                    df.index = df.index.tz_localize("Asia/Kolkata")
-                                df = df[df.index < now].copy()
-                                if df is None or len(df) < 2:
-                                    logger.warning("Not enough closed 1-min candles for re-entry evaluation.")
-                                    continue
-                                confirm_df_sorted = df.reset_index()
-                                
-                                # Evaluate re-entry signal
-                                logger.info(f"📊 Evaluating re-entry signal for order_id={order_id}...")
-                                re_entry_signal = await self.evaluate_signal(entry_df, confirm_df_sorted, self.trade)
-                                
-                                if re_entry_signal:
-                                    logger.info(f"🎉 Re-entry signal detected for order_id={order_id}: {re_entry_signal}")
-                                    
-                                    # Validate signal direction matches original order direction
-                                    if re_entry_signal.signal_direction != signal_direction:
-                                        logger.warning(f"❌ Re-entry signal direction mismatch: expected={signal_direction}, got={re_entry_signal.signal_direction}")
-                                        continue
-                                    
-                                    # Place re-entry order
-                                    re_entry_order_info = await self.process_order(re_entry_signal, confirm_df_sorted, re_entry_signal.symbol)
-                                    
-                                    if re_entry_order_info:
-                                        # Update re_entry_attempted flag in database
-                                        update_query = """
-                                            UPDATE re_entry_tracking 
-                                            SET re_entry_attempted = TRUE, updated_at = CURRENT_TIMESTAMP
-                                            WHERE parent_order_id = :order_id
-                                        """
-                                        await session.execute(text(update_query), {"order_id": order_id})
-                                        await session.commit()
-                                        
-                                        logger.info(f"✅ Re-entry order placed successfully for order_id={order_id}")
-                                        logger.info(f"🎯 Re-entry database record updated: re_entry_attempted=TRUE")
-                                        
-                                        # Perform atomic confirmation similar to initial entry
-                                        logger.info(f"⏳ Awaiting re-entry atomic confirmation...")
-                                        from algosat.common import strategy_utils
-                                        await strategy_utils.wait_for_next_candle(self.entry_minutes)
-                                        
-                                        # Fetch fresh entry data for confirmation
-                                        entry_history_dict2 = await self.fetch_history_data(
-                                            self.dp, [self.symbol], self.entry_minutes
-                                        )
-                                        entry_df2 = entry_history_dict2.get(self.symbol)
-                                        if entry_df2 is not None and not isinstance(entry_df2, pd.DataFrame):
-                                            entry_df2 = pd.DataFrame(entry_df2)
-                                        
-                                        if entry_df2 is None or len(entry_df2) < 2:
-                                            logger.warning("❌ Not enough entry data for re-entry atomic confirmation")
-                                            await self.order_manager.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"), exit_reason="Re-entry atomic confirmation failed", check_live_status=True)
-                                            
-                                            # Update status to EXIT_ATOMIC_FAILED_PENDING  
-                                            from algosat.common import constants
-                                            logger.info(f"Re-entry confirmation failed due to missing data. Order exited: {re_entry_order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
-                                            await self.order_manager.update_order_status_in_db(
-                                                order_id=re_entry_order_info.get("order_id") or re_entry_order_info.get("id"),
-                                                status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
-                                            )
-                                            
-                                            logger.info(f"🚪 Re-entry order exited due to confirmation failure: {re_entry_order_info}")
-                                            return re_entry_order_info
-                                        
-                                        entry_df2_sorted = entry_df2.sort_values("timestamp")
-                                        latest_entry = entry_df2_sorted.iloc[-1]
-                                        confirm_last_close = confirm_df.iloc[-1]["close"] if "close" in confirm_df.columns else None
-                                        
-                                        # Confirm based on re-entry direction
-                                        if (re_entry_signal.signal_direction == "UP" and latest_entry["close"] > confirm_last_close) or \
-                                           (re_entry_signal.signal_direction == "DOWN" and latest_entry["close"] < confirm_last_close):
-                                            logger.info("✅ Re-entry breakout confirmed after atomic check, holding position")
-                                            return re_entry_order_info
-                                        else:
-                                            logger.info("❌ Re-entry breakout failed atomic confirmation, exiting order")
-                                            await self.order_manager.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"), exit_reason="Re-entry atomic confirmation failed")
-                                            
-                                            # Update status to EXIT_ATOMIC_FAILED_PENDING
-                                            from algosat.common import constants
-                                            logger.info(f"Re-entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {re_entry_order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
-                                            await self.order_manager.update_order_status_in_db(
-                                                order_id=re_entry_order_info.get("order_id") or re_entry_order_info.get("id"),
-                                                status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
-                                            )
-                                            
-                                            logger.info(f"🚪 Re-entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {re_entry_order_info}")
-                                            return re_entry_order_info
-                                    else:
-                                        logger.error(f"❌ Re-entry order placement failed for order_id={order_id}")
-                                        continue
-                                else:
-                                    logger.debug(f"⏳ No re-entry signal detected for order_id={order_id}")
-                                    continue
-                                    
-                            finally:
-                                # Always reset re-entry mode
-                                self._is_re_entry_mode = False
-                                logger.info(f"🔄 Re-entry mode DISABLED")
-                        
-                except Exception as e:
-                    logger.error(f"❌ Error processing re-entry for order_id={order_id}: {e}", exc_info=True)
-                    continue
+                    # Check if re-entry is applicable for this position
+                    re_entry_result = await self._check_position_re_entry(position, pullback_percentage)
+                    if re_entry_result:
+                        logger.info(f"✅ Re-entry opportunity found for order_id={order_id}")
+                        return re_entry_result
+                    else:
+                        logger.debug(f"No re-entry opportunity for order_id={order_id}")
             
-            logger.info("🔄 Re-entry logic check completed - no re-entry opportunities found")
+            logger.debug("No re-entry opportunities found for any position")
             return None
             
         except Exception as e:
             logger.error(f"❌ Error in check_re_entry_logic: {e}", exc_info=True)
             return None
-        finally:
-            # Ensure re-entry mode is always disabled
+    
+    async def _check_position_re_entry(self, position, pullback_percentage) -> Optional[dict]:
+        """
+        Check specific position for re-entry opportunity.
+        
+        Args:
+            position: Position dict from database
+            pullback_percentage: Pullback percentage from smart level config
+            
+        Returns:
+            dict: Order info if re-entry placed, None otherwise
+        """
+        try:
+            order_id = position.get('id') or position.get('order_id')
+            signal_direction = position.get('signal_direction', '').upper()
+            entry_spot_price = position.get('entry_spot_price')
+            target_spot_level = position.get('target_spot_level')
+            
+            logger.info(f"🔍 Checking re-entry for order_id={order_id}, direction={signal_direction}, entry_price={entry_spot_price}, target={target_spot_level}")
+            
+            if not all([signal_direction, entry_spot_price, target_spot_level]):
+                logger.warning(f"❌ Missing required data for re-entry check: direction={signal_direction}, entry_price={entry_spot_price}, target={target_spot_level}")
+                return None
+            
+            # Check if re-entry tracking exists
+            from algosat.core.re_entry_db_helpers import get_re_entry_tracking, create_re_entry_tracking, update_pullback_touched, update_re_entry_attempted
+            
+            # Get smart level for pullback configuration
+            smart_level = self.get_active_smart_level()
+            if not smart_level:
+                logger.warning(f"❌ Re-entry check failed - no active smart level available for order_id={order_id}")
+                return None
+            
+            re_entry_record = await get_re_entry_tracking(order_id)
+            
+            # If no re-entry record exists, try to calculate and create it
+            if not re_entry_record:
+                logger.info(f"🔄 No re-entry tracking found for order_id={order_id}, attempting to calculate pullback level")
+                
+                # Try to recalculate pullback level from smart level configuration
+                entry_level = smart_level.get('entry_level')
+                pullback_percentage = smart_level.get('pullback_percentage')
+                
+                if entry_level and pullback_percentage and pullback_percentage > 0:
+                    # Get smart level target for pullback calculation
+                    if signal_direction == "UP":
+                        target_level = smart_level.get('bullish_target')
+                    else:  # DOWN
+                        target_level = smart_level.get('bearish_target')
+                    
+                    if target_level:
+                        # Calculate pullback level using smart level configuration
+                        pullback_factor = pullback_percentage / 100.0
+                        if signal_direction == "UP":
+                            # For UP trend: pullback level is between entry and target (downward)
+                            pullback_level = float(entry_level) + (float(target_level) - float(entry_level)) * pullback_factor
+                        else:  # DOWN
+                            # For DOWN trend: pullback level is between entry and target (upward)
+                            pullback_level = float(entry_level) - (float(entry_level) - float(target_level)) * pullback_factor
+                        
+                        # Round to 2 decimal places
+                        pullback_level = round(pullback_level, 2)
+                        
+                        # Create re-entry tracking record
+                        success = await create_re_entry_tracking(order_id, pullback_level)
+                        if success:
+                            logger.info(f"✅ Recalculated and stored pullback level for order_id={order_id}: {pullback_level}")
+                            re_entry_record = {'pullback_touched': False, 're_entry_attempted': False}
+                        else:
+                            logger.error(f"❌ Failed to store recalculated pullback level for order_id={order_id}")
+                            return None
+                    else:
+                        logger.warning(f"❌ Cannot recalculate pullback - missing target level for {signal_direction} direction")
+                        return None
+                else:
+                    logger.warning(f"❌ Cannot recalculate pullback - missing entry_level or pullback_percentage in smart level")
+                    return None
+            
+            # Calculate pullback level from re-entry record or use the one we just calculated
+            pullback_level = None
+            
+            if re_entry_record:
+                # Get stored pullback level from database
+                existing_record = await get_re_entry_tracking(order_id)
+                if existing_record and 'pullback_level' in existing_record:
+                    pullback_level = existing_record['pullback_level']
+                    logger.info(f"📊 Using stored pullback level: {pullback_level}")
+                    
+            if pullback_level is None:
+                logger.error(f"❌ Unable to determine pullback level for order_id={order_id}")
+                return None
+            
+            # Get current market data
+            current_history = await self.fetch_history_data(self.dp, [self.symbol], self.confirm_minutes)
+            current_df = current_history.get(self.symbol)
+            if not current_df or len(current_df) == 0:
+                logger.warning(f"❌ No current market data available for re-entry check")
+                return None
+            
+            current_spot_price = current_df.iloc[-1]["close"]
+            logger.info(f"📊 Re-entry data: current_price={current_spot_price}, pullback_level={pullback_level}, pullback_touched={re_entry_record.get('pullback_touched')}, re_entry_attempted={re_entry_record.get('re_entry_attempted')}")
+            
+            # Step 1: Check if pullback level has been touched
+            if not re_entry_record.get('pullback_touched', False):
+                pullback_touched = False
+                
+                if signal_direction == "UP":
+                    # UP trend: Check if price dropped to/below pullback level
+                    if float(current_spot_price) <= pullback_level:
+                        pullback_touched = True
+                        logger.info(f"✅ Pullback TOUCHED (UP trend): current_price={current_spot_price} <= pullback_level={pullback_level}")
+                else:  # DOWN trend
+                    # DOWN trend: Check if price rose to/above pullback level  
+                    if float(current_spot_price) >= pullback_level:
+                        pullback_touched = True
+                        logger.info(f"✅ Pullback TOUCHED (DOWN trend): current_price={current_spot_price} >= pullback_level={pullback_level}")
+                
+                if pullback_touched:
+                    # Update database - pullback has been touched
+                    success = await update_pullback_touched(order_id)
+                    if success:
+                        logger.info(f"📝 Updated pullback_touched=True for order_id={order_id}")
+                    else:
+                        logger.error(f"❌ Failed to update pullback_touched for order_id={order_id}")
+                        return None
+                else:
+                    logger.debug(f"Pullback not yet touched: current_price={current_spot_price}, pullback_level={pullback_level}, direction={signal_direction}")
+                    return None
+            
+            # Step 2: Check if re-entry should be attempted (pullback touched but not yet attempted)
+            if re_entry_record.get('pullback_touched', False) and not re_entry_record.get('re_entry_attempted', False):
+                logger.info(f"🎯 Pullback touched, checking for re-entry signal")
+                
+                # Set re-entry mode for validation
+                self._is_re_entry_mode = True
+                
+                try:
+                    # Fetch entry timeframe data for signal evaluation
+                    entry_history_dict = await self.fetch_history_data(self.dp, [self.symbol], self.entry_minutes)
+                    entry_df = entry_history_dict.get(self.symbol)
+                    
+                    # Fetch confirm timeframe data  
+                    confirm_history_dict = await self.fetch_history_data(self.dp, [self.symbol], self.confirm_minutes)
+                    confirm_df = confirm_history_dict.get(self.symbol)
+                    
+                    if entry_df is not None and not isinstance(entry_df, pd.DataFrame):
+                        entry_df = pd.DataFrame(entry_df)
+                    if confirm_df is not None and not isinstance(confirm_df, pd.DataFrame):
+                        confirm_df = pd.DataFrame(confirm_df)
+                    
+                    if entry_df is None or len(entry_df) < 10 or confirm_df is None or len(confirm_df) < 2:
+                        logger.warning(f"❌ Insufficient data for re-entry signal evaluation")
+                        return None
+                    
+                    # Process confirm_df similar to main process_cycle
+                    now = pd.Timestamp.now(tz="Asia/Kolkata").floor("min")
+                    df = confirm_df.copy()
+                    if "timestamp" in df.columns:
+                        df["timestamp"] = pd.to_datetime(df["timestamp"])
+                        df = df.sort_values("timestamp")
+                        df = df.set_index("timestamp")
+                    if df.index.tz is None:
+                        df.index = df.index.tz_localize("Asia/Kolkata")
+                    df = df[df.index < now].copy()
+                    if len(df) < 2:
+                        logger.warning(f"❌ Not enough closed candles for re-entry evaluation")
+                        return None
+                    confirm_df_sorted = df.reset_index()
+                    
+                    # Evaluate signal for re-entry
+                    re_entry_signal = await self.evaluate_signal(entry_df, confirm_df_sorted, self.trade)
+                    
+                    if re_entry_signal:
+                        logger.info(f"🎉 Re-entry signal detected for order_id={order_id}: {re_entry_signal}")
+                        
+                        # Validate signal direction matches original position
+                        if re_entry_signal.signal_direction != signal_direction:
+                            logger.warning(f"❌ Re-entry signal direction mismatch: expected={signal_direction}, got={re_entry_signal.signal_direction}")
+                            return None
+                        
+                        # Place re-entry order
+                        re_entry_order_info = await self.process_order(re_entry_signal, confirm_df_sorted, re_entry_signal.symbol)
+                        
+                        if re_entry_order_info:
+                            re_entry_order_id = re_entry_order_info.get('order_id') or re_entry_order_info.get('id')
+                            logger.info(f"📝 Re-entry order placed successfully for order_id={order_id}, re_entry_order_id={re_entry_order_id}")
+                            
+                            # Wait for atomic confirmation
+                            import asyncio
+                            await asyncio.sleep(1)  # Brief pause
+                            from algosat.common import strategy_utils
+                            await strategy_utils.wait_for_next_candle(self.entry_minutes)
+                            
+                            # Fetch fresh data for confirmation
+                            entry_history_dict2 = await self.fetch_history_data(self.dp, [self.symbol], self.entry_minutes)
+                            entry_df2 = entry_history_dict2.get(self.symbol)
+                            if entry_df2 is not None and not isinstance(entry_df2, pd.DataFrame):
+                                entry_df2 = pd.DataFrame(entry_df2)
+                            
+                            if entry_df2 is None or len(entry_df2) < 2:
+                                logger.warning("❌ Not enough entry_df data for re-entry atomic confirmation")
+                                await self.order_manager.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"), exit_reason="Atomic confirmation failed", check_live_status=True)
+                                
+                                # Update status to EXIT_ATOMIC_FAILED_PENDING
+                                from algosat.common import constants
+                                await self.order_manager.update_order_status_in_db(
+                                    order_id=re_entry_order_info.get("order_id") or re_entry_order_info.get("id"),
+                                    status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                                )
+                                
+                                # DO NOT set re_entry_attempted=TRUE - allow retry on next cycle
+                                logger.info(f"� Re-entry atomic confirmation failed due to insufficient data - re-entry will be retried on next cycle")
+                                return re_entry_order_info
+                            
+                            entry_df2_sorted = entry_df2.sort_values("timestamp")
+                            latest_entry = entry_df2_sorted.iloc[-1]
+                            confirm_last_close = confirm_df.iloc[-1]["close"] if "close" in confirm_df.columns else None
+                            
+                            # Atomic confirmation check
+                            if (re_entry_signal.signal_direction == "UP" and latest_entry["close"] > confirm_last_close) or \
+                               (re_entry_signal.signal_direction == "DOWN" and latest_entry["close"] < confirm_last_close):
+                                # ✅ ATOMIC CONFIRMATION PASSED - Now mark re-entry as attempted
+                                success = await update_re_entry_attempted(order_id, re_entry_order_id)
+                                
+                                if success:
+                                    logger.info(f"✅ Re-entry atomic confirmation PASSED for order_id={order_id}")
+                                    logger.info(f"📝 Updated re_entry_attempted=True for order_id={order_id}, re_entry_order_id={re_entry_order_id}")
+                                    return re_entry_order_info
+                                else:
+                                    logger.error(f"❌ Failed to update re_entry_attempted for order_id={order_id}")
+                                    return re_entry_order_info
+                            else:
+                                logger.info(f"❌ Re-entry atomic confirmation FAILED for order_id={order_id}")
+                                await self.order_manager.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"), exit_reason="Atomic confirmation failed", check_live_status=True)
+                                
+                                # Update status to EXIT_ATOMIC_FAILED_PENDING
+                                from algosat.common import constants
+                                logger.info(f"Re-entry atomic confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {re_entry_order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
+                                await self.order_manager.update_order_status_in_db(
+                                    order_id=re_entry_order_info.get("order_id") or re_entry_order_info.get("id"),
+                                    status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                                )
+                                
+                                # DO NOT set re_entry_attempted=TRUE - allow retry on next cycle
+                                logger.info(f"� Re-entry atomic confirmation failed - re-entry will be retried on next cycle")
+                                return re_entry_order_info
+                        else:
+                            logger.error(f"❌ Re-entry order placement failed for order_id={order_id}")
+                            return None
+                    else:
+                        logger.debug(f"No re-entry signal detected for order_id={order_id}")
+                        return None
+                        
+                finally:
+                    # Reset re-entry mode
+                    self._is_re_entry_mode = False
+            
+            else:
+                logger.debug(f"Re-entry already attempted or pullback not touched for order_id={order_id}")
+                return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error in _check_position_re_entry for order_id={position.get('id')}: {e}", exc_info=True)
+            # Reset re-entry mode in case of error
             self._is_re_entry_mode = False
+            return None
 
     async def calculate_and_store_pullback_level(self, order_info: dict, signal_payload: dict) -> bool:
         """
@@ -1204,7 +1265,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             if not self.is_smart_levels_enabled():
                 logger.info("🔄 Pullback calculation skipped - smart levels not enabled")
                 return True  # Not an error, just not applicable
-            
+            logger.info(f"🔄 Calculating pullback level for order_info={order_info}")
             order_id = order_info.get('order_id') or order_info.get('id')
             if not order_id:
                 logger.error("❌ Cannot calculate pullback level - missing order_id")
@@ -1221,6 +1282,12 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 logger.error("❌ Cannot calculate pullback level - missing entry_level in smart level")
                 return False
             
+            # Get pullback percentage from smart level
+            pullback_percentage = smart_level.get('pullback_percentage')
+            if not pullback_percentage or pullback_percentage <= 0:
+                logger.error(f"❌ Cannot calculate pullback level - invalid pullback_percentage={pullback_percentage} in smart level")
+                return False
+            
             # Get signal direction from signal payload
             signal_direction = signal_payload.signal_direction
             breakout_type = signal_payload.breakout_type
@@ -1233,21 +1300,23 @@ class SwingHighLowBuyStrategy(StrategyBase):
             logger.info(f"    Breakout Type: {breakout_type}")
             logger.info(f"    Entry Level: {entry_level}")
             logger.info(f"    Current Spot Price: {current_spot_price}")
+            logger.info(f"    Pullback Percentage: {pullback_percentage}%")
             
-            # Calculate 50% pullback level
+            # Calculate pullback level using smart level percentage
+            pullback_factor = pullback_percentage / 100.0
             if signal_direction == "UP":
-                # For UP trades: pullback = entry_level + 0.5 * (current_price - entry_level)
-                pullback_level = float(entry_level) + 0.5 * (float(current_spot_price) - float(entry_level))
+                # For UP trades: pullback = entry_level + pullback_factor * (current_price - entry_level)
+                pullback_level = float(entry_level) + pullback_factor * (float(current_spot_price) - float(entry_level))
                 logger.info(f"📈 UP Trade Pullback Calculation:")
-                logger.info(f"    Formula: entry_level + 0.5 * (current_price - entry_level)")
-                logger.info(f"    Calculation: {entry_level} + 0.5 * ({current_spot_price} - {entry_level}) = {pullback_level}")
+                logger.info(f"    Formula: entry_level + {pullback_factor} * (current_price - entry_level)")
+                logger.info(f"    Calculation: {entry_level} + {pullback_factor} * ({current_spot_price} - {entry_level}) = {pullback_level}")
                 
             elif signal_direction == "DOWN":
-                # For DOWN trades: pullback = entry_level - 0.5 * (entry_level - current_price)
-                pullback_level = float(entry_level) - 0.5 * (float(entry_level) - float(current_spot_price))
+                # For DOWN trades: pullback = entry_level - pullback_factor * (entry_level - current_price)
+                pullback_level = float(entry_level) - pullback_factor * (float(entry_level) - float(current_spot_price))
                 logger.info(f"📉 DOWN Trade Pullback Calculation:")
-                logger.info(f"    Formula: entry_level - 0.5 * (entry_level - current_price)")
-                logger.info(f"    Calculation: {entry_level} - 0.5 * ({entry_level} - {current_spot_price}) = {pullback_level}")
+                logger.info(f"    Formula: entry_level - {pullback_factor} * (entry_level - current_price)")
+                logger.info(f"    Calculation: {entry_level} - {pullback_factor} * ({entry_level} - {current_spot_price}) = {pullback_level}")
                 
             else:
                 logger.error(f"❌ Invalid signal direction for pullback calculation: {signal_direction}")
@@ -1257,9 +1326,9 @@ class SwingHighLowBuyStrategy(StrategyBase):
             pullback_level = round(pullback_level, 2)
             
             # Store pullback level in database
-            from algosat.core.re_entry_db_helpers import create_re_entry_tracking_record
+            from algosat.core.re_entry_db_helpers import create_re_entry_tracking
             
-            success = await create_re_entry_tracking_record(order_id, pullback_level)
+            success = await create_re_entry_tracking(order_id, pullback_level)
             
             if success:
                 logger.info(f"✅ Pullback level calculated and stored successfully:")
@@ -1330,7 +1399,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             if not strike_symbol:
                 logger.error("evaluate_exit: Missing strike_symbol in order_row.")
                 return False
-                
+            logger.info(f"evaluate_exit: Evaluating exit for order_row={order_row}") 
             order_id = order_row.get('id') or order_row.get('order_id')
             logger.info(f"evaluate_exit: Checking exit conditions for order_id={order_id}, strike={strike_symbol}")
             
@@ -1359,7 +1428,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             stoploss_spot_level = order_row.get("stoploss_spot_level")
             target_spot_level = order_row.get("target_spot_level")
             signal_direction = order_row.get("signal_direction") or order_row.get("direction", "").upper()
-            
+            logger.debug(f"evaluate_exit: Initial stoploss={stoploss_spot_level}, target={target_spot_level}, direction={signal_direction} for order_id={order_id}")
             # PRIORITY 1: NEXT DAY STOPLOSS UPDATE (UPDATE ONLY, DON'T EXIT)
             # Always check for next day logic if order exists from previous trading day
             # This ensures proper stoploss management even if carry_forward is disabled after position creation
@@ -1508,6 +1577,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             # PRIORITY 3: TARGET ACHIEVEMENT CHECK
             if target_spot_level is not None:
                 # Check target based on trade direction
+                logger.info(f"evaluate_exit: Checking target achievement for order_id={order_id}, target={target_spot_level}, current_price={current_spot_price}")
                 if signal_direction == "UP":  # CE trade
                     if float(current_spot_price) >= float(target_spot_level):
                         # Update order status to EXIT_TARGET
@@ -1540,6 +1610,8 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     
                     if latest_hh and latest_ll:
                         new_stoploss = None
+                        logger.debug(f"evaluate_exit: Latest swing high/low found - HH: {latest_hh}, LL: {latest_ll} for order_id={order_id}")
+                        logger.debug(f"evaluate_exit: Current stoploss level: {stoploss_spot_level} for order_id={order_id}")
                         if signal_direction == "UP":  # CE trade
                             # New stoploss is latest swing low, but take max of current and new
                             latest_swing_low = latest_ll["price"]

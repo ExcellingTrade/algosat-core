@@ -107,6 +107,81 @@ def cleanup_old_strike_cache(cache, days=1):
     for key in keys_to_delete:
         del cache[key]
 
+def cleanup_pre_candle_cache(cache, trade_day, first_candle_time, interval_minutes):
+    """
+    Clean up cache entries for today that were created before the first candle completion time.
+    This prevents using strikes identified from pre-market or test data during actual trading.
+    
+    Args:
+        cache: The cache dictionary
+        trade_day: Current trade day datetime
+        first_candle_time: First candle time string (e.g., "09:15")
+        interval_minutes: Interval in minutes
+    """
+    from datetime import datetime, time as dt_time
+    
+    today_str = trade_day.date().isoformat()
+    keys_to_delete = []
+    
+    # Calculate first candle completion time for today (ensure timezone awareness)
+    first_candle_time_parts = first_candle_time.split(":")
+    first_candle_hour = int(first_candle_time_parts[0])
+    first_candle_minute = int(first_candle_time_parts[1])
+    
+    # Create first candle completion time with same timezone as trade_day
+    first_candle_completion_time = datetime.combine(
+        trade_day.date(),
+        dt_time(first_candle_hour, first_candle_minute)
+    ) + timedelta(minutes=interval_minutes)
+    
+    # Make timezone-aware if trade_day has timezone info
+    if trade_day.tzinfo:
+        first_candle_completion_time = first_candle_completion_time.replace(tzinfo=trade_day.tzinfo)
+    
+    # Check cache entries for today
+    for key, value in cache.items():
+        try:
+            parts = key.split("_")
+            if len(parts) >= 2:
+                cache_date_str = parts[1]
+                
+                # Only check entries for today
+                if cache_date_str == today_str:
+                    # Check if cache entry has metadata with creation timestamp
+                    if isinstance(value, dict) and 'metadata' in value and 'created_at' in value['metadata']:
+                        created_at_str = value['metadata']['created_at']
+                        created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                        
+                        # Ensure both datetimes have same timezone info for comparison
+                        if first_candle_completion_time.tzinfo and not created_at.tzinfo:
+                            # Make created_at timezone-aware (assume it's in same timezone as trade_day)
+                            created_at = created_at.replace(tzinfo=first_candle_completion_time.tzinfo)
+                        elif not first_candle_completion_time.tzinfo and created_at.tzinfo:
+                            # Convert created_at to naive datetime for comparison
+                            created_at = created_at.replace(tzinfo=None)
+                        elif first_candle_completion_time.tzinfo and created_at.tzinfo:
+                            # Both are timezone-aware, convert created_at to same timezone
+                            created_at = created_at.astimezone(first_candle_completion_time.tzinfo)
+                        
+                        # If cache was created before first candle completion, mark for deletion
+                        if created_at < first_candle_completion_time:
+                            keys_to_delete.append(key)
+                            logger.info(f"Marking cache entry for deletion: {key} (created at {created_at} before first candle completion at {first_candle_completion_time})")
+                    else:
+                        # Legacy cache entry without metadata - assume it's invalid for today
+                        keys_to_delete.append(key)
+                        logger.info(f"Marking legacy cache entry for deletion: {key} (no creation metadata)")
+        except Exception as e:
+            logger.warning(f"Error checking cache entry {key}: {e}")
+            continue
+    
+    # Delete invalid entries
+    for key in keys_to_delete:
+        del cache[key]
+        logger.info(f"Deleted pre-candle cache entry: {key}")
+    
+    return len(keys_to_delete)
+
 class OptionSellStrategy(StrategyBase):
     """
     Concrete implementation of the Option Buy strategy.
@@ -176,12 +251,34 @@ class OptionSellStrategy(StrategyBase):
         # 3. Fetch option chain and identify strikes
         cache = await load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
+        
+        # Clean up old cache entries (older than 10 days)
         cleanup_old_strike_cache(cache, days=10)
+        
+        # Clean up today's cache entries that were created before first candle completion
+        deleted_count = cleanup_pre_candle_cache(cache, trade_day, first_candle_time, interval_minutes)
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} pre-candle cache entries for today")
+        
+        # Check if we have a valid cache entry for today (after cleanup)
         if cache_key in cache:
-            self._strikes = cache[cache_key]
-            logger.info(f"Loaded identified strikes from persistent cache: {self._strikes}")
-            await save_identified_strikes_cache(cache)
-            return
+            cache_entry = cache[cache_key]
+            
+            # Handle both legacy format (list) and new format (dict with metadata)
+            if isinstance(cache_entry, list):
+                self._strikes = cache_entry
+                logger.info(f"Loaded identified strikes from legacy cache: {self._strikes}")
+            elif isinstance(cache_entry, dict) and 'strikes' in cache_entry:
+                self._strikes = cache_entry['strikes']
+                logger.info(f"Loaded identified strikes from cache: {self._strikes}")
+                logger.info(f"Cache created at: {cache_entry.get('metadata', {}).get('created_at', 'unknown')}")
+            else:
+                logger.warning(f"Invalid cache entry format for key {cache_key}, will regenerate")
+                del cache[cache_key]  # Remove invalid entry
+            
+            if self._strikes:
+                await save_identified_strikes_cache(cache)
+                return
         candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
         from_date = candle_times["from_date"]
         to_date = candle_times["to_date"]
@@ -197,9 +294,22 @@ class OptionSellStrategy(StrategyBase):
         if pe_strike is not None:
             self._strikes.append(pe_strike)
         if self._strikes:
-            cache[cache_key] = self._strikes
+            # Store strikes with metadata including creation timestamp
+            from datetime import datetime, timezone
+            cache_entry = {
+                'strikes': self._strikes,
+                'metadata': {
+                    'created_at': datetime.now(timezone.utc).isoformat(),
+                    'first_candle_time': first_candle_time,
+                    'interval_minutes': interval_minutes,
+                    'max_premium': max_premium,
+                    'symbol': symbol
+                }
+            }
+            cache[cache_key] = cache_entry
             await save_identified_strikes_cache(cache)
-            logger.info(f"Cached identified strikes persistently: {self._strikes}")
+            logger.info(f"Cached identified strikes with metadata: {self._strikes}")
+            logger.info(f"Cache metadata: created_at={cache_entry['metadata']['created_at']}, first_candle_time={first_candle_time}")
         if not self._strikes:
             logger.error("Failed to identify any valid strike prices. Setup failed.")
             self._setup_failed = True
@@ -495,6 +605,8 @@ class OptionSellStrategy(StrategyBase):
         Always pass self.cfg (StrategyConfig) as the config to order_manager.place_order for correct DB logging.
         Returns order info dict with local DB order_id if an order is placed, else None.
         Now also fetches hedge symbol and logs it.
+        Implements robust hedge order handling: checks if ALL hedge orders failed before aborting,
+        allows partial hedge success, sets parent_order_id relationships, and provides comprehensive cleanup.
         """
         if not signal_payload:
             logger.debug(f"No signal for {strike} at {data.iloc[-1].get('timestamp', 'N/A')}")
@@ -506,12 +618,16 @@ class OptionSellStrategy(StrategyBase):
         # 1. Fetch and place hedge order first
         hedge_order_result = None
         try:
-            hedge_symbol = await self.fetch_hedge_symbol(self.order_manager.broker_manager, strike, self.trade)
+            # Use signal_payload.symbol (the actual option symbol) for hedge calculation
+            option_symbol = signal_payload.symbol
+            logger.info(f"🔍 Fetching hedge symbol for {option_symbol}")
+            hedge_symbol = await self.fetch_hedge_symbol(self.order_manager.broker_manager, option_symbol, self.trade)
             if not hedge_symbol:
-                logger.error(f"No hedge symbol found for {strike}, aborting trade.")
+                logger.error(f"❌ No hedge symbol found for {option_symbol}, aborting trade.")
                 return None
 
-            logger.info(f"Hedge symbol for {strike}: {hedge_symbol}")
+            logger.info(f"🛡️ Hedge symbol identified for {option_symbol}: {hedge_symbol}")
+            
             hedge_signal_payload = TradeSignal(
                 symbol=hedge_symbol,
                 side="BUY",
@@ -520,66 +636,225 @@ class OptionSellStrategy(StrategyBase):
                 signal_direction="hedge buy",
                 lot_qty=signal_payload.lot_qty,
             )
+            
+            logger.debug(f"Building hedge order request for {hedge_symbol}")
             hedge_order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
                 hedge_signal_payload, self.cfg
             )
+            
+            logger.info(f"📤 Placing hedge order for {hedge_symbol} (Main: {option_symbol})")
             hedge_order_result = await self.order_manager.place_order(
                 self.cfg, hedge_order_request, strategy_name=None
             )
             logger.debug(f"Hedge order result for {hedge_symbol}: {hedge_order_result}")
 
-            # Check if hedge order failed
+            # Check if ALL hedge orders failed (proceed if at least one hedge succeeds)
             failed_statuses = {"FAILED", "CANCELLED", "REJECTED"}
             broker_responses = hedge_order_result.get('broker_responses') if hedge_order_result else None
-            any_failed = False
+            all_failed = False
+            
             if broker_responses and isinstance(broker_responses, dict):
                 statuses = [str(resp.get('status')).split('.')[-1].replace("'>", "").upper() if resp else None for resp in broker_responses.values()]
-                if any(s in failed_statuses for s in statuses if s):
-                    any_failed = True
+                logger.debug(f"Hedge order broker statuses for {hedge_symbol}: {statuses}")
+                
+                # Check if ALL hedge orders failed (instead of ANY)
+                valid_statuses = [s for s in statuses if s]  # Filter out None values
+                if valid_statuses and all(s in failed_statuses for s in valid_statuses):
+                    all_failed = True
+                    failed_hedge_brokers = [broker_id for broker_id, resp in broker_responses.items() 
+                                          if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                    logger.error(f"❌ ALL hedge orders failed for {hedge_symbol}: {[s for s in valid_statuses if s in failed_statuses]}")
+                    logger.error(f"❌ All failed hedge brokers: {failed_hedge_brokers}")
+                elif any(s in failed_statuses for s in valid_statuses):
+                    # Some hedge orders failed, but at least one succeeded
+                    failed_hedge_brokers = [broker_id for broker_id, resp in broker_responses.items() 
+                                          if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                    successful_hedge_brokers = [broker_id for broker_id, resp in broker_responses.items() 
+                                              if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() not in failed_statuses]
+                    logger.warning(f"⚠️ Some hedge orders failed for {hedge_symbol}: {[s for s in valid_statuses if s in failed_statuses]}")
+                    logger.warning(f"⚠️ Failed hedge brokers: {failed_hedge_brokers}")
+                    logger.info(f"✅ Successful hedge brokers: {successful_hedge_brokers} - Continuing with trade")
             
-            if any_failed:
-                logger.error(f"Hedge order failed/cancelled/rejected, aborting entry. Details: {hedge_order_result}")
-                # No need to exit, as it already failed
+            if all_failed:
+                failed_hedge_brokers = [broker_id for broker_id, resp in broker_responses.items() 
+                                       if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                
+                # Comprehensive logging for hedge order failure
+                logger.error(f"🚨 CRITICAL: ALL hedge orders failed for {hedge_symbol} (Main: {option_symbol}), aborting entire trade")
+                logger.error(f"💥 Failed hedge brokers: {failed_hedge_brokers}")
+                logger.error(f"💥 Hedge order failure details:")
+                for broker_id, resp in broker_responses.items():
+                    if resp:
+                        broker_order_id = resp.get('broker_order_id')
+                        status = str(resp.get('status')).split('.')[-1].replace("'>", "").upper()
+                        error_msg = resp.get('error_message') or resp.get('message') or 'No error message'
+                        logger.error(f"💥   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}, Error: {error_msg}")
+                    else:
+                        logger.error(f"💥   Broker {broker_id}: No response data available")
+                
+                # Call exit order even if hedge order fails to ensure no orphaned orders
+                hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
+                if hedge_order_id:
+                    logger.warning(f"🔄 Attempting to clean up failed hedge order {hedge_order_id}")
+                    await self.order_manager.exit_order(hedge_order_id, exit_reason="All hedge orders failure")
                 return None
+            
+            hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
+            logger.info(f"✅ Hedge order placed successfully for {hedge_symbol} (Main: {option_symbol}). Hedge Order ID: {hedge_order_id}")
 
         except Exception as e:
-            logger.error(f"An exception occurred while placing the hedge order for {strike}: {e}", exc_info=True)
-            return None # Abort if hedge placement fails
+            logger.error(f"💥 An exception occurred while placing the hedge order for {option_symbol}: {e}", exc_info=True)
+            logger.error(f"💥 Hedge symbol: {hedge_symbol if 'hedge_symbol' in locals() else 'Not determined'}")
+            return None  # Abort if hedge placement fails
 
         # 2. Place main SELL order and handle potential failure
         main_order_result = None
         try:
+            logger.info(f"Building order request for main SELL order: {option_symbol}")
             order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
                 signal_payload, self.cfg
             )
+            logger.info(f"Placing main SELL order for {option_symbol}")
+            
             main_order_result = await self.order_manager.place_order(
                 self.cfg, order_request, strategy_name=None
             )
+            logger.debug(f"Main SELL order result for {option_symbol}: {main_order_result}")
             
-            # Check if main order failed
+            # Check if ALL main orders failed (consistent with hedge logic)
             main_broker_responses = main_order_result.get('broker_responses') if main_order_result else None
-            main_any_failed = False
+            main_all_failed = False
+            
             if main_broker_responses and isinstance(main_broker_responses, dict):
                 main_statuses = [str(resp.get('status')).split('.')[-1].replace("'>", "").upper() if resp else None for resp in main_broker_responses.values()]
-                if any(s in failed_statuses for s in main_statuses if s):
-                    main_any_failed = True
+                logger.debug(f"Main order broker statuses for {option_symbol}: {main_statuses}")
+                
+                # Check if ALL main orders failed (instead of ANY)
+                valid_main_statuses = [s for s in main_statuses if s]  # Filter out None values
+                if valid_main_statuses and all(s in failed_statuses for s in valid_main_statuses):
+                    main_all_failed = True
+                    failed_main_brokers = [broker_id for broker_id, resp in main_broker_responses.items() 
+                                          if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                    logger.error(f"❌ ALL main SELL orders failed for {option_symbol}: {[s for s in valid_main_statuses if s in failed_statuses]}")
+                    logger.error(f"❌ All failed main brokers: {failed_main_brokers}")
+                elif any(s in failed_statuses for s in valid_main_statuses):
+                    # Some main orders failed, but at least one succeeded
+                    failed_main_brokers = [broker_id for broker_id, resp in main_broker_responses.items() 
+                                          if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                    successful_main_brokers = [broker_id for broker_id, resp in main_broker_responses.items() 
+                                              if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() not in failed_statuses]
+                    logger.warning(f"⚠️ Some main SELL orders failed for {option_symbol}: {[s for s in valid_main_statuses if s in failed_statuses]}")
+                    logger.warning(f"⚠️ Failed main brokers: {failed_main_brokers}")
+                    logger.info(f"✅ Successful main brokers: {successful_main_brokers} - Continuing with trade")
 
-            if main_any_failed:
-                 raise Exception(f"Main SELL order failed/cancelled/rejected. Details: {main_order_result}")
+            if main_all_failed:
+                failed_main_brokers = [broker_id for broker_id, resp in main_broker_responses.items() 
+                                      if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                
+                # Comprehensive logging for main order failure
+                logger.error(f"🚨 CRITICAL: ALL main SELL orders failed for {option_symbol}")
+                logger.error(f"💥 Failed main brokers: {failed_main_brokers}")
+                logger.error(f"💥 Main order failure details:")
+                for broker_id, resp in main_broker_responses.items():
+                    if resp:
+                        broker_order_id = resp.get('broker_order_id')
+                        status = str(resp.get('status')).split('.')[-1].replace("'>", "").upper()
+                        error_msg = resp.get('error_message') or resp.get('message') or 'No error message'
+                        logger.error(f"💥   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}, Error: {error_msg}")
+                    else:
+                        logger.error(f"💥   Broker {broker_id}: No response data available")
+                
+                raise Exception(f"ALL main SELL orders failed/cancelled/rejected for {option_symbol}. Failed brokers: {failed_main_brokers}. Details: {main_order_result}")
 
-            return main_order_result
+            logger.info(f"✅ Main SELL order placed successfully for {option_symbol}. Order ID: {main_order_result.get('order_id') or main_order_result.get('id')}")
+            
+            # Set parent_order_id relationship: hedge order is child of main order
+            hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
+            main_order_id = main_order_result.get('order_id') or main_order_result.get('id')
+            
+            if hedge_order_id and main_order_id:
+                try:
+                    logger.info(f"🔗 Setting parent_order_id relationship: hedge {hedge_order_id} -> main {main_order_id}")
+                    await self.order_manager.set_parent_order_id(hedge_order_id, main_order_id)
+                    logger.debug(f"✅ Parent-child relationship established: hedge {hedge_order_id} is child of main {main_order_id}")
+                except Exception as e:
+                    logger.error(f"⚠️ Failed to set parent_order_id relationship for hedge {hedge_order_id} -> main {main_order_id}: {e}")
+            
+            # Return merged order_request + main_order_result format like other strategies
+            # Convert OrderRequest to dict for merging
+            if hasattr(order_request, 'dict'):
+                order_request_dict = order_request.dict()
+            else:
+                order_request_dict = dict(order_request)
+            return {**order_request_dict, **main_order_result}
 
         except Exception as e:
-            logger.critical(f"CRITICAL: Main SELL order failed for {strike} after hedge was placed. Attempting to exit hedge. Error: {e}", exc_info=True)
+            logger.critical(f"🚨 CRITICAL: Main SELL order failed for {option_symbol} after hedge was placed. Attempting to exit hedge. Error: {e}", exc_info=True)
+            
+            # Extract hedge order details for cleanup
             hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
+            hedge_broker_responses = hedge_order_result.get('broker_responses') if hedge_order_result else None
+            
+            # Log detailed main order failure context for the orphaned hedge cleanup
+            logger.error(f"💀 Orphaned hedge order detected due to main order failure:")
+            logger.error(f"💀   Main Strike: {option_symbol}")
+            logger.error(f"💀   Hedge Order ID: {hedge_order_id}")
+            logger.error(f"💀   Main Order Failure: {str(e)}")
+            
+            # Log hedge order broker details that need cleanup
+            if hedge_broker_responses:
+                logger.error(f"💀 Hedge order brokers requiring cleanup:")
+                for broker_id, response in hedge_broker_responses.items():
+                    if response:
+                        broker_order_id = response.get('broker_order_id')
+                        status = str(response.get('status')).split('.')[-1].replace("'>", "").upper() if response.get('status') else 'Unknown'
+                        logger.error(f"💀   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}")
+                    else:
+                        logger.error(f"💀   Broker {broker_id}: No response data available")
+            
             if hedge_order_id:
                 try:
-                    await self.order_manager.exit_order(hedge_order_id, exit_reason="Main order failure")
-                    logger.info(f"Successfully initiated exit for orphaned hedge order {hedge_order_id}.")
+                    logger.warning(f"🔄 Attempting to exit orphaned hedge order {hedge_order_id} for {option_symbol}")
+                    await self.order_manager.exit_order(hedge_order_id, exit_reason=f"Main order failure: {str(e)[:100]}")
+                    logger.info(f"✅ Successfully initiated exit for orphaned hedge order {hedge_order_id} (Strike: {option_symbol})")
+                    
+                    # Log hedge order exit confirmation with broker details
+                    if hedge_broker_responses:
+                        logger.info(f"📊 Hedge order cleanup initiated for brokers: {list(hedge_broker_responses.keys())}")
+                        
                 except Exception as exit_e:
-                    logger.error(f"FATAL: Failed to exit orphaned hedge order {hedge_order_id}. Manual intervention required. Error: {exit_e}", exc_info=True)
+                    logger.error(f"💥 FATAL: Failed to exit orphaned hedge order {hedge_order_id} for {option_symbol}. "
+                               f"Manual intervention required immediately! Error: {exit_e}", exc_info=True)
+                    logger.error(f"💥 MANUAL ACTION REQUIRED: Hedge order {hedge_order_id} for {option_symbol} is orphaned and could not be auto-exited")
+                    
+                    # Log comprehensive context for manual intervention
+                    if hedge_broker_responses:
+                        logger.error(f"💥 Manual cleanup required for brokers: {list(hedge_broker_responses.keys())}")
+                        for broker_id, response in hedge_broker_responses.items():
+                            if response:
+                                broker_order_id = response.get('broker_order_id')
+                                status = str(response.get('status')).split('.')[-1].replace("'>", "").upper() if response.get('status') else 'Unknown'
+                                error_msg = response.get('error_message') or response.get('message') or 'No error message'
+                                logger.error(f"💥   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}, Error: {error_msg}")
+                            else:
+                                logger.error(f"💥   Broker {broker_id}: No response data available")
             else:
-                logger.error(f"FATAL: Could not find order_id for orphaned hedge. Manual intervention required. Details: {hedge_order_result}")
+                logger.error(f"💥 FATAL: Could not find order_id for orphaned hedge order for {option_symbol}. "
+                           f"Manual intervention required immediately!")
+                logger.error(f"💥 MANUAL ACTION REQUIRED: Hedge order details for manual cleanup: {hedge_order_result}")
+                
+                # Log broker-specific details for manual cleanup
+                if hedge_broker_responses:
+                    logger.error(f"💥 Manual cleanup required - Hedge brokers: {list(hedge_broker_responses.keys())}")
+                    for broker_id, response in hedge_broker_responses.items():
+                        if response:
+                            broker_order_id = response.get('broker_order_id')
+                            status = str(response.get('status')).split('.')[-1].replace("'>", "").upper() if response.get('status') else 'Unknown'
+                            error_msg = response.get('error_message') or response.get('message') or 'No error message'
+                            logger.error(f"💥   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}, Error: {error_msg}")
+                        else:
+                            logger.error(f"💥   Broker {broker_id}: No response data available")
+            
             return None
 
     async def evaluate_signal(self, data, config: dict, strike: str) -> Optional[TradeSignal]:
@@ -597,6 +872,7 @@ class OptionSellStrategy(StrategyBase):
             curr = data.iloc[-1]
             candle_range = round(curr['high'] - curr['low'], 2)
             max_range = config.get('max_range', 100)
+            logger.debug(f"Evaluating signal for {strike} at {curr.get('timestamp')}: prev={prev}, curr={curr}, candle_range={candle_range}, max_range={max_range}")
             if candle_range > max_range:
                 logger.debug(
                     f"No valid signal for {strike} at {curr.get('timestamp')}: Candle range {candle_range} exceeds max {max_range} with curr high {curr['high']} and curr low {curr['low']}."
@@ -605,6 +881,7 @@ class OptionSellStrategy(StrategyBase):
             # Track signal direction logic
             curr_signal_direction = curr.get("supertrend_signal")
             last_signal_direction = self._last_signal_direction.get(strike)
+            logger.debug(f"Current signal direction for {strike}: {curr_signal_direction}, Last signal direction: {last_signal_direction}")
 
             # Reset last_signal_direction to None if signal flipped to BUY from SELL
             if curr_signal_direction == constants.TRADE_DIRECTION_BUY and last_signal_direction == constants.TRADE_DIRECTION_SELL:
@@ -643,7 +920,7 @@ class OptionSellStrategy(StrategyBase):
             else:
                 threshold_entry = 500  # Fallback value
                 logger.warning(f"Could not determine configured premium for {strike}, using fallback threshold_entry={threshold_entry}")
-
+            logger.debug(f"For Strike {strike} close={curr['close']}, vwap={curr['vwap']}, sma={curr['sma']}, threshold_entry={threshold_entry}")
             if (
                 curr["supertrend_signal"] == constants.TRADE_DIRECTION_SELL
                 and prev["supertrend_signal"] == constants.TRADE_DIRECTION_SELL
@@ -700,6 +977,10 @@ class OptionSellStrategy(StrategyBase):
                     trade_dict = calculate_trade(curr, data, strike, config, side=Side.SELL, target_atr_multiplier=sideways_target_atr_multiplier)
                     trade_dict[constants.TRADE_KEY_LOT_QTY] = new_lot_qty
                     logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, updating lot_qty to {new_lot_qty} ({sideways_qty_perc}% of {lot_qty}) and using target_atr_multiplier={sideways_target_atr_multiplier}")
+                elif not sideways_enabled and regime == "Sideways":
+                    # If sideways is not enabled, skip the trade entirely
+                    logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, but sideways_trade_enabled is False, skipping trade.")
+                    return None
                 orig_target = trade_dict.get(constants.TRADE_KEY_TARGET_PRICE)
 
                 # Trailing stoploss logic: update target if enabled (for non-sideways regime or if config wants it)
@@ -876,7 +1157,7 @@ class OptionSellStrategy(StrategyBase):
             max_premium = trade_config.get("opp_side_max_premium") or self.trade.get("opp_side_max_premium")
             logger.info(f"Identifying hedge symbol for {opp_side} with max premium: {max_premium}")
             # Assume broker.get_option_chain returns all options for the relevant symbol family
-            option_chain_response = await broker.get_option_chain(strike, trade_config.get("max_strikes", 40))
+            option_chain_response = await self.dp.get_option_chain(strike, trade_config.get("max_strikes", 40))
             option_chain_df = pd.DataFrame(option_chain_response['data']['optionsChain'])
             # Filter for the opposite side
             hedge_options = option_chain_df[

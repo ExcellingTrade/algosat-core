@@ -328,8 +328,9 @@ def get_strategy_aware_log_file(module_name: str) -> str:
     Priority:
     1. API modules -> api-YYYY-MM-DD.log (ignores strategy context)
     2. Broker monitor -> broker_monitor-YYYY-MM-DD.log (ignores strategy context)
-    3. Strategy context (if set) -> strategy_name-YYYY-MM-DD.log
-    4. Default -> algosat-YYYY-MM-DD.log
+    3. Core infrastructure modules -> algosat-YYYY-MM-DD.log (always goes to main log, ignores strategy context)
+    4. Strategy context (if set) -> strategy_name-YYYY-MM-DD.log
+    5. Default -> algosat-YYYY-MM-DD.log
     """
     today = get_ist_now().strftime('%Y-%m-%d')
     date_dir = os.path.join(constants.LOG_DIR, today)
@@ -341,7 +342,22 @@ def get_strategy_aware_log_file(module_name: str) -> str:
     elif module_name == "broker_monitor":
         return os.path.join(date_dir, f"broker_monitor-{today}.log")
     
-    # Check strategy context for other modules
+    # Core infrastructure modules always go to main algosat log (ignore strategy context)
+    # These are system-level components that shouldn't clutter strategy-specific logs
+    core_infrastructure_modules = {
+        "rate_limiter", "data_manager", "broker_manager", "order_cache", 
+        "position_monitor", "balance_summary_monitor", "performance", 
+        "async_retry", "data_management", "data_provider", "strategy_manager",
+        "OrderCache", "PositionMonitor", "BalanceSummaryMonitor", "BrokerManager",
+        "DataManagement", "VPSPerformance"
+    }
+    
+    if (module_name in core_infrastructure_modules or 
+        module_name.endswith(".rate_limiter") or
+        any(module_name.endswith(f".{core_mod}") for core_mod in core_infrastructure_modules)):
+        return os.path.join(date_dir, f"algosat-{today}.log")
+    
+    # Check strategy context for other modules (mainly strategy-specific and order_monitor)
     strategy_context = get_current_strategy_context()
     if strategy_context:
         return os.path.join(date_dir, f"{strategy_context}-{today}.log")

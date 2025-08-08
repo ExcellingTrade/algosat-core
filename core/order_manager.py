@@ -106,6 +106,7 @@ class OrderManager:
         config: StrategyConfig,
         order_payload: OrderRequest,
         strategy_name: Optional[str] = None,
+        parent_order_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
         Places an order by building a canonical OrderRequest and delegating to BrokerManager for broker routing.
@@ -116,6 +117,7 @@ class OrderManager:
             config: The strategy configuration (StrategyConfig instance).
             order_payload: The OrderRequest object detailing the order.
             strategy_name: Optional name of the strategy placing the order.
+            parent_order_id: Optional parent order ID to establish parent-child relationship (e.g., hedge order for main order).
 
         Returns:
             A dictionary containing the overall status and individual broker responses.
@@ -149,7 +151,7 @@ class OrderManager:
                 order_payload=order_payload,
                 broker_name=None,
                 result=None,
-                parent_order_id=None
+                parent_order_id=parent_order_id
             )
             if not order_id:
                 logger.error("Failed to insert logical order row.")
@@ -235,18 +237,111 @@ class OrderManager:
             await session.commit()
         return {'order_id': parent_order_id, 'slices': responses}
 
-    async def _set_parent_order_id(self, order_id, parent_order_id):
+    async def has_child_orders(self, parent_order_id: int) -> bool:
+        """
+        Check if an order has any child orders without fetching them.
+        
+        Args:
+            parent_order_id: ID of the parent order
+            
+        Returns:
+            True if the order has child orders, False otherwise
+        """
+        from algosat.core.db import AsyncSessionLocal, has_child_orders as has_child_orders_db
+        
+        async with AsyncSessionLocal() as session:
+            result = await has_child_orders_db(session, parent_order_id)
+            logger.debug(f"OrderManager: Order {parent_order_id} has child orders: {result}")
+            return result
+
+    async def get_child_orders(self, parent_order_id: int) -> List[dict]:
+        """
+        Get all child orders for a given parent order ID.
+        
+        Args:
+            parent_order_id: ID of the parent order
+            
+        Returns:
+            List of child order records
+        """
+        from algosat.core.db import AsyncSessionLocal, get_child_orders as get_child_orders_db
+        
+        async with AsyncSessionLocal() as session:
+            child_orders = await get_child_orders_db(session, parent_order_id)
+            logger.debug(f"OrderManager: Found {len(child_orders)} child orders for parent_order_id={parent_order_id}")
+            return child_orders
+
+    async def exit_child_orders(self, parent_order_id: int, exit_reason: str = None, check_live_status: bool = False):
+        """
+        Exit all child orders for a given parent order.
+        This is called when a main order exits to also exit its hedge orders.
+        NOTE: This method assumes has_child_orders() has already been checked.
+        
+        Args:
+            parent_order_id: ID of the parent order whose children should be exited
+            exit_reason: Reason for exiting the child orders
+            check_live_status: Whether to check live broker status before exit
+        """
+        try:
+            child_orders = await self.get_child_orders(parent_order_id)
+            logger.info(f"OrderManager: Found {len(child_orders)} child orders to exit for parent_order_id={parent_order_id}")
+            
+            for child_order in child_orders:
+                child_order_id = child_order['id']
+                child_symbol = child_order.get('strike_symbol') or child_order.get('symbol', 'Unknown')
+                child_status = child_order.get('status', 'Unknown')
+                
+                # Skip child orders that are already closed/exited
+                if child_status in ('FILLED', 'CANCELLED', 'REJECTED', 'FAILED'):
+                    logger.info(f"OrderManager: Skipping child order {child_order_id} (symbol={child_symbol}) - already closed with status={child_status}")
+                    continue
+                
+                try:
+                    logger.info(f"OrderManager: Exiting child order {child_order_id} (symbol={child_symbol}, status={child_status}) due to parent order {parent_order_id} exit")
+                    
+                    # Recursively call exit_order for the child - this will handle any grandchildren too
+                    await self.exit_order(
+                        parent_order_id=child_order_id,
+                        exit_reason=exit_reason or f"Parent order {parent_order_id} exited",
+                        check_live_status=check_live_status
+                    )
+                    
+                    logger.info(f"OrderManager: Successfully initiated exit for child order {child_order_id}")
+                    
+                except Exception as e:
+                    logger.error(f"OrderManager: Failed to exit child order {child_order_id}: {e}", exc_info=True)
+                    # Continue with other child orders even if one fails
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"OrderManager: Error in exit_child_orders for parent_order_id={parent_order_id}: {e}", exc_info=True)
+
+    async def set_parent_order_id(self, child_order_id: int, parent_order_id: int):
         """
         Update the parent_order_id of an order row after insert.
+        Useful for establishing parent-child relationships between orders (e.g., hedge and main orders).
+        
+        Args:
+            child_order_id: ID of the child order (e.g., hedge order)
+            parent_order_id: ID of the parent order (e.g., main order)
         """
         from algosat.core.db import AsyncSessionLocal, update_rows_in_table
         from algosat.core.dbschema import orders
         async with AsyncSessionLocal() as session:
             await update_rows_in_table(
                 target_table=orders,
-                condition=orders.c.id == order_id,
+                condition=orders.c.id == child_order_id,
                 new_values={"parent_order_id": parent_order_id}
             )
+            await session.commit()
+            logger.info(f"OrderManager: Set parent_order_id relationship: child {child_order_id} -> parent {parent_order_id}")
+
+    async def _set_parent_order_id(self, order_id, parent_order_id):
+        """
+        Update the parent_order_id of an order row after insert.
+        DEPRECATED: Use set_parent_order_id instead.
+        """
+        await self.set_parent_order_id(order_id, parent_order_id)
 
     async def _insert_and_get_order_id(
         self,
@@ -309,6 +404,7 @@ class OrderManager:
             # --- Build order_data for logical order (orders table) ---
             order_data = {
                 "strategy_symbol_id": strategy_symbol_id,
+                "parent_order_id": parent_order_id,  # NEW: Set parent-child relationship (e.g., hedge order for main order)
                 "strike_symbol": strike_symbol,  # NEW: Store the actual tradeable strike symbol
                 "pnl": 0.0,  # NEW: Initialize PnL to 0 (will be updated when order is closed)
                 "candle_range": order_payload.extra.get("candle_range"),
@@ -347,7 +443,7 @@ class OrderManager:
             return val.value
         return val
 
-    def build_broker_exec_data(self, *, parent_order_id, broker_id, broker_order_id, side, status, executed_quantity=0, execution_price=0.0, product_type=None, order_type=None, order_messages=None, action=None, raw_execution_data=None, symbol=None, execution_time=None, notes=None):
+    def build_broker_exec_data(self, *, parent_order_id, broker_id, broker_order_id, side, status, executed_quantity=0, execution_price=0.0, product_type=None, order_type=None, order_messages=None, action=None, raw_execution_data=None, symbol=None, execution_time=None, notes=None, exit_broker_order_id=None):
         """
         Utility to build the broker execution data dict for DB insert.
         """
@@ -360,6 +456,7 @@ class OrderManager:
             parent_order_id=parent_order_id,
             broker_id=broker_id,
             broker_order_id=broker_order_id,
+            exit_broker_order_id=exit_broker_order_id,
             side=side,
             action=action or side,
             status=OrderManager.to_enum_value(status),
@@ -414,6 +511,14 @@ class OrderManager:
             exec_price = response.get("execPrice", 0.0)
             exec_quantity = response.get("execQuantity", 0)
             action_val = action or response.get("side", "BUY")
+            symbol = response.get("symbol")  # isymbol from broker response
+            
+            # Log symbol extraction for debugging
+            if symbol:
+                logger.info(f"OrderManager: Extracted symbol '{symbol}' from {broker_name} response for parent_order_id={parent_order_id}")
+            else:
+                logger.warning(f"OrderManager: No symbol found in {broker_name} response for parent_order_id={parent_order_id}. Response keys: {list(response.keys())}")
+            
             broker_exec_data = self.build_broker_exec_data(
                 parent_order_id=parent_order_id,
                 broker_id=broker_id,
@@ -426,13 +531,14 @@ class OrderManager:
                 product_type=product_type,
                 order_type=order_type,
                 order_messages=order_message,
-                raw_execution_data=response
+                raw_execution_data=response,
+                symbol=symbol  # Include symbol in broker execution data
             )
             await session.execute(broker_executions.insert().values(**broker_exec_data))
         except Exception as e:
             logger.error(f"_insert_broker_execution failed for broker_name={broker_name}, parent_order_id={parent_order_id}: {e}", exc_info=True)
 
-    async def _insert_exit_broker_execution(self, session, *, parent_order_id, broker_id, broker_order_id, side, status, executed_quantity, execution_price, product_type, order_type, order_messages, symbol, execution_time, notes, action=None, exit_reason=None):
+    async def _insert_exit_broker_execution(self, session, *, parent_order_id, broker_id, broker_order_id, side, status, executed_quantity, execution_price, product_type, order_type, order_messages, symbol, execution_time, notes, action=None, exit_reason=None, exit_broker_order_id=None):
         """
         Helper to build and insert a broker_executions row for EXIT/cancel actions.
         Checks for existing EXIT entries before inserting to prevent duplicates.
@@ -473,10 +579,11 @@ class OrderManager:
                 raw_execution_data=None,
                 symbol=symbol,
                 execution_time=execution_time,
-                notes=notes
+                notes=notes,
+                exit_broker_order_id=exit_broker_order_id
             )
             await session.execute(broker_executions.insert().values(**broker_exec_data))
-            logger.info(f"OrderManager: Inserted new EXIT broker_execution for parent_order_id={parent_order_id}, broker_id={broker_id}, broker_order_id={broker_order_id}")
+            logger.info(f"OrderManager: Inserted new EXIT broker_execution for parent_order_id={parent_order_id}, broker_id={broker_id}, broker_order_id={broker_order_id}, exit_broker_order_id={exit_broker_order_id}")
 
 
     async def exit_all_orders(self, exit_reason: str = None, strategy_id: int = None, check_live_status: bool = False):
@@ -1102,6 +1209,23 @@ class OrderManager:
                 
             logger.info(f"OrderManager: Starting exit_order for parent_order_id={parent_order_id} with check_live_status={check_live_status}, exit_reason='{exit_reason}'")
             
+            # COORDINATED EXITS: Exit child orders (hedge orders) when main order exits
+            # This must be done BEFORE exiting the main order to ensure proper sequencing
+            # Check for child orders first to avoid unnecessary DB operations
+            try:
+                logger.debug(f"OrderManager: Checking for child orders to exit for parent_order_id={parent_order_id}")
+                if await self.has_child_orders(parent_order_id):
+                    await self.exit_child_orders(
+                        parent_order_id=parent_order_id,
+                        exit_reason=exit_reason,
+                        check_live_status=check_live_status
+                    )
+                else:
+                    logger.debug(f"OrderManager: No child orders found for parent_order_id={parent_order_id}")
+            except Exception as e:
+                logger.error(f"OrderManager: Error checking/exiting child orders for parent_order_id={parent_order_id}: {e}", exc_info=True)
+                # Continue with main order exit even if child order exits fail
+            
             for be in broker_execs:
                 status = (be.get('status') or '').upper()
                 broker_id = be.get('broker_id')
@@ -1221,6 +1345,13 @@ class OrderManager:
                         
                         logger.info(f"OrderManager: Exit order response for broker_id={broker_id}, broker_order_id={cache_lookup_order_id}: {exit_resp}")
                         
+                        # Extract exit_broker_order_id from response if available (for Zerodha exits)
+                        exit_broker_order_id = None
+                        if exit_resp and isinstance(exit_resp, dict):
+                            exit_broker_order_id = exit_resp.get('order_id')
+                            if exit_broker_order_id:
+                                logger.info(f"OrderManager: Extracted exit_broker_order_id={exit_broker_order_id} from exit response")
+                        
                         await self._insert_exit_broker_execution(
                             session,
                             parent_order_id=parent_order_id,
@@ -1236,7 +1367,8 @@ class OrderManager:
                             order_messages=f"Exit order placed. Reason: {exit_reason}",
                             symbol=symbol,
                             execution_time=exit_time,
-                            notes=f"Auto exit via OrderManager. Reason: {exit_reason}"
+                            notes=f"Auto exit via OrderManager. Reason: {exit_reason}",
+                            exit_broker_order_id=exit_broker_order_id
                         )
                         logger.info(f"OrderManager: Successfully inserted EXIT broker_execution for parent_order_id={parent_order_id}")
                         
@@ -1252,6 +1384,13 @@ class OrderManager:
                             exit_reason=exit_reason
                         )
                         logger.info(f"OrderManager: Exit order response for partial fill: {exit_resp}")
+                        
+                        # Extract exit_broker_order_id from response if available (for Zerodha exits)
+                        exit_broker_order_id = None
+                        if exit_resp and isinstance(exit_resp, dict):
+                            exit_broker_order_id = exit_resp.get('order_id')
+                            if exit_broker_order_id:
+                                logger.info(f"OrderManager: Extracted exit_broker_order_id={exit_broker_order_id} from exit response for partial fill")
                         
                         logger.info(f"OrderManager: Now calling broker_manager.cancel_order for remaining quantity...")
                         cancel_resp = await self.broker_manager.cancel_order(
@@ -1283,7 +1422,8 @@ class OrderManager:
                             order_messages=f"Exit and cancel placed for PARTIALLY_FILLED. Reason: {exit_reason}",
                             symbol=symbol,
                             execution_time=exit_time,
-                            notes=f"Auto exit+cancel via OrderManager. Reason: {exit_reason}"
+                            notes=f"Auto exit+cancel via OrderManager. Reason: {exit_reason}",
+                            exit_broker_order_id=exit_broker_order_id
                         )
                         logger.info(f"OrderManager: Successfully inserted EXIT broker_execution for PARTIALLY_FILLED order")
                         

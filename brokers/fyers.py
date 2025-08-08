@@ -1168,7 +1168,7 @@ class FyersWrapper(BrokerInterface):
                     sb.save_screenshot("fyers_auth_new.png")
                     sb.sleep(2)
                     # sb.sleep(20)
-
+                    logger.info("Fyers authentication: Entering mobile number...")
                     if sb.is_element_enabled("#mobileNumberSubmit"):
                         sb.wait_for_element_visible("#mobile-code", timeout=10)
                         sb.type("#mobile-code", mobile_number)
@@ -1178,7 +1178,8 @@ class FyersWrapper(BrokerInterface):
                         raise Exception("Mobile submit button is disabled.")
 
                     sb.wait_for_ready_state_complete(20)
-
+                    logger.info("Fyers authentication: Waiting for OTP input...")
+                    sb.save_screenshot("fyers_auth_otp_input.png")
                     # TOTP
                     for _ in range(MAX_RETRIES):
                         sb.sleep(0.2)

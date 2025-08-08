@@ -776,10 +776,12 @@ async def insert_order(session, order_data):
 async def get_all_orders(session: AsyncSession):
     """
     Retrieve all orders with broker execution details.
+    Includes all spot-level and swing tracking fields required for exit evaluation.
     """
     from algosat.core.dbschema import broker_executions, broker_credentials, strategies
     stmt = (
         select(
+            # Core order fields
             orders.c.id,
             orders.c.strategy_symbol_id,
             orders.c.strike_symbol,
@@ -790,6 +792,7 @@ async def get_all_orders(session: AsyncSession):
             orders.c.target_price,
             orders.c.current_price,  # Add current_price field
             orders.c.price_last_updated,  # Add price_last_updated field
+            orders.c.orig_target,
             orders.c.signal_time,
             orders.c.entry_time,
             orders.c.exit_time,
@@ -800,10 +803,20 @@ async def get_all_orders(session: AsyncSession):
             orders.c.supertrend_signal,
             orders.c.lot_qty,
             orders.c.side,
+            orders.c.signal_direction,
             orders.c.qty,
+            orders.c.executed_quantity,  # Add this line to select executed_quantity
+            # Spot and swing/level tracking fields - CRITICAL for exit evaluation
+            orders.c.entry_spot_price,
+            orders.c.entry_spot_swing_high,
+            orders.c.entry_spot_swing_low,
+            orders.c.stoploss_spot_level,
+            orders.c.target_spot_level,
+            orders.c.entry_rsi,
+            orders.c.expiry_date,
             orders.c.created_at,
             orders.c.updated_at,
-            orders.c.executed_quantity,  # Add this line to select executed_quantity
+            # Strategy and symbol relationship fields
             strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
             strategies.c.name.label('strategy_name'),  # Join to get the strategy name
             strategy_symbols.c.enable_smart_levels.label('smart_level_enabled'),  # Add smart level enabled flag
@@ -864,10 +877,12 @@ async def get_all_orders(session: AsyncSession):
 async def get_order_by_id(session: AsyncSession, order_id: int):
     """
     Retrieve a specific order by its ID with strategy and symbol information.
+    Includes all spot-level and swing tracking fields required for exit evaluation.
     """
     from algosat.core.dbschema import strategies
     stmt = (
         select(
+            # Core order fields
             orders.c.id,
             orders.c.strategy_symbol_id,
             orders.c.strike_symbol,
@@ -878,6 +893,7 @@ async def get_order_by_id(session: AsyncSession, order_id: int):
             orders.c.target_price,
             orders.c.current_price,
             orders.c.price_last_updated,
+            orders.c.orig_target,
             orders.c.signal_time,
             orders.c.entry_time,
             orders.c.exit_time,
@@ -888,11 +904,20 @@ async def get_order_by_id(session: AsyncSession, order_id: int):
             orders.c.supertrend_signal,
             orders.c.lot_qty,
             orders.c.side,
+            orders.c.signal_direction,
             orders.c.qty,
             orders.c.executed_quantity,
+            # Spot and swing/level tracking fields - CRITICAL for exit evaluation
+            orders.c.entry_spot_price,
+            orders.c.entry_spot_swing_high,
+            orders.c.entry_spot_swing_low,
+            orders.c.stoploss_spot_level,
+            orders.c.target_spot_level,
+            orders.c.entry_rsi,
+            orders.c.expiry_date,
             orders.c.created_at,
             orders.c.updated_at,
-            # Add required fields for OrderDetailResponse
+            # Strategy and symbol relationship fields
             strategy_symbols.c.symbol.label('symbol'),  # Required field
             strategy_symbols.c.config_id.label('strategy_config_id'),  # Required field
             strategies.c.name.label('strategy_name'),
@@ -1559,11 +1584,39 @@ async def get_trades_for_symbol(session: AsyncSession, strategy_symbol_id: int, 
     """
     Get detailed trade history for a specific strategy symbol with broker execution details.
     """
-    from algosat.core.dbschema import orders, broker_executions, broker_credentials
+    from algosat.core.dbschema import orders, broker_executions, broker_credentials, strategy_symbols
     from datetime import datetime
     
-    # Build the base query
-    stmt = select(orders).where(
+    # Build the base query with join to strategy_symbols to get smart_level_enabled
+    stmt = select(
+        orders.c.id,
+        orders.c.strategy_symbol_id,
+        orders.c.strike_symbol,
+        orders.c.pnl,
+        orders.c.candle_range,
+        orders.c.entry_price,
+        orders.c.stop_loss,
+        orders.c.target_price,
+        orders.c.current_price,
+        orders.c.price_last_updated,
+        orders.c.signal_time,
+        orders.c.entry_time,
+        orders.c.exit_time,
+        orders.c.exit_price,
+        orders.c.status,
+        orders.c.reason,
+        orders.c.atr,
+        orders.c.supertrend_signal,
+        orders.c.lot_qty,
+        orders.c.side,
+        orders.c.qty,
+        orders.c.executed_quantity,
+        orders.c.created_at,
+        orders.c.updated_at,
+        strategy_symbols.c.enable_smart_levels.label('smart_level_enabled')  # Add smart level enabled flag
+    ).select_from(
+        orders.join(strategy_symbols, orders.c.strategy_symbol_id == strategy_symbols.c.id)
+    ).where(
         orders.c.strategy_symbol_id == strategy_symbol_id
     )
     
@@ -2554,3 +2607,43 @@ async def get_smart_levels_for_strategy_symbol_id(session, strategy_symbol_id: i
     
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
+
+
+async def has_child_orders(session, parent_order_id: int) -> bool:
+    """
+    Check if an order has any child orders without fetching them.
+    
+    Args:
+        session: Database session
+        parent_order_id: ID of the parent order
+        
+    Returns:
+        True if the order has child orders, False otherwise
+    """
+    from sqlalchemy import select, func
+    
+    stmt = select(func.count(orders.c.id)).where(orders.c.parent_order_id == parent_order_id)
+    result = await session.execute(stmt)
+    count = result.scalar()
+    
+    return count > 0
+
+
+async def get_child_orders(session, parent_order_id: int) -> list[dict]:
+    """
+    Get all child orders for a given parent order ID.
+    
+    Args:
+        session: Database session
+        parent_order_id: ID of the parent order
+        
+    Returns:
+        List of child order records
+    """
+    from sqlalchemy import select
+    
+    stmt = select(orders).where(orders.c.parent_order_id == parent_order_id)
+    result = await session.execute(stmt)
+    child_orders = [dict(row._mapping) for row in result.fetchall()]
+    
+    return child_orders

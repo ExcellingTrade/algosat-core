@@ -105,6 +105,81 @@ def cleanup_old_strike_cache(cache, days=1):
     for key in keys_to_delete:
         del cache[key]
 
+def cleanup_pre_candle_cache(cache, trade_day, first_candle_time, interval_minutes):
+    """
+    Clean up cache entries for today that were created before the first candle completion time.
+    This prevents using strikes identified from pre-market or test data during actual trading.
+    
+    Args:
+        cache: The cache dictionary
+        trade_day: Current trade day datetime
+        first_candle_time: First candle time string (e.g., "09:15")
+        interval_minutes: Interval in minutes
+    """
+    from datetime import datetime, time as dt_time
+    
+    today_str = trade_day.date().isoformat()
+    keys_to_delete = []
+    
+    # Calculate first candle completion time for today (ensure timezone awareness)
+    first_candle_time_parts = first_candle_time.split(":")
+    first_candle_hour = int(first_candle_time_parts[0])
+    first_candle_minute = int(first_candle_time_parts[1])
+    
+    # Create first candle completion time with same timezone as trade_day
+    first_candle_completion_time = datetime.combine(
+        trade_day.date(),
+        dt_time(first_candle_hour, first_candle_minute)
+    ) + timedelta(minutes=interval_minutes)
+    
+    # Make timezone-aware if trade_day has timezone info
+    if trade_day.tzinfo:
+        first_candle_completion_time = first_candle_completion_time.replace(tzinfo=trade_day.tzinfo)
+    
+    # Check cache entries for today
+    for key, value in cache.items():
+        try:
+            parts = key.split("_")
+            if len(parts) >= 2:
+                cache_date_str = parts[1]
+                
+                # Only check entries for today
+                if cache_date_str == today_str:
+                    # Check if cache entry has metadata with creation timestamp
+                    if isinstance(value, dict) and 'metadata' in value and 'created_at' in value['metadata']:
+                        created_at_str = value['metadata']['created_at']
+                        created_at = datetime.fromisoformat(created_at_str.replace('Z', '+00:00'))
+                        
+                        # Ensure both datetimes have same timezone info for comparison
+                        if first_candle_completion_time.tzinfo and not created_at.tzinfo:
+                            # Make created_at timezone-aware (assume it's in same timezone as trade_day)
+                            created_at = created_at.replace(tzinfo=first_candle_completion_time.tzinfo)
+                        elif not first_candle_completion_time.tzinfo and created_at.tzinfo:
+                            # Convert created_at to naive datetime for comparison
+                            created_at = created_at.replace(tzinfo=None)
+                        elif first_candle_completion_time.tzinfo and created_at.tzinfo:
+                            # Both are timezone-aware, convert created_at to same timezone
+                            created_at = created_at.astimezone(first_candle_completion_time.tzinfo)
+                        
+                        # If cache was created before first candle completion, mark for deletion
+                        if created_at < first_candle_completion_time:
+                            keys_to_delete.append(key)
+                            logger.info(f"Marking cache entry for deletion: {key} (created at {created_at} before first candle completion at {first_candle_completion_time})")
+                    else:
+                        # Legacy cache entry without metadata - assume it's invalid for today
+                        keys_to_delete.append(key)
+                        logger.info(f"Marking legacy cache entry for deletion: {key} (no creation metadata)")
+        except Exception as e:
+            logger.warning(f"Error checking cache entry {key}: {e}")
+            continue
+    
+    # Delete invalid entries
+    for key in keys_to_delete:
+        del cache[key]
+        logger.info(f"Deleted pre-candle cache entry: {key}")
+    
+    return len(keys_to_delete)
+
 class OptionBuyStrategy(StrategyBase):
     """
     Concrete implementation of the Option Buy strategy.
@@ -180,12 +255,34 @@ class OptionBuyStrategy(StrategyBase):
         # 3. Fetch option chain and identify strikes
         cache = await load_identified_strikes_cache()
         cache_key = f"{symbol}_{trade_day.date().isoformat()}_{interval_minutes}_{max_strikes}_{max_premium}"
+        
+        # Clean up old cache entries (older than 10 days)
         cleanup_old_strike_cache(cache, days=10)
+        
+        # Clean up today's cache entries that were created before first candle completion
+        deleted_count = cleanup_pre_candle_cache(cache, trade_day, first_candle_time, interval_minutes)
+        if deleted_count > 0:
+            logger.info(f"Cleaned up {deleted_count} pre-candle cache entries for today")
+        
+        # Check if we have a valid cache entry for today (after cleanup)
         if cache_key in cache:
-            self._strikes = cache[cache_key]
-            logger.info(f"Loaded identified strikes from persistent cache: {self._strikes}")
-            await save_identified_strikes_cache(cache)
-            return
+            cache_entry = cache[cache_key]
+            
+            # Handle both legacy format (list) and new format (dict with metadata)
+            if isinstance(cache_entry, list):
+                self._strikes = cache_entry
+                logger.info(f"Loaded identified strikes from legacy cache: {self._strikes}")
+            elif isinstance(cache_entry, dict) and 'strikes' in cache_entry:
+                self._strikes = cache_entry['strikes']
+                logger.info(f"Loaded identified strikes from cache: {self._strikes}")
+                logger.info(f"Cache created at: {cache_entry.get('metadata', {}).get('created_at', 'unknown')}")
+            else:
+                logger.warning(f"Invalid cache entry format for key {cache_key}, will regenerate")
+                del cache[cache_key]  # Remove invalid entry
+            
+            if self._strikes:
+                await save_identified_strikes_cache(cache)
+                return
         candle_times = calculate_first_candle_details(trade_day.date(), first_candle_time, interval_minutes)
         from_date = candle_times["from_date"]
         to_date = candle_times["to_date"]
@@ -202,9 +299,22 @@ class OptionBuyStrategy(StrategyBase):
         if pe_strike is not None:
             self._strikes.append(pe_strike)
         if self._strikes:
-            cache[cache_key] = self._strikes
+            # Store strikes with metadata including creation timestamp
+            from datetime import datetime, timezone
+            cache_entry = {
+                'strikes': self._strikes,
+                'metadata': {
+                    'created_at': datetime.now(timezone.utc).isoformat(),
+                    'first_candle_time': first_candle_time,
+                    'interval_minutes': interval_minutes,
+                    'max_premium': max_premium,
+                    'symbol': symbol
+                }
+            }
+            cache[cache_key] = cache_entry
             await save_identified_strikes_cache(cache)
-            logger.info(f"Cached identified strikes persistently: {self._strikes}")
+            logger.info(f"Cached identified strikes with metadata: {self._strikes}")
+            logger.info(f"Cache metadata: created_at={cache_entry['metadata']['created_at']}, first_candle_time={first_candle_time}")
         if not self._strikes:
             logger.error("Failed to identify any valid strike prices. Setup failed.")
             self._setup_failed = True
@@ -432,7 +542,7 @@ class OptionBuyStrategy(StrategyBase):
             logger.debug(f"Start date: {start_date}, End date: {end_date}, Interval: {trade_config['interval_minutes']} minutes")
             history_data = await fetch_instrument_history(
                 self.dp,
-                self._strikes,
+                strike_symbols,
                 from_date=start_date,
                 to_date=end_date,
                 interval_minutes=trade_config['interval_minutes'],
@@ -624,6 +734,10 @@ class OptionBuyStrategy(StrategyBase):
                     trade_dict = calculate_trade(curr, data, strike, config, side=Side.BUY, target_atr_multiplier=sideways_target_atr_multiplier)
                     trade_dict[constants.TRADE_KEY_LOT_QTY] = new_lot_qty
                     logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, updating lot_qty to {new_lot_qty} ({sideways_qty_perc}% of {lot_qty}) and using target_atr_multiplier={sideways_target_atr_multiplier}")
+                elif not sideways_enabled and regime == "Sideways":
+                    # If sideways is not enabled, skip the trade entirely
+                    logger.info(f"Sideways regime detected for {strike} at {curr.get('timestamp')}, but sideways_trade_enabled is False, skipping trade.")
+                    return None
                 orig_target = trade_dict.get(constants.TRADE_KEY_TARGET_PRICE)
 
                 # Trailing stoploss logic: update target if enabled
@@ -760,6 +874,9 @@ class OptionBuyStrategy(StrategyBase):
             self.dp, [strike_symbol], trade_day, trade_config
              )
             history_df = history_dict.get(str(strike_symbol))
+            if history_df is None or getattr(history_df, 'empty', False):
+                logger.warning(f"evaluate_exit: No history data for {strike_symbol}.")
+                return False
             entry_conf = self.indicators.get('entry', {})
             supertrend_period = entry_conf.get('supertrend_period', 10)
             supertrend_multiplier = entry_conf.get('supertrend_multiplier', 2)

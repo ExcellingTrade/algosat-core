@@ -767,7 +767,7 @@ class SwingHighLowSellStrategy(StrategyBase):
                     logger.warning("Not enough entry_df data for atomic confirmation after order.")
                     # Unable to confirm, exit order for safety
                     # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
-                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed",check_live_status=True)
+                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed", check_live_status=True)
                     
                     # Update status to EXIT_ATOMIC_FAILED_PENDING
                     from algosat.common import constants
@@ -786,11 +786,22 @@ class SwingHighLowSellStrategy(StrategyBase):
                 if (signal.signal_direction == "UP" and latest_entry["close"] > confirm_last_close) or \
                    (signal.signal_direction == "DOWN" and latest_entry["close"] < confirm_last_close):
                     logger.info("Breakout confirmed after atomic check, holding position.")
+                    
+                    # Calculate and store pullback level for re-entry logic - ONLY if smart levels enabled
+                    if self.is_smart_levels_enabled():
+                        pullback_success = await self.calculate_and_store_pullback_level(order_info, signal)
+                        if pullback_success:
+                            logger.info(f"✅ Pullback level stored successfully for order_id={order_info.get('order_id')}")
+                        else:
+                            logger.warning(f"⚠️ Failed to store pullback level for order_id={order_info.get('order_id')}")
+                    else:
+                        logger.debug("🔄 Pullback calculation skipped - smart levels not enabled")
+                        
                     return order_info
                 else:
                     logger.info("Breakout failed atomic confirmation, exiting order.")
                     # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
-                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed",check_live_status=True)
+                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed", check_live_status=True)
                     
                     # Update status to EXIT_ATOMIC_FAILED_PENDING
                     from algosat.common import constants
@@ -889,26 +900,70 @@ class SwingHighLowSellStrategy(StrategyBase):
             # Check if re-entry tracking exists
             from algosat.core.re_entry_db_helpers import get_re_entry_tracking, create_re_entry_tracking, update_pullback_touched, update_re_entry_attempted
             
+            # Get smart level for pullback configuration
+            smart_level = self.get_active_smart_level()
+            if not smart_level:
+                logger.warning(f"❌ Re-entry check failed - no active smart level available for order_id={order_id}")
+                return None
+            
             re_entry_record = await get_re_entry_tracking(order_id)
             
-            # Calculate 50% pullback level 
-            pullback_factor = pullback_percentage / 100.0  # Convert percentage to decimal
-            if signal_direction == "UP":
-                # For UP trend (sell PE): pullback level is halfway between entry and target (downward)
-                pullback_level = float(entry_spot_price) - (float(entry_spot_price) - float(target_spot_level)) * pullback_factor
-            else:  # DOWN trend (sell CE)
-                # For DOWN trend (sell CE): pullback level is halfway between entry and target (upward)  
-                pullback_level = float(entry_spot_price) + (float(target_spot_level) - float(entry_spot_price)) * pullback_factor
-            
-            # Create re-entry tracking if doesn't exist
+            # If no re-entry record exists, try to calculate and create it
             if not re_entry_record:
-                success = await create_re_entry_tracking(order_id, pullback_level)
-                if success:
-                    logger.info(f"📝 Created re-entry tracking for order_id={order_id}, pullback_level={pullback_level}")
-                    re_entry_record = {'pullback_touched': False, 're_entry_attempted': False}
+                logger.info(f"🔄 No re-entry tracking found for order_id={order_id}, attempting to calculate pullback level")
+                
+                # Try to recalculate pullback level from smart level configuration
+                entry_level = smart_level.get('entry_level')
+                pullback_percentage = smart_level.get('pullback_percentage')
+                
+                if entry_level and pullback_percentage and pullback_percentage > 0:
+                    # Get smart level target for pullback calculation
+                    if signal_direction == "UP":
+                        target_level = smart_level.get('bullish_target')
+                    else:  # DOWN
+                        target_level = smart_level.get('bearish_target')
+                    
+                    if target_level:
+                        # Calculate pullback level using smart level configuration
+                        pullback_factor = pullback_percentage / 100.0
+                        if signal_direction == "UP":
+                            # For UP trend: pullback level is between entry and target (downward)
+                            pullback_level = float(entry_level) + (float(target_level) - float(entry_level)) * pullback_factor
+                        else:  # DOWN
+                            # For DOWN trend: pullback level is between entry and target (upward)
+                            pullback_level = float(entry_level) - (float(entry_level) - float(target_level)) * pullback_factor
+                        
+                        # Round to 2 decimal places
+                        pullback_level = round(pullback_level, 2)
+                        
+                        # Create re-entry tracking record
+                        success = await create_re_entry_tracking(order_id, pullback_level)
+                        if success:
+                            logger.info(f"✅ Recalculated and stored pullback level for order_id={order_id}: {pullback_level}")
+                            re_entry_record = {'pullback_touched': False, 're_entry_attempted': False}
+                        else:
+                            logger.error(f"❌ Failed to store recalculated pullback level for order_id={order_id}")
+                            return None
+                    else:
+                        logger.warning(f"❌ Cannot recalculate pullback - missing target level for {signal_direction} direction")
+                        return None
                 else:
-                    logger.error(f"❌ Failed to create re-entry tracking for order_id={order_id}")
+                    logger.warning(f"❌ Cannot recalculate pullback - missing entry_level or pullback_percentage in smart level")
                     return None
+            
+            # Calculate pullback level from re-entry record or use the one we just calculated
+            pullback_level = None
+            
+            if re_entry_record:
+                # Get stored pullback level from database
+                existing_record = await get_re_entry_tracking(order_id)
+                if existing_record and 'pullback_level' in existing_record:
+                    pullback_level = existing_record['pullback_level']
+                    logger.info(f"📊 Using stored pullback level: {pullback_level}")
+                    
+            if pullback_level is None:
+                logger.error(f"❌ Unable to determine pullback level for order_id={order_id}")
+                return None
             
             # Get current market data
             current_history = await self.fetch_history_data(self.dp, [self.symbol], self.confirm_minutes)
@@ -1002,17 +1057,12 @@ class SwingHighLowSellStrategy(StrategyBase):
                         re_entry_order_info = await self.process_order(re_entry_signal, confirm_df_sorted, re_entry_signal.symbol)
                         
                         if re_entry_order_info:
-                            # Mark re-entry as attempted in database
                             re_entry_order_id = re_entry_order_info.get('order_id') or re_entry_order_info.get('id')
-                            success = await update_re_entry_attempted(order_id, re_entry_order_id)
-                            
-                            if success:
-                                logger.info(f"📝 Updated re_entry_attempted=True for order_id={order_id}, re_entry_order_id={re_entry_order_id}")
-                            else:
-                                logger.error(f"❌ Failed to update re_entry_attempted for order_id={order_id}")
+                            logger.info(f"📝 Re-entry order placed successfully for order_id={order_id}, re_entry_order_id={re_entry_order_id}")
                             
                             # Wait for atomic confirmation
                             await asyncio.sleep(1)  # Brief pause
+                            from algosat.common import strategy_utils
                             await strategy_utils.wait_for_next_candle(self.entry_minutes)
                             
                             # Fetch fresh data for confirmation
@@ -1032,6 +1082,8 @@ class SwingHighLowSellStrategy(StrategyBase):
                                     status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
                                 )
                                 
+                                # DO NOT set re_entry_attempted=TRUE - allow retry on next cycle
+                                logger.info(f"🔄 Re-entry atomic confirmation failed due to insufficient data - re-entry will be retried on next cycle")
                                 return re_entry_order_info
                             
                             entry_df2_sorted = entry_df2.sort_values("timestamp")
@@ -1041,8 +1093,16 @@ class SwingHighLowSellStrategy(StrategyBase):
                             # Atomic confirmation check
                             if (re_entry_signal.signal_direction == "UP" and latest_entry["close"] > confirm_last_close) or \
                                (re_entry_signal.signal_direction == "DOWN" and latest_entry["close"] < confirm_last_close):
-                                logger.info(f"✅ Re-entry atomic confirmation PASSED for order_id={order_id}")
-                                return re_entry_order_info
+                                # ✅ ATOMIC CONFIRMATION PASSED - Now mark re-entry as attempted
+                                success = await update_re_entry_attempted(order_id, re_entry_order_id)
+                                
+                                if success:
+                                    logger.info(f"✅ Re-entry atomic confirmation PASSED for order_id={order_id}")
+                                    logger.info(f"📝 Updated re_entry_attempted=True for order_id={order_id}, re_entry_order_id={re_entry_order_id}")
+                                    return re_entry_order_info
+                                else:
+                                    logger.error(f"❌ Failed to update re_entry_attempted for order_id={order_id}")
+                                    return re_entry_order_info
                             else:
                                 logger.info(f"❌ Re-entry atomic confirmation FAILED for order_id={order_id}")
                                 await self.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"))
@@ -1055,6 +1115,8 @@ class SwingHighLowSellStrategy(StrategyBase):
                                     status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
                                 )
                                 
+                                # DO NOT set re_entry_attempted=TRUE - allow retry on next cycle
+                                logger.info(f"🔄 Re-entry atomic confirmation failed - re-entry will be retried on next cycle")
                                 return re_entry_order_info
                         else:
                             logger.error(f"❌ Re-entry order placement failed for order_id={order_id}")
@@ -1076,6 +1138,102 @@ class SwingHighLowSellStrategy(StrategyBase):
             # Reset re-entry mode in case of error
             self._is_re_entry_mode = False
             return None
+
+    async def calculate_and_store_pullback_level(self, order_info: dict, signal_payload: dict) -> bool:
+        """
+        Calculate 50% pullback level and store in re_entry_tracking table.
+        Called immediately after successful order placement.
+        
+        Args:
+            order_info: Order information from successful placement
+            signal_payload: Signal information containing entry details
+            
+        Returns:
+            bool: True if pullback level calculated and stored successfully
+        """
+        try:
+            if not self.is_smart_levels_enabled():
+                logger.info("🔄 Pullback calculation skipped - smart levels not enabled")
+                return True  # Not an error, just not applicable
+            
+            order_id = order_info.get('order_id') or order_info.get('id')
+            if not order_id:
+                logger.error("❌ Cannot calculate pullback level - missing order_id")
+                return False
+            
+            # Get smart level entry level
+            smart_level = self.get_active_smart_level()
+            if not smart_level:
+                logger.error("❌ Cannot calculate pullback level - no active smart level")
+                return False
+            
+            entry_level = smart_level.get('entry_level')
+            if entry_level is None:
+                logger.error("❌ Cannot calculate pullback level - missing entry_level in smart level")
+                return False
+            
+            # Get pullback percentage from smart level
+            pullback_percentage = smart_level.get('pullback_percentage')
+            if not pullback_percentage or pullback_percentage <= 0:
+                logger.error(f"❌ Cannot calculate pullback level - invalid pullback_percentage={pullback_percentage} in smart level")
+                return False
+            
+            # Get signal direction from signal payload
+            signal_direction = signal_payload.signal_direction
+            
+            # Get current spot price from signal payload
+            current_spot_price = signal_payload.entry_spot_price
+            
+            logger.info(f"🔄 Calculating pullback level for order_id={order_id}")
+            logger.info(f"    Signal Direction: {signal_direction}")
+            logger.info(f"    Entry Level: {entry_level}")
+            logger.info(f"    Current Spot Price: {current_spot_price}")
+            logger.info(f"    Pullback Percentage: {pullback_percentage}%")
+            
+            # Calculate pullback level using smart level percentage
+            pullback_factor = pullback_percentage / 100.0
+            if signal_direction == "UP":
+                # For UP trades: pullback = entry_level + pullback_factor * (current_price - entry_level)
+                pullback_level = float(entry_level) + pullback_factor * (float(current_spot_price) - float(entry_level))
+                logger.info(f"📈 UP Trade Pullback Calculation:")
+                logger.info(f"    Formula: entry_level + {pullback_factor} * (current_price - entry_level)")
+                logger.info(f"    Calculation: {entry_level} + {pullback_factor} * ({current_spot_price} - {entry_level}) = {pullback_level}")
+                
+            elif signal_direction == "DOWN":
+                # For DOWN trades: pullback = entry_level - pullback_factor * (entry_level - current_price)
+                pullback_level = float(entry_level) - pullback_factor * (float(entry_level) - float(current_spot_price))
+                logger.info(f"📉 DOWN Trade Pullback Calculation:")
+                logger.info(f"    Formula: entry_level - {pullback_factor} * (entry_level - current_price)")
+                logger.info(f"    Calculation: {entry_level} - {pullback_factor} * ({entry_level} - {current_spot_price}) = {pullback_level}")
+                
+            else:
+                logger.error(f"❌ Invalid signal direction for pullback calculation: {signal_direction}")
+                return False
+            
+            # Round pullback level to 2 decimal places for cleaner logging
+            pullback_level = round(pullback_level, 2)
+            
+            # Store pullback level in database
+            from algosat.core.re_entry_db_helpers import create_re_entry_tracking
+            
+            success = await create_re_entry_tracking(order_id, pullback_level)
+            
+            if success:
+                logger.info(f"✅ Pullback level calculated and stored successfully:")
+                logger.info(f"    Order ID: {order_id}")
+                logger.info(f"    Direction: {signal_direction}")
+                logger.info(f"    Entry Level: {entry_level}")
+                logger.info(f"    Current Price: {current_spot_price}")
+                logger.info(f"    Pullback Level: {pullback_level}")
+                logger.info(f"    Re-entry will trigger when price reaches {pullback_level}")
+                return True
+            else:
+                logger.error(f"❌ Failed to store pullback level in database for order_id={order_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Error calculating pullback level: {e}", exc_info=True)
+            return False
 
     async def cancel_order(self, order_id):
         logger.info(f"Stub: cancelling order {order_id}")
@@ -1181,29 +1339,55 @@ class SwingHighLowSellStrategy(StrategyBase):
             )
             logger.debug(f"Hedge order result for {hedge_symbol}: {hedge_order_result}")
 
-            # Check if hedge order failed
+            # Check if ALL hedge orders failed (proceed if at least one hedge succeeds)
             failed_statuses = {"FAILED", "CANCELLED", "REJECTED"}
             broker_responses = hedge_order_result.get('broker_responses') if hedge_order_result else None
-            any_failed = False
+            all_failed = False
             
             if broker_responses and isinstance(broker_responses, dict):
                 statuses = [str(resp.get('status')).split('.')[-1].replace("'>", "").upper() if resp else None for resp in broker_responses.values()]
                 logger.debug(f"Hedge order broker statuses for {hedge_symbol}: {statuses}")
                 
-                if any(s in failed_statuses for s in statuses if s):
-                    any_failed = True
+                # Check if ALL hedge orders failed (instead of ANY)
+                valid_statuses = [s for s in statuses if s]  # Filter out None values
+                if valid_statuses and all(s in failed_statuses for s in valid_statuses):
+                    all_failed = True
                     failed_hedge_brokers = [broker_id for broker_id, resp in broker_responses.items() 
                                           if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
-                    logger.warning(f"❌ Hedge order has failed statuses for {hedge_symbol}: {[s for s in statuses if s in failed_statuses]}")
-                    logger.warning(f"❌ Failed hedge brokers: {failed_hedge_brokers}")
+                    logger.error(f"❌ ALL hedge orders failed for {hedge_symbol}: {[s for s in valid_statuses if s in failed_statuses]}")
+                    logger.error(f"❌ All failed hedge brokers: {failed_hedge_brokers}")
+                elif any(s in failed_statuses for s in valid_statuses):
+                    # Some hedge orders failed, but at least one succeeded
+                    failed_hedge_brokers = [broker_id for broker_id, resp in broker_responses.items() 
+                                          if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                    successful_hedge_brokers = [broker_id for broker_id, resp in broker_responses.items() 
+                                              if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() not in failed_statuses]
+                    logger.warning(f"⚠️ Some hedge orders failed for {hedge_symbol}: {[s for s in valid_statuses if s in failed_statuses]}")
+                    logger.warning(f"⚠️ Failed hedge brokers: {failed_hedge_brokers}")
+                    logger.info(f"✅ Successful hedge brokers: {successful_hedge_brokers} - Continuing with trade")
             
-            if any_failed:
-                failed_brokers = [broker_id for broker_id, resp in broker_responses.items() 
-                                if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
-                logger.error(f"❌ Hedge order failed/cancelled/rejected for {hedge_symbol} (Main: {option_symbol}), aborting entire trade.")
-                logger.error(f"❌ Failed brokers: {failed_brokers}")
-                logger.error(f"❌ Hedge order details: {hedge_order_result}")
-                # No need to exit, as hedge already failed
+            if all_failed:
+                failed_hedge_brokers = [broker_id for broker_id, resp in broker_responses.items() 
+                                       if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                
+                # Comprehensive logging for hedge order failure
+                logger.error(f"🚨 CRITICAL: ALL hedge orders failed for {hedge_symbol} (Main: {option_symbol}), aborting entire trade")
+                logger.error(f"💥 Failed hedge brokers: {failed_hedge_brokers}")
+                logger.error(f"💥 Hedge order failure details:")
+                for broker_id, resp in broker_responses.items():
+                    if resp:
+                        broker_order_id = resp.get('broker_order_id')
+                        status = str(resp.get('status')).split('.')[-1].replace("'>", "").upper()
+                        error_msg = resp.get('error_message') or resp.get('message') or 'No error message'
+                        logger.error(f"💥   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}, Error: {error_msg}")
+                    else:
+                        logger.error(f"💥   Broker {broker_id}: No response data available")
+                
+                # Call exit order even if hedge order fails to ensure no orphaned orders
+                hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
+                if hedge_order_id:
+                    logger.warning(f"🔄 Attempting to clean up failed hedge order {hedge_order_id}")
+                    await self.order_manager.exit_order(hedge_order_id, exit_reason="All hedge orders failure")
                 return None
             
             hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
@@ -1228,25 +1412,72 @@ class SwingHighLowSellStrategy(StrategyBase):
             )
             logger.debug(f"Main SELL order result for {option_symbol}: {main_order_result}")
             
-            # Check if main order failed
+            # Check if ALL main orders failed (consistent with hedge logic)
             main_broker_responses = main_order_result.get('broker_responses') if main_order_result else None
-            main_any_failed = False
+            main_all_failed = False
             
             if main_broker_responses and isinstance(main_broker_responses, dict):
                 main_statuses = [str(resp.get('status')).split('.')[-1].replace("'>", "").upper() if resp else None for resp in main_broker_responses.values()]
                 logger.debug(f"Main order broker statuses for {option_symbol}: {main_statuses}")
                 
-                if any(s in failed_statuses for s in main_statuses if s):
-                    main_any_failed = True
-                    logger.warning(f"Main SELL order has failed statuses for {option_symbol}: {[s for s in main_statuses if s in failed_statuses]}")
+                # Check if ALL main orders failed (instead of ANY)
+                valid_main_statuses = [s for s in main_statuses if s]  # Filter out None values
+                if valid_main_statuses and all(s in failed_statuses for s in valid_main_statuses):
+                    main_all_failed = True
+                    failed_main_brokers = [broker_id for broker_id, resp in main_broker_responses.items() 
+                                          if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                    logger.error(f"❌ ALL main SELL orders failed for {option_symbol}: {[s for s in valid_main_statuses if s in failed_statuses]}")
+                    logger.error(f"❌ All failed main brokers: {failed_main_brokers}")
+                elif any(s in failed_statuses for s in valid_main_statuses):
+                    # Some main orders failed, but at least one succeeded
+                    failed_main_brokers = [broker_id for broker_id, resp in main_broker_responses.items() 
+                                          if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                    successful_main_brokers = [broker_id for broker_id, resp in main_broker_responses.items() 
+                                              if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() not in failed_statuses]
+                    logger.warning(f"⚠️ Some main SELL orders failed for {option_symbol}: {[s for s in valid_main_statuses if s in failed_statuses]}")
+                    logger.warning(f"⚠️ Failed main brokers: {failed_main_brokers}")
+                    logger.info(f"✅ Successful main brokers: {successful_main_brokers} - Continuing with trade")
 
-            if main_any_failed:
-                failed_brokers = [broker_id for broker_id, resp in main_broker_responses.items() 
-                                if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
-                raise Exception(f"Main SELL order failed/cancelled/rejected for {option_symbol}. Failed brokers: {failed_brokers}. Details: {main_order_result}")
+            if main_all_failed:
+                failed_main_brokers = [broker_id for broker_id, resp in main_broker_responses.items() 
+                                      if resp and str(resp.get('status')).split('.')[-1].replace("'>", "").upper() in failed_statuses]
+                
+                # Comprehensive logging for main order failure
+                logger.error(f"🚨 CRITICAL: ALL main SELL orders failed for {option_symbol}")
+                logger.error(f"💥 Failed main brokers: {failed_main_brokers}")
+                logger.error(f"💥 Main order failure details:")
+                for broker_id, resp in main_broker_responses.items():
+                    if resp:
+                        broker_order_id = resp.get('broker_order_id')
+                        status = str(resp.get('status')).split('.')[-1].replace("'>", "").upper()
+                        error_msg = resp.get('error_message') or resp.get('message') or 'No error message'
+                        logger.error(f"💥   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}, Error: {error_msg}")
+                    else:
+                        logger.error(f"💥   Broker {broker_id}: No response data available")
+                
+                raise Exception(f"ALL main SELL orders failed/cancelled/rejected for {option_symbol}. Failed brokers: {failed_main_brokers}. Details: {main_order_result}")
 
             logger.info(f"✅ Main SELL order placed successfully for {option_symbol}. Order ID: {main_order_result.get('order_id') or main_order_result.get('id')}")
-            return main_order_result
+            
+            # Set parent_order_id relationship: hedge order is child of main order
+            hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
+            main_order_id = main_order_result.get('order_id') or main_order_result.get('id')
+            
+            if hedge_order_id and main_order_id:
+                try:
+                    logger.info(f"🔗 Setting parent_order_id relationship: hedge {hedge_order_id} -> main {main_order_id}")
+                    await self.order_manager.set_parent_order_id(hedge_order_id, main_order_id)
+                    logger.debug(f"✅ Parent-child relationship established: hedge {hedge_order_id} is child of main {main_order_id}")
+                except Exception as e:
+                    logger.error(f"⚠️ Failed to set parent_order_id relationship for hedge {hedge_order_id} -> main {main_order_id}: {e}")
+            
+            # Return merged order_request + main_order_result format like swing_highlow_buy
+            # Convert OrderRequest to dict for merging
+            if hasattr(order_request, 'dict'):
+                order_request_dict = order_request.dict()
+            else:
+                order_request_dict = dict(order_request)
+            return {**order_request_dict, **main_order_result}
 
         except Exception as e:
             logger.critical(f"🚨 CRITICAL: Main SELL order failed for {option_symbol} after hedge was placed. Attempting to exit hedge. Error: {e}", exc_info=True)
@@ -1255,30 +1486,49 @@ class SwingHighLowSellStrategy(StrategyBase):
             hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
             hedge_broker_responses = hedge_order_result.get('broker_responses') if hedge_order_result else None
             
-            logger.error(f"💀 Orphaned hedge order detected - Strike: {option_symbol}, Hedge Order ID: {hedge_order_id}")
-            logger.error(f"💀 Hedge order details: {hedge_order_result}")
+            # Log detailed main order failure context for the orphaned hedge cleanup
+            logger.error(f"💀 Orphaned hedge order detected due to main order failure:")
+            logger.error(f"💀   Main Strike: {option_symbol}")
+            logger.error(f"💀   Hedge Order ID: {hedge_order_id}")
+            logger.error(f"💀   Main Order Failure: {str(e)}")
+            
+            # Log hedge order broker details that need cleanup
+            if hedge_broker_responses:
+                logger.error(f"💀 Hedge order brokers requiring cleanup:")
+                for broker_id, response in hedge_broker_responses.items():
+                    if response:
+                        broker_order_id = response.get('broker_order_id')
+                        status = str(response.get('status')).split('.')[-1].replace("'>", "").upper() if response.get('status') else 'Unknown'
+                        logger.error(f"💀   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}")
+                    else:
+                        logger.error(f"💀   Broker {broker_id}: No response data available")
             
             if hedge_order_id:
                 try:
                     logger.warning(f"🔄 Attempting to exit orphaned hedge order {hedge_order_id} for {option_symbol}")
-                    await self.order_manager.exit_order(hedge_order_id, exit_reason="Main order failure")
+                    await self.order_manager.exit_order(hedge_order_id, exit_reason=f"Main order failure: {str(e)[:100]}")
                     logger.info(f"✅ Successfully initiated exit for orphaned hedge order {hedge_order_id} (Strike: {option_symbol})")
                     
-                    # Log hedge order exit confirmation
+                    # Log hedge order exit confirmation with broker details
                     if hedge_broker_responses:
-                        logger.info(f"📊 Hedge order cleanup details - Brokers affected: {list(hedge_broker_responses.keys())}")
+                        logger.info(f"📊 Hedge order cleanup initiated for brokers: {list(hedge_broker_responses.keys())}")
                         
                 except Exception as exit_e:
                     logger.error(f"💥 FATAL: Failed to exit orphaned hedge order {hedge_order_id} for {option_symbol}. "
                                f"Manual intervention required immediately! Error: {exit_e}", exc_info=True)
                     logger.error(f"💥 MANUAL ACTION REQUIRED: Hedge order {hedge_order_id} for {option_symbol} is orphaned and could not be auto-exited")
                     
-                    # Log additional context for manual intervention
+                    # Log comprehensive context for manual intervention
                     if hedge_broker_responses:
                         logger.error(f"💥 Manual cleanup required for brokers: {list(hedge_broker_responses.keys())}")
                         for broker_id, response in hedge_broker_responses.items():
-                            broker_order_id = response.get('broker_order_id') if response else None
-                            logger.error(f"💥 Broker {broker_id}: Order ID {broker_order_id}, Status: {response.get('status') if response else 'Unknown'}")
+                            if response:
+                                broker_order_id = response.get('broker_order_id')
+                                status = str(response.get('status')).split('.')[-1].replace("'>", "").upper() if response.get('status') else 'Unknown'
+                                error_msg = response.get('error_message') or response.get('message') or 'No error message'
+                                logger.error(f"💥   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}, Error: {error_msg}")
+                            else:
+                                logger.error(f"💥   Broker {broker_id}: No response data available")
             else:
                 logger.error(f"💥 FATAL: Could not find order_id for orphaned hedge order for {option_symbol}. "
                            f"Manual intervention required immediately!")
@@ -1290,10 +1540,11 @@ class SwingHighLowSellStrategy(StrategyBase):
                     for broker_id, response in hedge_broker_responses.items():
                         if response:
                             broker_order_id = response.get('broker_order_id')
-                            status = response.get('status')
-                            logger.error(f"💥 Broker {broker_id}: Order ID {broker_order_id}, Status: {status}")
+                            status = str(response.get('status')).split('.')[-1].replace("'>", "").upper() if response.get('status') else 'Unknown'
+                            error_msg = response.get('error_message') or response.get('message') or 'No error message'
+                            logger.error(f"💥   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}, Error: {error_msg}")
                         else:
-                            logger.error(f"💥 Broker {broker_id}: No response data available")
+                            logger.error(f"💥   Broker {broker_id}: No response data available")
             
             return None
         
@@ -1488,6 +1739,7 @@ class SwingHighLowSellStrategy(StrategyBase):
             # PRIORITY 3: TARGET ACHIEVEMENT CHECK (SELL strategy: reverse logic)
             if target_spot_level is not None:
                 # Check target based on trade direction
+                logger.info(f"evaluate_exit: Checking target achievement for order_id={order_id}, current_spot_price={current_spot_price}, target_spot_level={target_spot_level}")
                 if signal_direction == "DOWN":  # CE sell
                     if float(current_spot_price) <= float(target_spot_level):
                         # Update order status to EXIT_TARGET
@@ -1520,6 +1772,8 @@ class SwingHighLowSellStrategy(StrategyBase):
                     
                     if latest_hh and latest_ll:
                         new_stoploss = None
+                        logger.debug(f"evaluate_exit: Latest swing high/low found - HH: {latest_hh}, LL: {latest_ll} for order_id={order_id}")
+                        logger.debug(f"evaluate_exit: Current stoploss level: {stoploss_spot_level} for order_id={order_id}")
                         if signal_direction == "DOWN":  # CE sell
                             # New stoploss is latest swing high, but take min of current and new (stoploss above entry)
                             latest_swing_high = latest_hh["price"]
@@ -2250,7 +2504,7 @@ class SwingHighLowSellStrategy(StrategyBase):
             max_premium = trade_config.get("opp_side_max_premium") or self.trade.get("opp_side_max_premium")
             logger.info(f"Identifying hedge symbol for {opp_side} with max premium: {max_premium}")
             # Assume broker.get_option_chain returns all options for the relevant symbol family
-            option_chain_response = await broker.get_option_chain(strike, trade_config.get("max_strikes", 40))
+            option_chain_response = await self.dp.get_option_chain(strike, trade_config.get("max_strikes", 40))
             option_chain_df = pd.DataFrame(option_chain_response['data']['optionsChain'])
             # Filter for the opposite side
             hedge_options = option_chain_df[
