@@ -15,6 +15,9 @@ from algosat.common.strategy_utils import wait_for_next_candle, fetch_instrument
 
 logger = get_logger("OrderMonitor")
 
+# Order monitoring interval - used by both OrderMonitor and OrderCache for consistency
+DEFAULT_ORDER_MONITOR_INTERVAL = 30.0  # seconds
+
 class OrderMonitor:
     def __init__(
         self,
@@ -24,7 +27,7 @@ class OrderMonitor:
         order_cache: OrderCache,  # new dependency
         strategy_instance=None,  # strategy instance for shared usage
         strategy_id: int = None,  # Optional: pass strategy_id directly for efficiency
-        price_order_monitor_seconds: float = 30.0,  # 1 minute default
+        price_order_monitor_seconds: float = DEFAULT_ORDER_MONITOR_INTERVAL,  # Default 30s interval
         signal_monitor_seconds: int = None  # will be set from strategy config
     ):
         self.order_id: int = order_id
@@ -280,8 +283,8 @@ class OrderMonitor:
                 market_close_time = dt_time(15, 30)  # 3:30 PM
                 if current_time_only >= market_close_time:
                     logger.info(f"OrderMonitor: Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
-                    self.stop()
-                    return
+                    # self.stop()
+                    # return
             
             # Exit AWAITING_ENTRY orders at 15:25 (regardless of product type)
             awaiting_entry_exit_time = dt_time(15, 25)  # 3:25 PM
@@ -415,18 +418,37 @@ class OrderMonitor:
                             if symbol_val is None:
                                 symbol_val = getattr(bro, "symbol", None) or getattr(bro, "tradingsymbol", None)
                             execution_time = datetime.now(timezone.utc)
-                            await self.order_manager.update_broker_exec_status_in_db(
-                                broker_exec_id,
-                                broker_status,
-                                executed_quantity=executed_quantity,
-                                quantity = quantity,
-                                execution_price=execution_price,
-                                order_type=order_type,
-                                product_type=product_type_val,
-                                execution_time=execution_time,
-                                symbol=symbol_val
-                            )
+                            
+                            # Use update_rows_in_table directly for comprehensive broker execution updates
+                            from algosat.core.db import AsyncSessionLocal, update_rows_in_table
+                            from algosat.core.dbschema import broker_executions
+                            
+                            comprehensive_update_fields = {
+                                "status": broker_status.value if hasattr(broker_status, 'value') else str(broker_status),
+                                "executed_quantity": executed_quantity,
+                                "quantity": quantity,
+                                "execution_price": execution_price,
+                                "order_type": order_type,
+                                "product_type": product_type_val,
+                                "execution_time": execution_time,
+                                "symbol": symbol_val,
+                                "raw_execution_data": cache_order  # Store complete broker order data
+                            }
+                            
+                            # Remove None values to avoid unnecessary DB updates
+                            comprehensive_update_fields = {k: v for k, v in comprehensive_update_fields.items() if v is not None}
+                            
+                            logger.info(f"OrderMonitor: Comprehensive update for broker_exec_id={broker_exec_id} with fields: {list(comprehensive_update_fields.keys())}")
+                            
+                            async with AsyncSessionLocal() as comp_session:
+                                await update_rows_in_table(
+                                    target_table=broker_executions,
+                                    condition=broker_executions.c.id == broker_exec_id,
+                                    new_values=comprehensive_update_fields
+                                )
+                                logger.debug(f"OrderMonitor: Successfully updated broker_exec_id={broker_exec_id} with comprehensive data")
                         else:
+                            # Simple status-only update
                             await self.order_manager.update_broker_exec_status_in_db(broker_exec_id, broker_status)
                         last_broker_statuses[broker_exec_id] = broker_status
             except Exception as e:
@@ -595,6 +617,7 @@ class OrderMonitor:
                         broker_status = bro.get('status', '').upper()
                         symbol_val = bro.get('symbol', None) or bro.get('tradingsymbol', None)
                         qty = bro.get('quantity', None)
+                        executed_quantity = bro.get('executed_quantity', None)  # Get executed_quantity from bro
                         
                         # Simple validation checks: skip if status is FAILED or missing essential data
                         if (broker_status == 'FAILED' or 
@@ -2303,22 +2326,8 @@ class OrderMonitor:
 
     async def _get_all_broker_positions_with_cache(self):
         """
-        Helper to get all broker positions, with 10s cache to avoid repeated API calls.
+        Helper to get all broker positions, fetches fresh data every time (no cache).
         """
-        import time
-        now = time.time()
-        
-        # Check cache first
-        if (
-            hasattr(self, "_positions_cache")
-            and hasattr(self, "_positions_cache_time")
-            and self._positions_cache is not None
-            and self._positions_cache_time is not None
-            and (now - self._positions_cache_time) < 10
-        ):
-            logger.debug(f"OrderMonitor: Using cached broker positions (age: {now - self._positions_cache_time:.2f}s)")
-            return self._positions_cache
-            
         logger.info(f"OrderMonitor: Fetching fresh broker positions from broker_manager...")
         try:
             positions = await self.order_manager.broker_manager.get_all_broker_positions()
@@ -2337,13 +2346,7 @@ class OrderMonitor:
             else:
                 logger.warning(f"OrderMonitor: No positions returned from broker_manager")
             
-            self._positions_cache = positions
-            self._positions_cache_time = now
             return positions
         except Exception as e:
             logger.error(f"OrderMonitor: Error fetching broker positions: {e}", exc_info=True)
-            # Return cached value as fallback if available
-            if hasattr(self, "_positions_cache") and self._positions_cache is not None:
-                logger.warning(f"OrderMonitor: Using stale cached positions as fallback")
-                return self._positions_cache
             return None

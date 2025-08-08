@@ -718,6 +718,7 @@ def detect_regime(
     fh = regime_ref["first_candle_high"]
     fl = regime_ref["first_candle_low"]
 
+    
     # BUY strategies
     if strategy.upper() == "BUY":
         if option_type.upper() == "CE":

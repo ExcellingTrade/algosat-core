@@ -586,7 +586,8 @@ async def get_active_strategy_symbols_with_configs(session):
             strategy_configs.c.trade.label('trade_config'),
             strategy_configs.c.indicators.label('indicators_config'),
             strategy_configs.c.updated_at.label('config_updated_at'),
-            strategies.c.updated_at.label('strategy_updated_at')
+            strategies.c.updated_at.label('strategy_updated_at'),
+            strategy_symbols.c.updated_at.label('symbol_updated_at')
         )
         .select_from(
             strategy_symbols

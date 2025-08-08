@@ -29,8 +29,8 @@ class MarketHours:
     @staticmethod
     def get_market_hours():
         """Get default market hours (can be made configurable later)"""
-        return datetime.time(9, 0), datetime.time(15, 30)  # 9:00 AM - 3:30 PM
-        # return datetime.time(4, 0), datetime.time(23, 30)  # 9:00 AM - 3:30 PM
+        # return datetime.time(9, 0), datetime.time(15, 30)  # 9:00 AM - 3:30 PM
+        return datetime.time(4, 0), datetime.time(23, 30)  # 9:00 AM - 3:30 PM
     
     @staticmethod
     def is_market_open(current_time: datetime.time = None) -> bool:
@@ -551,10 +551,13 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
     
     # Initialize OrderCache and RiskManager (only during market hours)
     if order_cache is None:
-        order_cache = OrderCache(order_manager)
+        # Import the constant to keep cache and monitor intervals in sync
+        from algosat.core.order_monitor import DEFAULT_ORDER_MONITOR_INTERVAL
+        # Set cache refresh interval to match order monitoring frequency
+        order_cache = OrderCache(order_manager, refresh_interval=DEFAULT_ORDER_MONITOR_INTERVAL)
         if MarketHours.is_market_open():
             market_info = MarketHours.get_market_status_info()
-            logger.info(f"📈 Market is open ({market_info['current_time']}). Starting OrderCache.")
+            logger.info(f"📈 Market is open ({market_info['current_time']}). Starting OrderCache with {DEFAULT_ORDER_MONITOR_INTERVAL}s refresh interval.")
             await order_cache.start()
         else:
             market_info = MarketHours.get_market_status_info()
@@ -662,14 +665,23 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                             # Check for configuration changes
                             config_updated_at = getattr(row, 'config_updated_at', None)
                             strategy_updated_at = getattr(row, 'strategy_updated_at', None)
-                            latest_update = max(config_updated_at, strategy_updated_at) if config_updated_at and strategy_updated_at else (config_updated_at or strategy_updated_at)
+                            symbol_updated_at = getattr(row, 'symbol_updated_at', None)
+                            latest_update = max(filter(None, [config_updated_at, strategy_updated_at, symbol_updated_at])) if any([config_updated_at, strategy_updated_at, symbol_updated_at]) else None
                             
                             # Detect configuration changes and restart strategy if needed
                             config_changed = False
                             if latest_update and symbol_id in config_timestamps:
                                 if latest_update > config_timestamps[symbol_id]:
                                     config_changed = True
-                                    logger.info(f"🔄 Configuration changed for symbol {symbol_id}, restarting strategy")
+                                    # Debug logging to identify which component triggered the restart
+                                    change_sources = []
+                                    if config_updated_at and config_updated_at == latest_update:
+                                        change_sources.append("config")
+                                    if strategy_updated_at and strategy_updated_at == latest_update:
+                                        change_sources.append("strategy")
+                                    if symbol_updated_at and symbol_updated_at == latest_update:
+                                        change_sources.append("symbol")
+                                    logger.info(f"🔄 Configuration changed for symbol {symbol_id} (source: {'/'.join(change_sources)}), restarting strategy")
                                     if symbol_id in running_tasks:
                                         running_tasks[symbol_id].cancel()
                                         running_tasks.pop(symbol_id, None)
@@ -682,10 +694,10 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                             # Unified schedule: 9:00 AM - 3:30 PM for both INTRADAY and DELIVERY
                             # Use configurable times with fallbacks
                             trade_config = row.trade_config or {}
-                            # start_time_str = "04:00" #trade_config.get("start_time", "09:00")  # 9:00 AM default
-                            start_time_str = trade_config.get("start_time", "09:00")  # 9:00 AM default
-                            square_off_time_str = trade_config.get("square_off_time", "15:30")  # 3:30 PM default
-                            # square_off_time_str = "23:30" #trade_config.get("square_off_time", "15:30")  # 3:30 PM default
+                            start_time_str = "04:00" #trade_config.get("start_time", "09:00")  # 9:00 AM default
+                            # start_time_str = trade_config.get("start_time", "09:00")  # 9:00 AM default
+                            # square_off_time_str = trade_config.get("square_off_time", "15:30")  # 3:30 PM default
+                            square_off_time_str = "23:30" #trade_config.get("square_off_time", "15:30")  # 3:30 PM default
                             
                             try:
                                 st_time = datetime.datetime.strptime(start_time_str, "%H:%M").time()

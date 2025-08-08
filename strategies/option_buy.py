@@ -715,8 +715,22 @@ class OptionBuyStrategy(StrategyBase):
                     logger.error("regime_reference is still empty after retry, skipping sideways regime detection")
                     regime = "Unknown"
                 else:
+                    logger.info(f"Fetching LTP for price check: order_id={self.order_id}, symbol={self.symbol}")
+                    ltp_response = await self.data_manager.get_ltp(self.symbol)
+                    if isinstance(ltp_response, dict):
+                        ltp = ltp_response.get(self.symbol)
+                    else:
+                        ltp = ltp_response
+                        
+                    if ltp is None:
+                        logger.warning(f"Could not get LTP for {self.symbol}, order_id={self.order_id}")
+                        return
+                        
+                    ltp = float(ltp)
+                    logger.info(f"Fetched LTP for price check: order_id={self.order_id}, symbol={self.symbol}, LTP={ltp}")
+
                     regime = detect_regime(
-                        entry_price=trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
+                        entry_price=ltp,
                         regime_ref=getattr(self, 'regime_reference', None),
                         option_type=option_type,
                         strategy="BUY"

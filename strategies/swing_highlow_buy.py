@@ -1077,7 +1077,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
             # Get current market data
             current_history = await self.fetch_history_data(self.dp, [self.symbol], self.confirm_minutes)
             current_df = current_history.get(self.symbol)
-            if not current_df or len(current_df) == 0:
+            if current_df is None or current_df.empty:
                 logger.warning(f"❌ No current market data available for re-entry check")
                 return None
             
@@ -1132,7 +1132,9 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     if confirm_df is not None and not isinstance(confirm_df, pd.DataFrame):
                         confirm_df = pd.DataFrame(confirm_df)
                     
-                    if entry_df is None or len(entry_df) < 10 or confirm_df is None or len(confirm_df) < 2:
+                    # Proper DataFrame validation to avoid "truth value ambiguous" error
+                    if (entry_df is None or entry_df.empty or len(entry_df) < 10 or 
+                        confirm_df is None or confirm_df.empty or len(confirm_df) < 2):
                         logger.warning(f"❌ Insufficient data for re-entry signal evaluation")
                         return None
                     
@@ -1146,7 +1148,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                     if df.index.tz is None:
                         df.index = df.index.tz_localize("Asia/Kolkata")
                     df = df[df.index < now].copy()
-                    if len(df) < 2:
+                    if df.empty or len(df) < 2:
                         logger.warning(f"❌ Not enough closed candles for re-entry evaluation")
                         return None
                     confirm_df_sorted = df.reset_index()
@@ -1181,7 +1183,8 @@ class SwingHighLowBuyStrategy(StrategyBase):
                             if entry_df2 is not None and not isinstance(entry_df2, pd.DataFrame):
                                 entry_df2 = pd.DataFrame(entry_df2)
                             
-                            if entry_df2 is None or len(entry_df2) < 2:
+                            # Proper DataFrame validation to avoid "truth value ambiguous" error
+                            if entry_df2 is None or entry_df2.empty or len(entry_df2) < 2:
                                 logger.warning("❌ Not enough entry_df data for re-entry atomic confirmation")
                                 await self.order_manager.exit_order(re_entry_order_info.get("order_id") or re_entry_order_info.get("id"), exit_reason="Atomic confirmation failed", check_live_status=True)
                                 

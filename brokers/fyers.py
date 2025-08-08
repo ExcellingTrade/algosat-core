@@ -240,7 +240,7 @@ class FyersWrapper(BrokerInterface):
             margin_response = await self.check_margin(margin_request_data)
             logger.debug(margin_response)
             margin_avail = margin_response["margin_avail"]
-            margin_required = margin_response["margin_new_order"]
+            margin_required = margin_response["margin_total"]
 
             # Log margin details
             logger.info(

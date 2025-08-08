@@ -695,8 +695,20 @@ class OptionSellStrategy(StrategyBase):
                 # Call exit order even if hedge order fails to ensure no orphaned orders
                 hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
                 if hedge_order_id:
-                    logger.warning(f"🔄 Attempting to clean up failed hedge order {hedge_order_id}")
-                    await self.order_manager.exit_order(hedge_order_id, exit_reason="All hedge orders failure")
+                    try:
+                        logger.warning(f"🔄 Attempting to clean up failed hedge order {hedge_order_id}")
+                        exit_result = await self.order_manager.exit_order(hedge_order_id, exit_reason="All hedge orders failure", check_live_status=True)
+                        
+                        # Update hedge order status to CLOSED after cleanup
+                        if exit_result:
+                            try:
+                                logger.info(f"🔄 Updating failed hedge order {hedge_order_id} status to CLOSED")
+                                await self.order_manager.update_order_status(hedge_order_id, "CLOSED", "All hedge orders failed")
+                                logger.info(f"✅ Failed hedge order {hedge_order_id} status updated to CLOSED")
+                            except Exception as status_e:
+                                logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to CLOSED: {status_e}")
+                    except Exception as cleanup_e:
+                        logger.error(f"💥 Failed to clean up failed hedge order {hedge_order_id}: {cleanup_e}")
                 return None
             
             hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
@@ -764,6 +776,17 @@ class OptionSellStrategy(StrategyBase):
                     else:
                         logger.error(f"💥   Broker {broker_id}: No response data available")
                 
+                # Update main order status to FAILED before raising exception
+                main_order_id = main_order_result.get('order_id') or main_order_result.get('id')
+                if main_order_id:
+                    try:
+                        logger.info(f"🔄 Updating main order {main_order_id} status to FAILED")
+                        await self.order_manager.update_order_status(main_order_id, "FAILED", 
+                                                                   f"All brokers failed: {failed_main_brokers}")
+                        logger.info(f"✅ Main order {main_order_id} status updated to FAILED")
+                    except Exception as status_e:
+                        logger.error(f"⚠️ Failed to update main order {main_order_id} status to FAILED: {status_e}")
+                
                 raise Exception(f"ALL main SELL orders failed/cancelled/rejected for {option_symbol}. Failed brokers: {failed_main_brokers}. Details: {main_order_result}")
 
             logger.info(f"✅ Main SELL order placed successfully for {option_symbol}. Order ID: {main_order_result.get('order_id') or main_order_result.get('id')}")
@@ -815,12 +838,22 @@ class OptionSellStrategy(StrategyBase):
             if hedge_order_id:
                 try:
                     logger.warning(f"🔄 Attempting to exit orphaned hedge order {hedge_order_id} for {option_symbol}")
-                    await self.order_manager.exit_order(hedge_order_id, exit_reason=f"Main order failure: {str(e)[:100]}")
+                    exit_result = await self.order_manager.exit_order(hedge_order_id, exit_reason=f"Main order failure: {str(e)[:100]}", check_live_status=True)
                     logger.info(f"✅ Successfully initiated exit for orphaned hedge order {hedge_order_id} (Strike: {option_symbol})")
                     
                     # Log hedge order exit confirmation with broker details
                     if hedge_broker_responses:
                         logger.info(f"📊 Hedge order cleanup initiated for brokers: {list(hedge_broker_responses.keys())}")
+                    
+                    # Update hedge order status to CLOSED after successful exit
+                    if exit_result:
+                        try:
+                            logger.info(f"🔄 Updating hedge order {hedge_order_id} status to CLOSED after exit")
+                            await self.order_manager.update_order_status(hedge_order_id, "CLOSED", 
+                                                                       f"Exited due to main order failure: {str(e)[:100]}")
+                            logger.info(f"✅ Hedge order {hedge_order_id} status updated to CLOSED")
+                        except Exception as status_e:
+                            logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to CLOSED: {status_e}")
                         
                 except Exception as exit_e:
                     logger.error(f"💥 FATAL: Failed to exit orphaned hedge order {hedge_order_id} for {option_symbol}. "
@@ -926,7 +959,7 @@ class OptionSellStrategy(StrategyBase):
                 and prev["supertrend_signal"] == constants.TRADE_DIRECTION_SELL
                 and curr['close'] < curr['vwap']
                 and curr['close'] < curr['sma']
-                and curr['low'] > threshold_entry
+                and curr['low'] < threshold_entry
             ):
                 # --- Sideways regime logic ---
                 sideways_enabled = config.get('sideways_trade_enabled', False)
@@ -956,11 +989,25 @@ class OptionSellStrategy(StrategyBase):
                     logger.error("regime_reference is still empty after retry, skipping sideways regime detection")
                     regime = "Unknown"
                 else:
+                    logger.info(f"Fetching LTP for price check: order_id={self.order_id}, symbol={self.symbol}")
+                    ltp_response = await self.data_manager.get_ltp(self.symbol)
+                    if isinstance(ltp_response, dict):
+                        ltp = ltp_response.get(self.symbol)
+                    else:
+                        ltp = ltp_response
+                        
+                    if ltp is None:
+                        logger.warning(f"Could not get LTP for {self.symbol}, order_id={self.order_id}")
+                        return
+                        
+                    ltp = float(round(ltp,2))
+                    logger.info(f"Fetched LTP for price check: order_id={self.order_id}, symbol={self.symbol}, LTP={ltp}")
+
                     regime = detect_regime(
-                        entry_price=trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
+                        entry_price=ltp,
                         regime_ref=getattr(self, 'regime_reference', None),
                         option_type=option_type,
-                        strategy="SELL"
+                        strategy="BUY"
                     )
                 
                 logger.info(f"Regime detected for {strike}: {regime} (entry_price={trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE)}, option_type={option_type})")

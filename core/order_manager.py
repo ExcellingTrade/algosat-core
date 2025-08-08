@@ -247,12 +247,17 @@ class OrderManager:
         Returns:
             True if the order has child orders, False otherwise
         """
-        from algosat.core.db import AsyncSessionLocal, has_child_orders as has_child_orders_db
+        from algosat.core.db import AsyncSessionLocal
+        from algosat.core.dbschema import orders
+        from sqlalchemy import select, func
         
         async with AsyncSessionLocal() as session:
-            result = await has_child_orders_db(session, parent_order_id)
-            logger.debug(f"OrderManager: Order {parent_order_id} has child orders: {result}")
-            return result
+            stmt = select(func.count(orders.c.id)).where(orders.c.parent_order_id == parent_order_id)
+            result = await session.execute(stmt)
+            count = result.scalar()
+            has_children = count > 0
+            logger.debug(f"OrderManager: Order {parent_order_id} has child orders: {has_children}")
+            return has_children
 
     async def get_child_orders(self, parent_order_id: int) -> List[dict]:
         """
@@ -264,10 +269,14 @@ class OrderManager:
         Returns:
             List of child order records
         """
-        from algosat.core.db import AsyncSessionLocal, get_child_orders as get_child_orders_db
+        from algosat.core.db import AsyncSessionLocal
+        from algosat.core.dbschema import orders
+        from sqlalchemy import select
         
         async with AsyncSessionLocal() as session:
-            child_orders = await get_child_orders_db(session, parent_order_id)
+            stmt = select(orders).where(orders.c.parent_order_id == parent_order_id)
+            result = await session.execute(stmt)
+            child_orders = [dict(row._mapping) for row in result.fetchall()]
             logger.debug(f"OrderManager: Found {len(child_orders)} child orders for parent_order_id={parent_order_id}")
             return child_orders
 
@@ -1082,38 +1091,25 @@ class OrderManager:
             await session.commit()
         logger.info(f"[OrderManager] Batch broker_exec status update: success={success_count}, failed={fail_count}")
 
-    async def update_broker_exec_status_in_db(self, broker_exec_id, status, executed_quantity=None, quantity=None, execution_price=None, order_type=None, product_type=None, execution_time=None, symbol=None):
+    async def update_broker_exec_status_in_db(self, broker_exec_id, status):
         """
-        Update the status and optionally execution details of a broker execution in the broker_executions table by broker_exec_id.
-        Handles additional fields: execution_time, symbol.
+        Update only the status of a broker execution in the broker_executions table by broker_exec_id.
+        For comprehensive updates with multiple fields, use update_rows_in_table directly.
         """
         from algosat.core.db import AsyncSessionLocal, update_rows_in_table
         from algosat.core.dbschema import broker_executions
+        
         update_fields = {"status": status.value if hasattr(status, 'value') else str(status)}
-        if executed_quantity is not None:
-            update_fields["executed_quantity"] = executed_quantity
-            
-        if quantity is not None:
-            update_fields["quantity"] = quantity
-
-        if execution_price is not None:
-            update_fields["execution_price"] = execution_price
-        if order_type is not None:
-            update_fields["order_type"] = order_type
-        if product_type is not None:
-            update_fields["product_type"] = product_type
-        if execution_time is not None:
-            update_fields["execution_time"] = execution_time
-        if symbol is not None:
-            update_fields["symbol"] = symbol
-        logger.info(f"Updating broker execution {broker_exec_id} with fields: {update_fields}")
+        
+        logger.info(f"Updating broker execution {broker_exec_id} status to: {update_fields['status']}")
+        
         async with AsyncSessionLocal() as session:
             await update_rows_in_table(
                 target_table=broker_executions,
                 condition=broker_executions.c.id == broker_exec_id,
                 new_values=update_fields
             )
-            logger.debug(f"Broker execution {broker_exec_id} updated: {update_fields}")
+            logger.debug(f"Broker execution {broker_exec_id} status updated successfully")
 
     @staticmethod
     def _get_cache_lookup_order_id(broker_order_id, broker_name, product_type):
@@ -1285,25 +1281,133 @@ class OrderManager:
                             live_product_type = matching_order.get('product_type')
                             logger.info(f"OrderManager: Live status check - DB status: '{status}', Live status: '{live_broker_status}', Live product_type: '{live_product_type}' for broker_exec_id={broker_exec_id}")
                             
-                            # Update DB status and product_type if different from live data
+                            # Comprehensive update with all available live broker fields
+                            update_fields = {}
                             update_needed = False
+                            
+                            # Status update
                             if live_broker_status and live_broker_status.upper() != status:
-                                update_needed = True
+                                update_fields['status'] = live_broker_status
                                 status = live_broker_status.upper()  # Use live status for exit decisions
+                                update_needed = True
                                 logger.info(f"OrderManager: Status update needed for broker_exec_id={broker_exec_id}: '{status}' -> '{live_broker_status}'")
                             
+                            # Product type update
                             if live_product_type and live_product_type != product_type:
-                                update_needed = True
+                                update_fields['product_type'] = live_product_type
                                 product_type = live_product_type  # Use live product_type for exit decisions
+                                update_needed = True
                                 logger.info(f"OrderManager: Product_type update needed for broker_exec_id={broker_exec_id}: '{product_type}' -> '{live_product_type}'")
                             
+                            # Extract additional fields from live broker data (based on order_monitor comprehensive update logic)
+                            # Execution details
+                            live_executed_quantity = None
+                            live_quantity = None
+                            live_execution_price = None
+                            live_order_type = None
+                            live_symbol = None
+                            
+                            # Map broker-specific field names to standardized values
+                            if broker_name.lower() == "fyers":
+                                live_executed_quantity = matching_order.get("executed_quantity") or matching_order.get("filledQty")
+                                live_quantity = matching_order.get("qty") or matching_order.get("quantity")
+                                live_execution_price = matching_order.get("exec_price") or matching_order.get("tradedPrice")
+                                live_order_type = matching_order.get("order_type")
+                                live_symbol = matching_order.get("symbol")
+                            elif broker_name.lower() == "zerodha":
+                                live_executed_quantity = matching_order.get("executed_quantity") or matching_order.get("filled_quantity")
+                                live_quantity = matching_order.get("quantity")
+                                live_execution_price = matching_order.get("exec_price") or matching_order.get("average_price")
+                                live_order_type = matching_order.get("order_type")
+                                live_symbol = matching_order.get("symbol") or matching_order.get("tradingsymbol")
+                            else:
+                                # Generic mapping for other brokers
+                                live_executed_quantity = matching_order.get("executed_quantity") or matching_order.get("filled_quantity") or matching_order.get("filledQty")
+                                live_quantity = matching_order.get("quantity") or matching_order.get("qty")
+                                live_execution_price = matching_order.get("exec_price") or matching_order.get("execution_price") or matching_order.get("average_price") or matching_order.get("tradedPrice")
+                                live_order_type = matching_order.get("order_type")
+                                live_symbol = matching_order.get("symbol") or matching_order.get("tradingsymbol")
+                            
+                            # Update executed_quantity if available and different
+                            current_executed_qty = be.get('executed_quantity')
+                            if live_executed_quantity is not None:
+                                try:
+                                    if current_executed_qty is None or float(live_executed_quantity) != float(current_executed_qty or 0):
+                                        update_fields['executed_quantity'] = live_executed_quantity
+                                        update_needed = True
+                                        logger.info(f"OrderManager: Executed_quantity update for broker_exec_id={broker_exec_id}: {current_executed_qty} -> {live_executed_quantity}")
+                                except Exception as e:
+                                    logger.error(f"OrderManager: Error comparing executed_quantity for broker_exec_id={broker_exec_id}: {e}")
+                            
+                            # Update quantity if available and different
+                            current_quantity = be.get('quantity')
+                            if live_quantity is not None:
+                                try:
+                                    if current_quantity is None or float(live_quantity) != float(current_quantity or 0):
+                                        update_fields['quantity'] = live_quantity
+                                        update_needed = True
+                                        logger.info(f"OrderManager: Quantity update for broker_exec_id={broker_exec_id}: {current_quantity} -> {live_quantity}")
+                                except Exception as e:
+                                    logger.error(f"OrderManager: Error comparing quantity for broker_exec_id={broker_exec_id}: {e}")
+                            
+                            # Update execution_price if available and different
+                            current_exec_price = be.get('execution_price')
+                            if live_execution_price is not None:
+                                try:
+                                    if current_exec_price is None or float(live_execution_price) != float(current_exec_price or 0):
+                                        update_fields['execution_price'] = live_execution_price
+                                        update_needed = True
+                                        logger.info(f"OrderManager: Execution_price update for broker_exec_id={broker_exec_id}: {current_exec_price} -> {live_execution_price}")
+                                except Exception as e:
+                                    logger.error(f"OrderManager: Error comparing execution_price for broker_exec_id={broker_exec_id}: {e}")
+                            
+                            # Update order_type if available and different
+                            current_order_type = be.get('order_type')
+                            if live_order_type is not None and live_order_type != current_order_type:
+                                update_fields['order_type'] = live_order_type
+                                update_needed = True
+                                logger.info(f"OrderManager: Order_type update for broker_exec_id={broker_exec_id}: {current_order_type} -> {live_order_type}")
+                            
+                            # Update symbol if available and different
+                            current_symbol = be.get('symbol')
+                            if live_symbol is not None and live_symbol != current_symbol:
+                                update_fields['symbol'] = live_symbol
+                                update_needed = True
+                                logger.info(f"OrderManager: Symbol update for broker_exec_id={broker_exec_id}: {current_symbol} -> {live_symbol}")
+                            
+                            # If this is a status transition to FILLED/PARTIAL, also set execution_time
+                            if (live_broker_status and live_broker_status.upper() in ("FILLED", "PARTIAL", "PARTIALLY_FILLED") and 
+                                status not in ("FILLED", "PARTIAL", "PARTIALLY_FILLED")):
+                                from datetime import datetime, timezone
+                                update_fields['execution_time'] = datetime.now(timezone.utc)
+                                update_needed = True
+                                logger.info(f"OrderManager: Setting execution_time for status transition to {live_broker_status}")
+                            
+                            # Store raw broker data for debugging and future analysis
+                            if matching_order:
+                                update_fields['raw_execution_data'] = matching_order
+                                update_needed = True
+                            
                             if update_needed:
-                                logger.info(f"OrderManager: Updating broker_exec_id={broker_exec_id} with live data: status='{live_broker_status}', product_type='{live_product_type}'")
-                                await self.update_broker_exec_status_in_db(
-                                    broker_exec_id, 
-                                    live_broker_status,
-                                    product_type=live_product_type
-                                )
+                                logger.info(f"OrderManager: Updating broker_exec_id={broker_exec_id} with comprehensive live data: {list(update_fields.keys())}")
+                                
+                                # Use update_rows_in_table directly for comprehensive updates
+                                from algosat.core.db import AsyncSessionLocal, update_rows_in_table
+                                from algosat.core.dbschema import broker_executions
+                                
+                                # Convert status enum to string if needed
+                                if 'status' in update_fields and hasattr(update_fields['status'], 'value'):
+                                    update_fields['status'] = update_fields['status'].value
+                                elif 'status' in update_fields:
+                                    update_fields['status'] = str(update_fields['status'])
+                                
+                                async with AsyncSessionLocal() as comprehensive_session:
+                                    await update_rows_in_table(
+                                        target_table=broker_executions,
+                                        condition=broker_executions.c.id == broker_exec_id,
+                                        new_values=update_fields
+                                    )
+                                    logger.info(f"OrderManager: Successfully updated broker_exec_id={broker_exec_id} with {len(update_fields)} fields")
                             else:
                                 logger.debug(f"OrderManager: Live data matches DB data for broker_exec_id={broker_exec_id}")
                         else:

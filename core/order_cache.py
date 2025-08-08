@@ -43,13 +43,27 @@ class OrderCache:
             event = self._update_events[broker_name]
             async with lock:
                 try:
+                    logger.debug(f"OrderCache: Starting refresh for {broker_name}")
                     broker_orders= await self.order_manager.get_all_broker_order_details()
                     # broker_orders = defaultdict(list)
                     # for order in broker_orders_list:
                         # broker_orders[order["broker_name"]].append(order)
                     orders = broker_orders.get(broker_name, [])
+                    
+                    # Log status changes for active orders
+                    if broker_name in self._cache:
+                        old_orders = {order.get('order_id') or order.get('id'): order for order in self._cache[broker_name]}
+                        new_orders = {order.get('order_id') or order.get('id'): order for order in orders}
+                        
+                        for order_id, new_order in new_orders.items():
+                            if order_id in old_orders:
+                                old_status = old_orders[order_id].get('status')
+                                new_status = new_order.get('status')
+                                if old_status != new_status:
+                                    logger.info(f"OrderCache: Status change detected for {broker_name} order {order_id}: {old_status} → {new_status}")
+                    
                     self._cache[broker_name] = orders
-                    logger.debug(f"OrderCache updated for {broker_name} with {len(orders)} orders.")
+                    logger.debug(f"OrderCache: Updated {broker_name} with {len(orders)} orders (refresh_interval={self.refresh_interval}s)")
                 except Exception as e:
                     logger.error(f"OrderCache failed to update for {broker_name}: {e}")
                 finally:
