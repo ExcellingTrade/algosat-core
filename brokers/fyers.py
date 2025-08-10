@@ -1161,6 +1161,7 @@ class FyersWrapper(BrokerInterface):
                 try:
                     sb.uc_open_with_reconnect(url, 20)
                     sb.wait_for_ready_state_complete(20)
+                    sb.uc_gui_handle_captcha()
                     sb.save_screenshot("fyers_auth_before_captcha.png")
                     sb.wait_for_text("Let's begin!", timeout=15)
                     sb.uc_gui_handle_captcha()

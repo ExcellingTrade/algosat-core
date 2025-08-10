@@ -607,17 +607,19 @@ class BrokerManager:
         strategy_id = getattr(config, 'strategy_id', None)
         strategy_name = None
 
-        # If this is a hedge entry, skip strategy table lookup and use MARKET/INTRADAY
         from algosat.core.signal import SignalType
-        if getattr(signal, 'signal_type', None) == SignalType.HEDGE_ENTRY:
-            order_type = "MARKET"
-            product_type = "INTRADAY"
-        else:
-            if strategy_id is not None:
-                async with AsyncSessionLocal() as session:
-                    strat = await get_strategy_by_id(session, strategy_id)
-                    if strat:
-                        strategy_name = strat.get('key')
+        if strategy_id is not None:
+            async with AsyncSessionLocal() as session:
+                strat = await get_strategy_by_id(session, strategy_id)
+                if strat:
+                    strategy_name = strat.get('key')
+                    if getattr(signal, 'signal_type', None) == SignalType.HEDGE_ENTRY:
+                        order_type = "MARKET"
+                        if strategy_name in ["OptionBuy", "OptionSell"]:
+                            product_type = "INTRADAY_OPTION"
+                        else:
+                            product_type = "INTRADAY_SWING"
+                    else:
                         if strategy_name in ["OptionBuy", "OptionSell"]:
                             order_type = "OPTION_STRATEGY"
                             product_type = "OPTION_STRATEGY"
@@ -811,8 +813,13 @@ class BrokerManager:
         # If symbol is provided, normalize it for the broker
         normalized_symbol = symbol
         if symbol:
-            symbol_info = await self.get_symbol_info(broker_name, symbol, instrument_type='NFO')
-            normalized_symbol = symbol_info.get('symbol', symbol)
+            try:
+                symbol_info = await self.get_symbol_info(broker_name, symbol, instrument_type='NFO')
+                normalized_symbol = symbol_info.get('symbol', symbol)
+                logger.debug(f"BrokerManager: Symbol normalized from {symbol} to {normalized_symbol}")
+            except Exception as symbol_lookup_error:
+                logger.warning(f"BrokerManager: Symbol lookup failed for {symbol}, using original symbol: {symbol_lookup_error}")
+                normalized_symbol = symbol  # Use original symbol if lookup fails
         
         # Create retry config with rate limiting
         retry_config = get_retry_config("order_critical")

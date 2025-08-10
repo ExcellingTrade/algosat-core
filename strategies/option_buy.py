@@ -429,20 +429,14 @@ class OptionBuyStrategy(StrategyBase):
                 completed_trades = [order for order in all_orders if order.get('status') in completed_statuses]
                 total_completed_trades = len(completed_trades)
                 
-                # Count loss trades (excluding profitable trades)
-                loss_statuses = [
-                    constants.TRADE_STATUS_EXIT_STOPLOSS,
-                    constants.TRADE_STATUS_EXIT_MAX_LOSS,
-                    constants.TRADE_STATUS_ENTRY_CANCELLED
-                ]
-                
-                loss_trades = [order for order in completed_trades if order.get('status') in loss_statuses]
+                # Count loss trades based on negative PnL
+                loss_trades = [order for order in completed_trades if order.get('pnl') is not None and order.get('pnl') < 0]
                 total_loss_trades = len(loss_trades)
                 
                 logger.debug(f"Trade limits check - Total completed trades: {total_completed_trades}, Loss trades: {total_loss_trades}")
                 logger.debug(f"Trade limits config - Max trades: {max_trades}, Max loss trades: {max_loss_trades}")
                 logger.debug(f"Completed trade statuses found: {[order.get('status') for order in completed_trades]}")
-                logger.debug(f"Loss trade statuses found: {[order.get('status') for order in loss_trades]}")
+                logger.debug(f"Loss trade PnLs found: {[order.get('pnl') for order in loss_trades]}")
                 
                 # Check max_trades limit
                 if max_trades is not None and total_completed_trades >= max_trades:

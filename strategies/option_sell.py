@@ -447,7 +447,9 @@ class OptionSellStrategy(StrategyBase):
                     constants.TRADE_STATUS_ENTRY_CANCELLED
                 ]
                 
-                loss_trades = [order for order in completed_trades if order.get('status') in loss_statuses]
+                # loss_trades = [order for order in completed_trades if order.get('status') in loss_statuses]
+                loss_trades = [order for order in completed_trades if order.get('pnl') is not None and order.get('pnl') < 0]
+                
                 total_loss_trades = len(loss_trades)
                 
                 logger.debug(f"Trade limits check - Total completed trades: {total_completed_trades}, Loss trades: {total_loss_trades}")

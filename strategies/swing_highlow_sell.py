@@ -664,6 +664,14 @@ class SwingHighLowSellStrategy(StrategyBase):
                 logger.warning("process_cycle aborted: setup failed.")
                 return None
 
+             # Check trade limits before proceeding with any new trades
+            can_trade, limit_reason = await self.check_trade_limits()
+            if not can_trade:
+                logger.warning(f"process_cycle aborted: {limit_reason}")
+                return None
+            
+            logger.debug(f"Trade limits check passed: {limit_reason}")
+
             # Sync open positions from DB before proceeding
             await self.sync_open_positions()
             
@@ -2212,6 +2220,107 @@ class SwingHighLowSellStrategy(StrategyBase):
                 
         except Exception as e:
             logger.error(f"Error updating exit status in DB for order_id={order_id}: {e}", exc_info=True)
+    
+    async def check_trade_limits(self) -> tuple[bool, str]:
+        """
+        Check if the symbol has exceeded maximum trades or maximum loss trades configured limits.
+        For smart level enabled strategies, uses limits from smart level.
+        For normal strategies, uses limits from trade config.
+        Now symbol-based instead of strategy-based.
+        Returns (can_trade: bool, reason: str)
+        """
+        try:
+            # Ensure smart levels are loaded if they should be enabled
+            if not hasattr(self, '_smart_level') or self._smart_level is None:
+                await self.load_smart_levels()
+            
+            # Determine source of trade limits
+            if self.is_smart_levels_enabled():
+                # Use smart level limits
+                summary = self.get_smart_level_summary()
+                level_info = summary['level']
+                max_trades = level_info.get('max_trades', None)
+                max_loss_trades = level_info.get('max_loss_trades', None)
+                limits_source = f"smart level '{level_info.get('name')}'"
+                
+                logger.debug(f"Using trade limits from {limits_source}: max_trades={max_trades}, max_loss_trades={max_loss_trades}")
+            else:
+                # Use trade config limits
+                trade_config = self.trade
+                max_trades = trade_config.get('max_trades', None)
+                max_loss_trades = trade_config.get('max_loss_trades', None)
+                limits_source = "trade config"
+                
+                logger.debug(f"Using trade limits from {limits_source}: max_trades={max_trades}, max_loss_trades={max_loss_trades}")
+            
+            # If no limits are configured, allow trading
+            if max_trades is None and max_loss_trades is None:
+                return True, f"No trade limits configured in {limits_source}"
+            
+            symbol_id = getattr(self.cfg, 'symbol_id', None)
+            if not symbol_id:
+                logger.warning("No symbol_id found in config, cannot check trade limits")
+                return True, "No symbol_id found, allowing trade"
+            
+            trade_day = get_trade_day(get_ist_datetime())
+            
+            async with AsyncSessionLocal() as session:
+                from algosat.core.db import get_all_orders_for_strategy_symbol_and_tradeday
+                
+                # Get all orders for this strategy symbol on the current trade day
+                all_orders = await get_all_orders_for_strategy_symbol_and_tradeday(session, symbol_id, trade_day)
+                
+                # Count completed trades (both profitable and loss trades)
+                completed_statuses = [
+                    constants.TRADE_STATUS_EXIT_TARGET,
+                    constants.TRADE_STATUS_EXIT_STOPLOSS,
+                    constants.TRADE_STATUS_EXIT_REVERSAL,
+                    constants.TRADE_STATUS_EXIT_EOD,
+                    constants.TRADE_STATUS_EXIT_MAX_LOSS,
+                    constants.TRADE_STATUS_EXIT_ATOMIC_FAILED,
+                    constants.TRADE_STATUS_ENTRY_CANCELLED,
+                    constants.TRADE_STATUS_EXIT_CLOSED
+                    
+                ]
+                
+                completed_trades = [order for order in all_orders if order.get('status') in completed_statuses]
+                total_completed_trades = len(completed_trades)
+                
+                # Count loss trades (excluding profitable trades)
+                loss_statuses = [
+                    constants.TRADE_STATUS_EXIT_STOPLOSS,
+                    constants.TRADE_STATUS_EXIT_MAX_LOSS,
+                    constants.TRADE_STATUS_ENTRY_CANCELLED
+                ]
+                
+                # loss_trades = [order for order in completed_trades if order.get('status') in loss_statuses]
+                loss_trades = [order for order in completed_trades if order.get('pnl') is not None and order.get('pnl') < 0]
+                
+                total_loss_trades = len(loss_trades)
+                
+                logger.debug(f"Trade limits check - Total completed trades: {total_completed_trades}, Loss trades: {total_loss_trades}")
+                logger.debug(f"Trade limits from {limits_source} - Max trades: {max_trades}, Max loss trades: {max_loss_trades}")
+                logger.debug(f"Completed trade statuses found: {[order.get('status') for order in completed_trades]}")
+                logger.debug(f"Loss trade statuses found: {[order.get('status') for order in loss_trades]}")
+                
+                # Check max_trades limit
+                if max_trades is not None and total_completed_trades >= max_trades:
+                    reason = f"Maximum trades limit reached for symbol: {total_completed_trades}/{max_trades} (from {limits_source})"
+                    logger.info(reason)
+                    return False, reason
+                
+                # Check max_loss_trades limit
+                if max_loss_trades is not None and total_loss_trades >= max_loss_trades:
+                    reason = f"Maximum loss trades limit reached for symbol: {total_loss_trades}/{max_loss_trades} (from {limits_source})"
+                    logger.info(reason)
+                    return False, reason
+                
+                return True, f"Trade limits OK for symbol - Completed: {total_completed_trades}/{max_trades or 'unlimited'}, Loss: {total_loss_trades}/{max_loss_trades or 'unlimited'} (from {limits_source})"
+                
+        except Exception as e:
+            logger.error(f"Error checking trade limits: {e}")
+            # On error, allow trading to avoid blocking legitimate trades
+            return True, f"Error checking trade limits, allowing trade: {e}"
         
     async def evaluate_signal(self, entry_df, confirm_df, config) -> Optional[TradeSignal]:
         """
@@ -2533,7 +2642,7 @@ class SwingHighLowSellStrategy(StrategyBase):
         """
         try:
             # Use the passed strike symbol to infer option type - FIXED LOGIC
-            opp_side = constants.OPTION_TYPE_PUT if constants.OPTION_TYPE_CALL in strike else constants.OPTION_TYPE_CALL
+            opp_side = constants.OPTION_TYPE_CALL if constants.OPTION_TYPE_CALL in strike else constants.OPTION_TYPE_PUT
             max_premium = trade_config.get("opp_side_max_premium") or self.trade.get("opp_side_max_premium")
             logger.info(f"Identifying hedge symbol for {opp_side} with max premium: {max_premium}")
             # Assume broker.get_option_chain returns all options for the relevant symbol family

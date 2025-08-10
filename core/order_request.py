@@ -33,6 +33,8 @@ class ProductType(str, Enum):
     OPTION_STRATEGY = "OPTION_STRATEGY"  # Accept logical value for validation
     BO = "BO"  # Accept broker-specific value for validation
     CO = "CO"  # Cover Order product type
+    INTRADAY_OPTION = "INTRADAY_OPTION"
+    INTRADAY_SWING = "INTRADAY_SWING"
 
 class OrderStatus(str, Enum):
     AWAITING_ENTRY = "AWAITING_ENTRY"  # Order placed but not yet executed (all broker orders in trigger pending state)
@@ -95,6 +97,12 @@ class OrderRequest(BaseModel):
         order_type = self.order_type
         product_type = self.product_type
         strategy_name = self.extra.get('strategy_name')
+        # If product_type is INTRADAY_OPTION, set to INTRADAY for Fyers
+        if product_type == ProductType.INTRADAY_OPTION:
+            product_type = ProductType.INTRADAY
+        # If product_type is INTRADAY_SWING, set to MARGIN for Fyers
+        if product_type == ProductType.INTRADAY_SWING:
+            product_type = ProductType.MARGIN
         if order_type == OrderType.OPTION_STRATEGY:
             order_type = "SL_LIMIT"
         # Map DELIVERY to MARGIN for Fyers
@@ -168,9 +176,13 @@ class OrderRequest(BaseModel):
         strategy_name = self.extra.get('strategy_name')
         if order_type == OrderType.OPTION_STRATEGY:
             order_type = "SL"
-        # Map DELIVERY to NRML for Zerodha
+        # Map INTRADAY_OPTION to MIS, INTRADAY_SWING to NRML, DELIVERY to NRML for Zerodha
         if product_type == ProductType.OPTION_STRATEGY:
             product_type = "MIS"
+        elif product_type == ProductType.INTRADAY_OPTION:
+            product_type = "MIS"
+        elif product_type == ProductType.INTRADAY_SWING:
+            product_type = "NRML"
         elif product_type == ProductType.DELIVERY or (isinstance(product_type, str) and product_type.upper() == "DELIVERY"):
             product_type = "NRML"
         return {
