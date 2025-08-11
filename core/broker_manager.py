@@ -18,12 +18,8 @@ from algosat.models.strategy_config import StrategyConfig
 
 logger = get_logger("BrokerManager")
 
-# Broker-specific rate limits for trading operations (more conservative than data operations)
-_BROKER_TRADING_RATE_LIMITS = {
-    "fyers": 10,      # Slightly lower than data limits for trading
-    "angel": 4,      # Conservative for trading operations
-    "zerodha": 5,    # Very conservative for Zerodha trading
-}
+# Broker-specific rate limits moved to algosat.core.rate_limiter.py
+# Use GlobalRateLimiter.DEFAULT_RATE_CONFIGS for all rate limiting configuration
 
 def is_retryable_exception(exc):
     # Customize this as needed: don't retry on 4xx errors (e.g., BadRequest), retry on network/server errors
@@ -112,15 +108,13 @@ class BrokerManager:
         if self._rate_limiter is None:
             self._rate_limiter = await get_rate_limiter()
             
-            # Configure trading-specific rate limits for all known brokers
-            for broker_name, rps in _BROKER_TRADING_RATE_LIMITS.items():
-                rate_config = RateConfig(
-                    rps=rps,
-                    burst=rps + 1,  # Small burst allowance for trading
-                    window=1.0
-                )
+            # Configure rate limits using global configuration
+            from algosat.core.rate_limiter import GlobalRateLimiter
+            global_limiter = await GlobalRateLimiter.get_instance()
+            for broker_name, rate_config in global_limiter._rate_configs.items():
+                # Use the global rate configuration directly
                 self._rate_limiter.configure_broker(broker_name, rate_config)
-                logger.info(f"Configured trading rate limits for {broker_name}: {rps} rps")
+                logger.info(f"Configured trading rate limits for {broker_name}: {rate_config.rps} rps, burst: {rate_config.burst}")
 
     async def _discover_enabled_brokers(self) -> List[str]:
         # Discover all brokers that have credentials or default configs

@@ -127,11 +127,20 @@ class GlobalRateLimiter:
     _instance: Optional['GlobalRateLimiter'] = None
     _lock = None  # Will be initialized when needed
     
-    # Default rate configurations per broker
+    # Centralized rate configurations per broker
+    # This is the SINGLE SOURCE OF TRUTH for all rate limiting across the application
     DEFAULT_RATE_CONFIGS = {
+        # Fyers: Official limit ~10-15 rps, we use 10 rps with burst allowance
         "fyers": RateConfig(rps=10, burst=15, window=1.0),
+        
+        # Angel One: Conservative limit for stability
         "angel": RateConfig(rps=5, burst=8, window=1.0),
-        "zerodha": RateConfig(rps=5, burst=5, window=1.0),  # Conservative for Zerodha
+        
+        # Zerodha: Very conservative due to strict rate limiting
+        "zerodha": RateConfig(rps=5, burst=5, window=1.0),
+        
+        # Default fallback for unknown brokers
+        "default": RateConfig(rps=3, burst=5, window=1.0),
     }
     
     def __init__(self):
@@ -162,12 +171,27 @@ class GlobalRateLimiter:
         if broker_name not in self._limiters:
             rate_config = self._rate_configs.get(
                 broker_name, 
-                RateConfig(rps=1, burst=1)  # Conservative default
+                self._rate_configs.get("default", RateConfig(rps=1, burst=1))  # Use default config
             )
             self._limiters[broker_name] = BrokerRateLimiter(broker_name, rate_config)
             logger.info(f"Created rate limiter for {broker_name}: {rate_config.rps} rps")
         
         return self._limiters[broker_name]
+    
+    def get_rate_config(self, broker_name: str) -> RateConfig:
+        """Get rate configuration for a broker."""
+        return self._rate_configs.get(
+            broker_name, 
+            self._rate_configs.get("default", RateConfig(rps=1, burst=1))
+        )
+    
+    @classmethod
+    def get_default_rate_config(cls, broker_name: str) -> RateConfig:
+        """Get default rate configuration for a broker (static method)."""
+        return cls.DEFAULT_RATE_CONFIGS.get(
+            broker_name,
+            cls.DEFAULT_RATE_CONFIGS.get("default", RateConfig(rps=1, burst=1))
+        )
     
     @asynccontextmanager
     async def acquire(self, broker_name: str, tokens: int = 1):

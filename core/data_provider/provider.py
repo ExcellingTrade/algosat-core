@@ -13,12 +13,8 @@ from algosat.common.logger import get_logger
 
 logger = get_logger("data_provider")
 
-# Per-broker rate limit settings: requests per second
-_RATE_LIMITS = {
-    "fyers": 10,
-    "angel": 5,
-    "zerodha": 5,  # More conservative for Zerodha
-}
+# Per-broker rate limit settings moved to algosat.core.rate_limiter.py
+# Use GlobalRateLimiter.DEFAULT_RATE_CONFIGS for all rate limiting configuration
 
 async def _async_retry(coro_func, *args, max_attempts=3, initial_delay=1, backoff=2, exceptions=(Exception,), **kwargs):
     """Legacy async retry function - DEPRECATED, use async_retry_with_rate_limit instead."""
@@ -106,15 +102,11 @@ class DataProvider:
         # Ensure the broker instance has a .name attribute for logging/rate limiting
         self._broker.name = broker_name
         
-        # Configure rate limiter for this broker if not already configured
-        if broker_name in _RATE_LIMITS:
-            rate_config = RateConfig(
-                rps=_RATE_LIMITS[broker_name],
-                burst=_RATE_LIMITS[broker_name] + 2,  # Allow small burst
-                window=1.0
-            )
-            self._rate_limiter.configure_broker(broker_name, rate_config)
-            logger.info(f"Configured data provider rate limits for {broker_name}: {_RATE_LIMITS[broker_name]} rps")
+        # Configure rate limiter for this broker using global configuration
+        from algosat.core.rate_limiter import GlobalRateLimiter
+        rate_config = GlobalRateLimiter.get_default_rate_config(broker_name)
+        self._rate_limiter.configure_broker(broker_name, rate_config)
+        logger.info(f"Configured data provider rate limits for {broker_name}: {rate_config.rps} rps, burst: {rate_config.burst}")
 
     async def get_option_chain(self, symbol: str, strike_count: int = 20):
         """Fetch the option chain for a given symbol asynchronously from the data provider broker."""

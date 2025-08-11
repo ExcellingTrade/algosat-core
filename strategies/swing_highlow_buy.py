@@ -1943,30 +1943,22 @@ class SwingHighLowBuyStrategy(StrategyBase):
     async def update_stoploss_in_db(self, order_id, new_stoploss):
         """Update stoploss level in database"""
         try:
-            from algosat.core.db import AsyncSessionLocal
-            from algosat.core.dbschema import orders
-            async with AsyncSessionLocal() as session:
-                # Update orders table with new stoploss
-                await session.execute(
-                    orders.update().where(orders.c.id == order_id).values(stoploss_spot_level=float(new_stoploss))
-                )
-                await session.commit()
-                logger.info(f"Updated stoploss in DB: order_id={order_id}, new_stoploss={new_stoploss}")
+            from algosat.core.db import update_rows_in_table
+            update_values = {"stoploss_spot_level": float(new_stoploss)}
+            where_conditions = {"id": order_id}
+            await update_rows_in_table("orders", update_values, where_conditions)
+            logger.info(f"Updated stoploss in DB: order_id={order_id}, new_stoploss={new_stoploss}")
         except Exception as e:
             logger.error(f"Error updating stoploss in DB for order_id={order_id}: {e}")
     
     async def update_target_in_db(self, order_id, new_target):
         """Update target level in database"""
         try:
-            from algosat.core.db import AsyncSessionLocal
-            from algosat.core.dbschema import orders
-            async with AsyncSessionLocal() as session:
-                # Update orders table with new target
-                await session.execute(
-                    orders.update().where(orders.c.id == order_id).values(target_spot_level=float(new_target))
-                )
-                await session.commit()
-                logger.info(f"Updated target in DB: order_id={order_id}, new_target={new_target}")
+            from algosat.core.db import update_rows_in_table
+            update_values = {"target_spot_level": float(new_target)}
+            where_conditions = {"id": order_id}
+            await update_rows_in_table("orders", update_values, where_conditions)
+            logger.info(f"Updated target in DB: order_id={order_id}, new_target={new_target}")
         except Exception as e:
             logger.error(f"Error updating target in DB for order_id={order_id}: {e}")
     

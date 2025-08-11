@@ -143,6 +143,8 @@ class OrderManager:
         max_nse_qty = None
         if hasattr(config, 'trade') and isinstance(config.trade, dict):
             max_nse_qty = config.trade.get('max_nse_qty', config.trade.get('max_nse_qtty', 900))
+        # 2. Place order(s) with brokers
+        check_margin = config.trade.get('check_margin', False)
         if max_nse_qty and order_payload.quantity > max_nse_qty:
             return await self.split_and_place_order(config, order_payload, max_nse_qty, strategy_name, check_margin=check_margin)
         # 1. Insert logical order row (orders)
@@ -157,8 +159,7 @@ class OrderManager:
             if not order_id:
                 logger.error("Failed to insert logical order row.")
                 return None
-            # 2. Place order(s) with brokers
-            check_margin = config.trade.get('check_margin', False)
+            
             
             broker_responses = await self.broker_manager.place_order(order_payload, strategy_name=strategy_name, check_margin=check_margin)
             # 3. Insert broker_executions rows
@@ -166,7 +167,11 @@ class OrderManager:
                 raw_action = getattr(order_payload, 'side', None) or response.get('side', None) or 'BUY'
                 action = self.normalize_action_field(raw_action)
                 # logger.debug(f"OrderManager: Action normalization in place_order - raw_action='{raw_action}' -> action='{action}'")
-                await self._insert_broker_execution(session, order_id, broker_name, response, side=ExecutionSide.ENTRY.value, action=action)
+                try:
+                    await self._insert_broker_execution(session, order_id, broker_name, response, side=ExecutionSide.ENTRY.value, action=action)
+                except Exception as insert_error:
+                    logger.error(f"OrderManager: Failed to insert broker_execution for {broker_name} in place_order: {insert_error}")
+                    # Continue with other brokers even if one fails
             await session.commit()
         # Telegram notification for order placed
         try:
@@ -231,21 +236,25 @@ class OrderManager:
             while qty_left > 0:
                 qty = min(qty_left, max_nse_qty)
                 trigger_price = (current_price - trigger_price_diff) if order_payload.side == Side.BUY else (current_price + trigger_price_diff)
-                slice_payload = self.create_slice_payload(order_payload, qty, current_price, trigger_price, "ENTRY")
+                slice_payload = self.create_slice_payload(order_payload, qty, current_price, trigger_price, order_payload.side)
                 broker_responses = await self.broker_manager.place_order(slice_payload, strategy_name=strategy_name, check_margin=check_margin)
                 for broker_name, response in broker_responses.items():
                     # Insert a broker_executions row for this split order
                     raw_action = getattr(order_payload, 'side', None) or response.get('side', None) or 'BUY'
                     action = self.normalize_action_field(raw_action)
                     logger.debug(f"OrderManager: Action normalization in split_and_place_order - raw_action='{raw_action}' -> action='{action}'")
-                    await self._insert_broker_execution(
-                        session,
-                        parent_order_id,
-                        broker_name,
-                        response,
-                        side=ExecutionSide.ENTRY.value,
-                        action=action
-                    )
+                    try:
+                        await self._insert_broker_execution(
+                            session,
+                            parent_order_id,
+                            broker_name,
+                            response,
+                            side=ExecutionSide.ENTRY.value,
+                            action=action
+                        )
+                    except Exception as insert_error:
+                        logger.error(f"OrderManager: Failed to insert broker_execution for {broker_name} in split order: {insert_error}")
+                        # Continue with other brokers even if one fails
                     responses.append({
                         'broker_name': broker_name,
                         'response': response,
@@ -336,6 +345,14 @@ class OrderManager:
                         exit_reason=exit_reason or f"Parent order {parent_order_id} exited",
                         check_live_status=check_live_status
                     )
+                    
+                    # Update child order status to ENTRY_CANCELLED since it's being closed due to parent order failure
+                    try:
+                        from algosat.common.constants import TRADE_STATUS_ENTRY_CANCELLED
+                        await self.update_order_status_in_db(child_order_id, TRADE_STATUS_ENTRY_CANCELLED)
+                        logger.info(f"OrderManager: Updated child order {child_order_id} status to ENTRY_CANCELLED due to parent order {parent_order_id} exit")
+                    except Exception as status_e:
+                        logger.error(f"OrderManager: Failed to update child order {child_order_id} status to ENTRY_CANCELLED: {status_e}")
                     
                     logger.info(f"OrderManager: Successfully initiated exit for child order {child_order_id}")
                     
@@ -483,6 +500,11 @@ class OrderManager:
             status = "FAILED" if status is False else "PENDING"
             logger.warning(f"OrderManager: build_broker_exec_data converted boolean status to string: {status}")
         
+        # Ensure executed_quantity is never None for database NOT NULL constraint
+        if executed_quantity is None:
+            executed_quantity = 0
+            logger.warning(f"OrderManager: build_broker_exec_data converted None executed_quantity to 0")
+        
         return dict(
             parent_order_id=parent_order_id,
             broker_id=broker_id,
@@ -554,10 +576,46 @@ class OrderManager:
             order_message = response.get("order_message")
             status_val = response.get("status", "FAILED")
             
-            # Convert boolean status to proper string status
+            # Enhanced status conversion for broker responses
             if isinstance(status_val, bool):
-                status_val = "FAILED" if status_val is False else "PENDING"
-                logger.warning(f"OrderManager: Converted boolean status to string: {response.get('status')} -> {status_val} for broker_name={broker_name}")
+                # Boolean status from broker response
+                if status_val is False:
+                    status_val = "FAILED"  # Failed orders
+                    logger.warning(f"OrderManager: Converted boolean False to FAILED for broker_name={broker_name}")
+                else:  # status_val is True
+                    # For successful orders, check if we have an order_id to determine proper status
+                    if order_id:
+                        status_val = "PENDING"  # Order placed successfully, awaiting execution
+                        logger.info(f"OrderManager: Converted boolean True to PENDING for broker_name={broker_name} with order_id={order_id}")
+                    else:
+                        status_val = "FAILED"  # True but no order_id means something went wrong
+                        logger.warning(f"OrderManager: Converted boolean True to FAILED (no order_id) for broker_name={broker_name}")
+            elif isinstance(status_val, str):
+                # String status - validate and normalize
+                status_upper = status_val.upper()
+                if status_upper in ["COMPLETE", "COMPLETED", "FILLED", "TRADED"]:
+                    status_val = "FILLED"
+                elif status_upper in ["PARTIAL", "PARTIALLY_FILLED"]:
+                    status_val = "PARTIALLY_FILLED"
+                elif status_upper in ["REJECT", "REJECTED"]:
+                    status_val = "REJECTED"
+                elif status_upper in ["CANCEL", "CANCELLED"]:
+                    status_val = "CANCELLED"
+                elif status_upper == "PENDING":
+                    status_val = "PENDING"
+                else:
+                    # Keep original string value for other statuses
+                    status_val = status_upper
+                logger.debug(f"OrderManager: Normalized string status '{response.get('status')}' -> '{status_val}' for broker_name={broker_name}")
+            else:
+                # Non-boolean, non-string status (unexpected)
+                status_val = "FAILED"
+                logger.warning(f"OrderManager: Unexpected status type {type(status_val)} with value {status_val}, defaulting to FAILED for broker_name={broker_name}")
+            
+            # VALIDATION: Skip insertion if broker_order_id is None (required field)
+            if order_id is None:
+                logger.warning(f"OrderManager: Skipping broker_execution insert for {broker_name} - broker_order_id is None. Response: {response}")
+                return
             
             product_type = response.get("product_type")
             order_type = response.get("order_type")
@@ -587,12 +645,14 @@ class OrderManager:
                 product_type=product_type,
                 order_type=order_type,
                 order_messages=order_message,
-                raw_execution_data=response,
+                raw_execution_data=self._serialize_datetime_for_json(response),
                 symbol=symbol  # Include symbol in broker execution data
             )
             await session.execute(broker_executions.insert().values(**broker_exec_data))
+            logger.info(f"OrderManager: Successfully inserted broker_execution for {broker_name}, parent_order_id={parent_order_id}, order_id={order_id}")
         except Exception as e:
             logger.error(f"_insert_broker_execution failed for broker_name={broker_name}, parent_order_id={parent_order_id}: {e}", exc_info=True)
+            # Continue processing other brokers even if one fails - don't re-raise
 
     async def _insert_exit_broker_execution(self, session, *, parent_order_id, broker_id, broker_order_id, side, status, executed_quantity, execution_price=0.0, product_type, order_type, order_messages, symbol, execution_time=None, notes, action=None, exit_reason=None, exit_broker_order_id=None, quantity=None):
         """
@@ -783,7 +843,7 @@ class OrderManager:
             "order_type": order_type,
             "notes": notes,
             "status": "FILLED",  # Default status for successful executions
-            "raw_execution_data": raw_execution_data
+            "raw_execution_data": self._serialize_datetime_for_json(raw_execution_data) if raw_execution_data else None
         }
         
         try:
@@ -897,6 +957,27 @@ class OrderManager:
             if broker_row is None:
                 logger.warning(f"OrderManager: Could not find broker_id for broker_name={broker_name}")
             return broker_row["id"] if broker_row else None
+
+    def _serialize_datetime_for_json(self, data):
+        """
+        Recursively convert datetime objects and enums to JSON-serializable values.
+        """
+        if isinstance(data, dict):
+            return {key: self._serialize_datetime_for_json(value) for key, value in data.items()}
+        elif isinstance(data, list):
+            return [self._serialize_datetime_for_json(item) for item in data]
+        elif isinstance(data, datetime):
+            return data.isoformat()
+        elif isinstance(data, Enum):
+            return data.value
+        elif hasattr(data, '__dict__'):
+            # Handle objects with datetime attributes
+            result = {}
+            for key, value in data.__dict__.items():
+                result[key] = self._serialize_datetime_for_json(value)
+            return result
+        else:
+            return data
 
     async def get_order_status(self, order_id):
         """
@@ -1078,6 +1159,7 @@ class OrderManager:
                         "product_type": o.get("productType"),
                         "order_type": order_type,
                         "execution_time": execution_time,
+                        "side": "BUY" if o.get("side") ==1 else "SELL",
                         # "raw": o
                     })
                 # Zerodha normalization
@@ -1113,6 +1195,7 @@ class OrderManager:
                         "product_type": o.get("product"),
                         "order_type": o.get("order_type"),
                         "execution_time": execution_time,
+                        "side": "BUY" if o.get("transaction_type") == "BUY" else "SELL",
                         # "raw": o
                     })
                 # Fallback normalization for other brokers
@@ -1544,7 +1627,9 @@ class OrderManager:
                             
                             # Store raw broker data for debugging and future analysis
                             if matching_order:
-                                update_fields['raw_execution_data'] = matching_order
+                                # Convert datetime objects to strings for JSON serialization
+                                raw_data = self._serialize_datetime_for_json(matching_order)
+                                update_fields['raw_execution_data'] = raw_data
                                 update_needed = True
                             
                             if update_needed:
@@ -1559,6 +1644,11 @@ class OrderManager:
                                     update_fields['status'] = update_fields['status'].value
                                 elif 'status' in update_fields:
                                     update_fields['status'] = str(update_fields['status'])
+                                
+                                # Convert Fyers order_type integer to string if needed
+                                if 'order_type' in update_fields and broker_name == 'fyers' and isinstance(update_fields['order_type'], int):
+                                    update_fields['order_type'] = FYERS_ORDER_TYPE_MAP.get(update_fields['order_type'], str(update_fields['order_type']))
+                                    logger.debug(f"OrderManager: Converted Fyers order_type to string for broker_exec_id={broker_exec_id}: {update_fields['order_type']}")
                                 
                                 async with AsyncSessionLocal() as comprehensive_session:
                                     await update_rows_in_table(
@@ -1838,7 +1928,7 @@ class OrderManager:
             "product_type": product_type,
             "order_type": order_type,
             "order_messages": order_messages,
-            "raw_execution_data": raw_execution_data,
+            "raw_execution_data": self._serialize_datetime_for_json(raw_execution_data) if raw_execution_data else None,
             "symbol": symbol,
             "execution_time": execution_time,
             "notes": notes,

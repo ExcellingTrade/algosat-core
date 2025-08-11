@@ -991,19 +991,19 @@ class OptionSellStrategy(StrategyBase):
                     logger.error("regime_reference is still empty after retry, skipping sideways regime detection")
                     regime = "Unknown"
                 else:
-                    logger.info(f"Fetching LTP for price check: order_id={self.order_id}, symbol={self.symbol}")
-                    ltp_response = await self.data_manager.get_ltp(self.symbol)
+                    logger.info(f"Fetching LTP for price check: symbol={self.symbol}")
+                    ltp_response = await self.dp.get_ltp(self.symbol)
                     if isinstance(ltp_response, dict):
                         ltp = ltp_response.get(self.symbol)
                     else:
                         ltp = ltp_response
                         
                     if ltp is None:
-                        logger.warning(f"Could not get LTP for {self.symbol}, order_id={self.order_id}")
+                        logger.warning(f"Could not get LTP for {self.symbol}")
                         return
                         
                     ltp = float(round(ltp,2))
-                    logger.info(f"Fetched LTP for price check: order_id={self.order_id}, symbol={self.symbol}, LTP={ltp}")
+                    logger.info(f"Fetched LTP for price check: , symbol={self.symbol}, LTP={ltp}")
 
                     regime = detect_regime(
                         entry_price=ltp,
@@ -1157,14 +1157,11 @@ class OptionSellStrategy(StrategyBase):
                 logger.error("evaluate_exit: Missing strike_symbol in order_row.")
                 return False
             trade_config = self.trade
+            trade_day = get_trade_day(get_ist_datetime())#  - timedelta(days=1)
             # Fetch candle history for the strike
-            history_dict = await fetch_instrument_history(
-                self.dp,
-                [strike_symbol],
-                interval_minutes=trade_config.get('interval_minutes', 5),
-                ins_type="",
-                cache=False
-            )
+            history_dict = await self.fetch_history_data(
+            self.dp, [strike_symbol], trade_day, trade_config
+             )
             history_df = history_dict.get(str(strike_symbol))
             entry_conf = self.indicators.get('entry', {})
             supertrend_period = entry_conf.get('supertrend_period', 10)

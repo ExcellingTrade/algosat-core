@@ -295,20 +295,12 @@ class OrderMonitor:
                             except Exception as e:
                                 logger.error(f"Failed to send Telegram square-off notification: {e}")
                             try:
-                                # --- BO/CO/OCO robust exit handling ---
-                                order_type_val = (order_row.get('order_type') or '').upper()
+                                # Square-off time exit handling
                                 from algosat.common import constants
-                                if order_type_val in ('BO', 'BRACKET', 'CO', 'COVER', 'OCO', 'ONE_CANCELS_OTHER'):
-                                    logger.info(f"OrderMonitor: Detected BO/CO/OCO order type ({order_type_val}) for order_id={self.order_id}. Routing exit through PENDING logic.")
-                                    await self.order_manager.exit_order(self.order_id, exit_reason=f"Square-off time {square_off_time_str} reached [BO/CO/OCO]")
-                                    await self.order_manager.update_order_status_in_db(self.order_id, f"{constants.TRADE_STATUS_EXIT_EOD}_PENDING")
-                                    await self._clear_order_cache("Square-off time exit status updated to PENDING [BO/CO/OCO]")
-                                    logger.info(f"OrderMonitor: EOD exit set to PENDING for BO/CO/OCO order_id={self.order_id}. PENDING processor will complete the exit.")
-                                else:
-                                    await self.order_manager.exit_order(self.order_id, exit_reason=f"Square-off time {square_off_time_str} reached")
-                                    await self.order_manager.update_order_status_in_db(self.order_id, f"{constants.TRADE_STATUS_EXIT_EOD}_PENDING")
-                                    await self._clear_order_cache("Square-off time exit status updated to PENDING")
-                                    logger.info(f"OrderMonitor: EOD exit set to PENDING for order_id={self.order_id}. PENDING processor will complete the exit.")
+                                await self.order_manager.exit_order(self.order_id, exit_reason=f"Square-off time {square_off_time_str} reached")
+                                await self.order_manager.update_order_status_in_db(self.order_id, f"{constants.TRADE_STATUS_EXIT_EOD}_PENDING")
+                                await self._clear_order_cache("Square-off time exit status updated to PENDING")
+                                logger.info(f"OrderMonitor: EOD exit set to PENDING for order_id={self.order_id}. PENDING processor will complete the exit.")
                                 # Continue monitoring loop - PENDING check at beginning will handle completion
                             except Exception as e:
                                 logger.error(f"OrderMonitor: Failed to exit order {self.order_id} at square-off time: {e}")
@@ -454,6 +446,10 @@ class OrderMonitor:
                             if cache_order:
                                 execution_price = cache_order.get("exec_price") or cache_order.get("execution_price") or cache_order.get("average_price") or cache_order.get("tradedPrice")
                                 order_type = cache_order.get("order_type")
+                                # Apply Fyers order type mapping if this is a Fyers broker response
+                                if broker_name and broker_name.lower() == "fyers" and order_type is not None:
+                                    from algosat.core.order_manager import FYERS_ORDER_TYPE_MAP
+                                    order_type = FYERS_ORDER_TYPE_MAP.get(order_type, str(order_type))
                                 product_type_val = cache_order.get("product_type")
                                 # Get quantity from cache_order (qty or quantity)
                                 quantity = cache_order.get("qty") or cache_order.get("quantity")
@@ -463,6 +459,10 @@ class OrderMonitor:
                                 execution_price = getattr(bro, "exec_price", None) or getattr(bro, "execution_price", None) or getattr(bro, "average_price", None) or getattr(bro, "tradedPrice", None)
                             if order_type is None:
                                 order_type = getattr(bro, "order_type", None)
+                                # Apply Fyers order type mapping if this is a Fyers broker response
+                                if broker_name and broker_name.lower() == "fyers" and order_type is not None:
+                                    from algosat.core.order_manager import FYERS_ORDER_TYPE_MAP
+                                    order_type = FYERS_ORDER_TYPE_MAP.get(order_type, str(order_type))
                             if product_type_val is None:
                                 product_type_val = getattr(bro, "product_type", None)
                             if quantity is None:
@@ -484,7 +484,7 @@ class OrderMonitor:
                                 "order_type": order_type,
                                 "product_type": product_type_val,
                                 "symbol": symbol_val,
-                                "raw_execution_data": cache_order  # Store complete broker order data
+                                "raw_execution_data": self.order_manager._serialize_datetime_for_json(cache_order)  # Store complete broker order data
                                 # Note: execution_time is handled by order_manager.py during status transitions
                             }
                             
@@ -621,6 +621,24 @@ class OrderMonitor:
                     await self._clear_order_cache(f"Order status updated to {main_status}")
                 last_main_status = main_status
                 if main_status in (OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.FAILED):
+                    logger.info(f"OrderMonitor: Order {self.order_id} reached terminal status {main_status}. Checking for child orders to close.")
+                    
+                    # CRITICAL FIX: Close child orders when main order fails
+                    try:
+                        if await self.order_manager.has_child_orders(self.order_id):
+                            logger.info(f"OrderMonitor: Found child orders for failed order {self.order_id}. Closing them before stopping monitor.")
+                            await self.order_manager.exit_child_orders(
+                                parent_order_id=self.order_id,
+                                exit_reason=f"Parent order {self.order_id} reached terminal status {main_status}",
+                                check_live_status=True  # Check live status to update hedge orders before exit decisions
+                            )
+                            logger.info(f"OrderMonitor: Successfully closed child orders for failed order {self.order_id}")
+                        else:
+                            logger.debug(f"OrderMonitor: No child orders found for order {self.order_id}")
+                    except Exception as e:
+                        logger.error(f"OrderMonitor: Error closing child orders for failed order {self.order_id}: {e}", exc_info=True)
+                        # Continue to stop monitor even if child order closure fails
+                    
                     logger.info(f"OrderMonitor: Order {self.order_id} reached terminal status {main_status}. Stopping monitor.")
                     try:
                         msg = f"❗ <b>Order Terminal Status</b>\n<b>Order ID:</b> <code>{self.order_id}</code>\n<b>Status:</b> <code>{main_status}</code>\nAll brokers reported this status. Stopping monitor."
@@ -1150,6 +1168,7 @@ class OrderMonitor:
             logger.info(f"OrderMonitor: 🔍 Fetching broker order details for exit calculation - order_id={self.order_id}")
             all_broker_orders = await self.order_manager.get_all_broker_order_details()
             logger.info(f"OrderMonitor: Retrieved order details from {len(all_broker_orders)} brokers")
+            logger.debug(f"OrderMonitor: Broker order details: {all_broker_orders}")
             
             if not all_broker_orders:
                 logger.warning(f"OrderMonitor: ⚠️ No broker order details available from get_all_broker_order_details()")
@@ -1686,6 +1705,9 @@ class OrderMonitor:
                                 fallback_exit_action = 'EXIT'  # Fallback for unknown entry action
                             
                             # No existing EXIT entry found, create new fallback entry
+                            # Ensure executed_quantity is never None for database NOT NULL constraint
+                            fallback_quantity = bro.get('executed_quantity') or bro.get('quantity') or 0
+                            
                             await self.order_manager._insert_exit_broker_execution(
                                 session,
                                 parent_order_id=self.order_id,
@@ -1693,7 +1715,7 @@ class OrderMonitor:
                                 broker_order_id=bro.get('broker_order_id'),
                                 side='EXIT',
                                 status='CLOSED',  # Use CLOSED since we don't have detailed execution info
-                                executed_quantity=bro.get('executed_quantity', 0) or bro.get('quantity', 0),
+                                executed_quantity=fallback_quantity,
                                 execution_price=bro.get('execution_price', 0),  # Use entry price as fallback
                                 product_type=bro.get('product_type'),
                                 order_type='MARKET',
@@ -1819,6 +1841,9 @@ class OrderMonitor:
                                     emergency_exit_action = 'EXIT'  # Fallback
                                 
                                 # Create new emergency EXIT entry
+                                # Ensure executed_quantity is never None for database NOT NULL constraint
+                                emergency_quantity = bro.get('executed_quantity') or bro.get('quantity') or 0
+                                
                                 await self.order_manager._insert_exit_broker_execution(
                                     session,
                                     parent_order_id=self.order_id,
@@ -1826,7 +1851,7 @@ class OrderMonitor:
                                     broker_order_id=bro.get('broker_order_id'),
                                     side='EXIT',
                                     status='CLOSED',
-                                    executed_quantity=bro.get('executed_quantity', 0) or bro.get('quantity', 0),
+                                    executed_quantity=emergency_quantity,
                                     execution_price=bro.get('execution_price', 0),
                                     product_type=bro.get('product_type'),
                                     order_type='MARKET',
@@ -2142,9 +2167,11 @@ class OrderMonitor:
                 await self._clear_order_cache("evaluate_exit returned True")
                 try:
                     # Call exit_order immediately when strategy decides to exit
+                    # Use check_live_status=True to ensure hedge orders get status updates before exit decisions
                     await self.order_manager.exit_order(
                         parent_order_id=self.order_id,
-                        exit_reason="Signal monitor triggered exit"
+                        exit_reason="Signal monitor triggered exit",
+                        check_live_status=True
                     )
                     logger.info(f"OrderMonitor: Successfully called exit_order for order_id={self.order_id}")
                     

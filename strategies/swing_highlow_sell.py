@@ -263,27 +263,73 @@ class SwingHighLowSellStrategy(StrategyBase):
 
             async with AsyncSessionLocal() as session:
                 smart_levels = []
+                lookup_method = None
                 
+                # Method 1: Use strategy_symbol_id if available (most direct)
                 if self._strategy_symbol_id:
-                    # Use strategy_symbol_id for direct lookup
                     smart_levels = await get_smart_levels_for_strategy_symbol_id(session, self._strategy_symbol_id)
-                    logger.debug(f"Found {len(smart_levels)} smart levels using strategy_symbol_id={self._strategy_symbol_id}")
-                else:
-                    # Fallback to symbol name lookup using sanitized symbol
-                    strategy_id = getattr(self.cfg, 'strategy_id', None)
-                    if strategy_id:
-                        smart_levels = await get_smart_levels_for_symbol(session, db_symbol, strategy_id)
-                        logger.debug(f"Found {len(smart_levels)} smart levels using db_symbol={db_symbol}, strategy_id={strategy_id}")
+                    lookup_method = f"strategy_symbol_id={self._strategy_symbol_id}"
+                    logger.debug(f"Method 1: Loaded {len(smart_levels)} smart levels using {lookup_method}")
+                
+                # Method 2: Fallback to symbol name + strategy_id lookup (only if Method 1 found no data)
+                if not smart_levels and hasattr(self.cfg, 'strategy_id') and self.cfg.strategy_id and db_symbol:
+                    smart_levels = await get_smart_levels_for_symbol(session, db_symbol, self.cfg.strategy_id)
+                    lookup_method = f"symbol={db_symbol}, strategy_id={self.cfg.strategy_id}"
+                    logger.debug(f"Method 2: Loaded {len(smart_levels)} smart levels using {lookup_method}")
+                
+                # Method 3: Last fallback - symbol name only (only if previous methods found no data)
+                if not smart_levels and db_symbol:
+                    smart_levels = await get_smart_levels_for_symbol(session, db_symbol)
+                    lookup_method = f"symbol={db_symbol} only"
+                    logger.debug(f"Method 3: Loaded {len(smart_levels)} smart levels using {lookup_method}")
+                
+                # Process smart levels - expect only one active level per symbol
+                if smart_levels:
+                    active_level = None
+                    
+                    for level in smart_levels:
+                        if not isinstance(level, dict):
+                            logger.warning(f"⚠️ Invalid smart level data type: {type(level)}, expected dict")
+                            continue
+                            
+                        # Check required fields
+                        required_fields = ['name', 'entry_level', 'is_active']
+                        missing_fields = [field for field in required_fields if field not in level]
+                        if missing_fields:
+                            logger.warning(f"⚠️ Smart level missing required fields {missing_fields}: {level}")
+                            continue
+                            
+                        # Only include active levels
+                        if not level.get('is_active', False):
+                            logger.debug(f"Skipping inactive smart level: {level.get('name')}")
+                            continue
+                        
+                        # Take the first active level (should be only one per symbol)
+                        if active_level is None:
+                            active_level = level
+                            logger.info(f"✅ Active smart level found: '{level['name']}'")
+                        else:
+                            logger.warning(f"⚠️ Multiple active smart levels found for {db_symbol}! Using first: '{active_level['name']}', skipping: '{level['name']}'")
+                    
+                    # Cache the single smart level
+                    self._smart_level = active_level
+                    
+                    if active_level:
+                        logger.info(f"✅ Smart level loaded for {db_symbol} using {lookup_method}")
+                        
+                        # Log comprehensive smart level details
+                        logger.info(f"📊 Smart Level Summary: '{active_level['name']}'")
+                        logger.info(f"    Entry Level: {active_level.get('entry_level')}")
+                        logger.info(f"    Targets: Bullish={active_level.get('bullish_target')}, Bearish={active_level.get('bearish_target')}")
+                        logger.info(f"    Initial Lots: CE={active_level.get('initial_lot_ce')}, PE={active_level.get('initial_lot_pe')}")
+                        logger.info(f"    Remaining Lots: CE={active_level.get('remaining_lot_ce')}, PE={active_level.get('remaining_lot_pe')}")
+                        logger.info(f"    Buy Enabled: CE={active_level.get('ce_buy_enabled')}, PE={active_level.get('pe_buy_enabled')}")
+                        logger.info(f"    Sell Enabled: CE={active_level.get('ce_sell_enabled')}, PE={active_level.get('pe_sell_enabled')}")
+                        logger.info(f"    Limits: Max Trades={active_level.get('max_trades')}, Max Loss={active_level.get('max_loss_trades')}")
+                        if active_level.get('pullback_percentage'):
+                            logger.info(f"    Pullback: {active_level.get('pullback_percentage')}%")
                     else:
-                        logger.warning("No strategy_symbol_id or strategy_id available for smart level lookup")
-                        return
-                
-                # Filter active smart levels and take the first one
-                active_levels = [level for level in smart_levels if level.get('is_active', False)]
-                
-                if active_levels:
-                    self._smart_level = active_levels[0]  # Take first active level
-                    logger.info(f"✅ Loaded smart level: '{self._smart_level.get('name')}' for {db_symbol} (original: {self.symbol})")
+                        logger.info(f"No active smart levels found for {self.symbol}")
                 else:
                     logger.info(f"No active smart levels found for {self.symbol}")
                     
@@ -2132,29 +2178,33 @@ class SwingHighLowSellStrategy(StrategyBase):
             logger.error(f"Error in evaluate_exit for order_id={order_row.get('id')}: {e}", exc_info=True)
             return False
     
-    def update_stoploss_in_db(self, order_id, new_stoploss):
+    async def update_stoploss_in_db(self, order_id, new_stoploss):
         """Update stoploss level in database"""
         try:
-            from algosat.core.db import AsyncSessionLocal
-            with AsyncSessionLocal as session:
-                # Update orders table with new stoploss
-                query = "UPDATE orders SET stoploss_spot_level = %s WHERE id = %s"
-                session.execute(query, (float(new_stoploss), order_id))
-                session.commit()
-                logger.info(f"Updated stoploss in DB: order_id={order_id}, new_stoploss={new_stoploss}")
+            from algosat.core.db import update_rows_in_table
+            from algosat.core.dbschema import orders
+            # Update orders table with new stoploss
+            await update_rows_in_table(
+                target_table=orders,
+                condition=orders.c.id == order_id,
+                new_values={"stoploss_spot_level": float(new_stoploss)}
+            )
+            logger.info(f"Updated stoploss in DB: order_id={order_id}, new_stoploss={new_stoploss}")
         except Exception as e:
             logger.error(f"Error updating stoploss in DB for order_id={order_id}: {e}")
     
-    def update_target_in_db(self, order_id, new_target):
+    async def update_target_in_db(self, order_id, new_target):
         """Update target level in database"""
         try:
-            from algosat.core.db import AsyncSessionLocal
-            with AsyncSessionLocal as session:
-                # Update orders table with new target
-                query = "UPDATE orders SET target_spot_level = %s WHERE id = %s"
-                session.execute(query, (float(new_target), order_id))
-                session.commit()
-                logger.info(f"Updated target in DB: order_id={order_id}, new_target={new_target}")
+            from algosat.core.db import update_rows_in_table
+            from algosat.core.dbschema import orders
+            # Update orders table with new target
+            await update_rows_in_table(
+                target_table=orders,
+                condition=orders.c.id == order_id,
+                new_values={"target_spot_level": float(new_target)}
+            )
+            logger.info(f"Updated target in DB: order_id={order_id}, new_target={new_target}")
         except Exception as e:
             logger.error(f"Error updating target in DB for order_id={order_id}: {e}")
     
@@ -2264,8 +2314,9 @@ class SwingHighLowSellStrategy(StrategyBase):
             
             trade_day = get_trade_day(get_ist_datetime())
             
+            from algosat.core.db import AsyncSessionLocal, get_all_orders_for_strategy_symbol_and_tradeday
+            
             async with AsyncSessionLocal() as session:
-                from algosat.core.db import get_all_orders_for_strategy_symbol_and_tradeday
                 
                 # Get all orders for this strategy symbol on the current trade day
                 all_orders = await get_all_orders_for_strategy_symbol_and_tradeday(session, symbol_id, trade_day)

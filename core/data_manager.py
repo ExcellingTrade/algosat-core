@@ -10,31 +10,12 @@ from algosat.common.logger import get_logger
 from algosat.models.order_aggregate import OrderAggregate, BrokerOrder
 from typing import List, Dict, Any, Optional, Union
 from algosat.core.db import get_broker_executions_for_order, get_order_by_id
+from algosat.core.async_retry import async_retry_with_rate_limit, RetryConfig, get_retry_config
 
 logger = get_logger("data_manager")
 
-async def _async_retry(coro_func, *args, max_attempts=3, initial_delay=1, backoff=2, exceptions=(Exception,), **kwargs):
-    attempt = 0
-    delay = initial_delay
-    while attempt < max_attempts:
-        try:
-            return await coro_func(*args, **kwargs)
-        except exceptions as e:
-            attempt += 1
-            if attempt >= max_attempts:
-                raise
-            logger.debug(f"Retry {attempt}/{max_attempts} after error: {e}. Retrying in {delay} seconds...")
-            await asyncio.sleep(delay)
-            delay *= backoff
-
-############################################################
-# Per-broker rate limit settings: requests per second
-_RATE_LIMITS = {
-    "fyers": 10,
-    "angel": 5,
-    "zerodha": 3,
-}
-############################################################
+# Per-broker rate limit settings moved to algosat.core.rate_limiter.py
+# Use GlobalRateLimiter.DEFAULT_RATE_CONFIGS for all rate limiting configuration
 
 class _CacheManager:
     """
@@ -84,20 +65,10 @@ class _RateLimiter:
         self.semaphore.release()
 
 
-# Build the per-broker rate limiter map
-rate_limiter_map: Dict[str, _RateLimiter] = {
-    broker_name: _RateLimiter(max_calls=limit, interval_sec=1)
-    for broker_name, limit in _RATE_LIMITS.items()
-}
-
-# To use per-broker rate limiting, pass `rate_limiter_map=rate_limiter_map` when creating your DataManager:
-# Example:
-# data_manager = DataManager(
-#     broker=...,                # your broker instance
-#     broker_name=...,           # broker name string (e.g., "fyers")
-#     broker_manager=...,        # your broker manager
-#     rate_limiter_map=rate_limiter_map,
-# )
+# Legacy per-broker rate limiter map - DEPRECATED
+# Now using GlobalRateLimiter through broker_manager coordination
+# The rate_limiter_map parameter is maintained for backward compatibility
+# but new implementations should use the global rate limiter via broker_manager
 
 def validate_broker_response(response: Any, expected_type: str = "option_chain", symbol: Optional[str] = None) -> bool:
     """Validate broker API response. Return True if valid, False if invalid."""
@@ -194,7 +165,7 @@ def standardize_order_status(broker_name, raw_status, raw_response=None):
 class DataManager:
     """
     Central data manager responsible for broker API access,
-    per-broker rate-limiting, and caching.
+    global rate-limiting coordination with broker_manager, and caching.
     """
     def __init__(self, 
                  broker: Optional[Any] = None, 
@@ -225,6 +196,20 @@ class DataManager:
         if broker_name and broker_name in self.rate_limiter_map:
             return self.rate_limiter_map[broker_name]
         return self.rate_limiter
+
+    async def _ensure_rate_limiter(self):
+        """Ensure the broker manager's global rate limiter is available."""
+        if self.broker_manager and hasattr(self.broker_manager, '_ensure_rate_limiter'):
+            await self.broker_manager._ensure_rate_limiter()
+
+    def _get_data_retry_config(self, operation_type: str = "data_fetch") -> RetryConfig:
+        """Get retry configuration for data operations with global rate limiting."""
+        config = get_retry_config(operation_type)
+        broker_name = self.get_current_broker_name()
+        if broker_name:
+            config.rate_limit_broker = broker_name
+            config.rate_limit_tokens = 1
+        return config
 
     async def ensure_broker(self) -> None:
         try:
@@ -262,16 +247,21 @@ class DataManager:
             cached = self.cache.get(cache_key, ttl=ttl)
             if cached is not None:
                 return cached
+
+            # Ensure global rate limiter is available
+            await self._ensure_rate_limiter()
+            retry_config = self._get_data_retry_config("data_fetch")
+
             async def _fetch():
-                async with self.get_active_rate_limiter():
-                    result = self.broker.get_option_chain(symbol, expiry)
-                    option_chain = await result if inspect.isawaitable(result) else result
-                    if not validate_broker_response(option_chain, expected_type="option_chain", symbol=symbol):
-                        logger.error(f"Invalid option chain data received for '{symbol}' (after all retries)")
-                        raise RuntimeError(f"Invalid option chain data received for '{symbol}'")
-                    self.cache.set(cache_key, option_chain, ttl=ttl)
-                    return option_chain
-            return await _async_retry(_fetch)
+                result = self.broker.get_option_chain(symbol, expiry)
+                option_chain = await result if inspect.isawaitable(result) else result
+                if not validate_broker_response(option_chain, expected_type="option_chain", symbol=symbol):
+                    logger.error(f"Invalid option chain data received for '{symbol}' (after all retries)")
+                    raise RuntimeError(f"Invalid option chain data received for '{symbol}'")
+                self.cache.set(cache_key, option_chain, ttl=ttl)
+                return option_chain
+
+            return await async_retry_with_rate_limit(_fetch, config=retry_config)
         except Exception as e:
             logger.error(f"Error in get_option_chain for symbol={symbol}, expiry={expiry}: {e}", exc_info=True)
             raise
@@ -287,10 +277,17 @@ class DataManager:
         try:
             if not self.broker:
                 raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
-            from algosat.core.time_utils import get_ist_datetime
+            from algosat.core.time_utils import get_ist_datetime, localize_to_ist
             ist_now = get_ist_datetime()
             from_dt = pd.to_datetime(from_date)
             to_dt = pd.to_datetime(to_date)
+            
+            # Convert naive datetimes to IST timezone-aware for comparison
+            if from_dt.tz is None:
+                from_dt = localize_to_ist(from_dt)
+            if to_dt.tz is None:
+                to_dt = localize_to_ist(to_dt)
+                
             if from_dt > ist_now:
                 from algosat.common.broker_utils import get_trade_day
                 prev_trade_day = get_trade_day(ist_now - timedelta(days=1))
@@ -309,20 +306,25 @@ class DataManager:
                 if cached is not None:
                     logger.debug(f"Cache hit for history: {cache_key}") 
                     return cached
+
+            # Ensure global rate limiter is available
+            await self._ensure_rate_limiter()
+            retry_config = self._get_data_retry_config("data_fetch")
+
             async def _fetch():
-                async with self.get_active_rate_limiter():
-                    result = self.broker.get_history(symbol, from_dt, to_dt, ohlc_interval, ins_type)
-                    history = await result if inspect.isawaitable(result) else result
-                    if not validate_broker_response(history, expected_type="history", symbol=symbol):
-                        logger.debug(f"Invalid history data received for '{symbol}' (after all retries). Response: {history}")
-                        # raise RuntimeError(f"Invalid history data received for '{symbol}'")
-                    if cache:
-                        self.cache.set(cache_key, history, ttl=ttl)
-                    return history
-            return await _async_retry(_fetch)
+                result = self.broker.get_history(symbol, from_dt, to_dt, ohlc_interval, ins_type)
+                history = await result if inspect.isawaitable(result) else result
+                if not validate_broker_response(history, expected_type="history", symbol=symbol):
+                    logger.debug(f"Invalid history data received for '{symbol}' (after all retries). Response: {history}")
+                    # Don't raise exception for history validation failures - just return None
+                if cache and history is not None:
+                    self.cache.set(cache_key, history, ttl=ttl)
+                return history
+
+            return await async_retry_with_rate_limit(_fetch, config=retry_config)
         except Exception as e:
-            logger.debug(f"Error in get_history for symbol={symbol}: {e}", exc_info=True)
-            # raise
+            logger.error(f"Error in get_history for symbol={symbol}: {e}", exc_info=True)
+            return None  # Return None instead of raising for history errors
 
     async def get_ltp(self, symbol: str, ttl: int = 5) -> Any:
         """
@@ -332,13 +334,18 @@ class DataManager:
         try:
             if not self.broker:
                 raise RuntimeError("Broker not set in DataManager. Call ensure_broker() first.")
+
+            # Ensure global rate limiter is available
+            await self._ensure_rate_limiter()
+            retry_config = self._get_data_retry_config("data_fetch")
+
             async def _fetch():
-                async with self.get_active_rate_limiter():
-                    result = self.broker.get_ltp(symbol)
-                    ltp = await result if inspect.isawaitable(result) else result
-                    validate_broker_response(ltp, expected_type="ltp", symbol=symbol)
-                    return ltp
-            return await _async_retry(_fetch)
+                result = self.broker.get_ltp(symbol)
+                ltp = await result if inspect.isawaitable(result) else result
+                validate_broker_response(ltp, expected_type="ltp", symbol=symbol)
+                return ltp
+
+            return await async_retry_with_rate_limit(_fetch, config=retry_config)
         except Exception as e:
             logger.error(f"Error in get_ltp for symbol={symbol}: {e}", exc_info=True)
             raise
@@ -416,7 +423,31 @@ class DataManager:
             if order_row is None:
                 logger.warning(f"OrderAggregate: No order found for parent_order_id={parent_order_id}. It may have been deleted.")
                 return None
+            
+            # Get broker executions for main order
             broker_execs = await get_broker_executions_for_order(session, parent_order_id)
+            
+            # ENHANCEMENT: Also get broker executions for child orders (hedge orders)
+            # This ensures hedge orders get status updates without separate monitoring
+            try:
+                from algosat.core.db import get_child_orders
+                child_orders = await get_child_orders(session, parent_order_id)
+                logger.debug(f"OrderAggregate: Found {len(child_orders)} child orders for parent_order_id={parent_order_id}")
+                
+                for child_order in child_orders:
+                    child_order_id = child_order['id']
+                    child_broker_execs = await get_broker_executions_for_order(session, child_order_id)
+                    logger.debug(f"OrderAggregate: Found {len(child_broker_execs)} broker executions for child_order_id={child_order_id}")
+                    # Add child broker executions to the main list
+                    for child_be in child_broker_execs:
+                        broker_execs.append(child_be)
+                
+                logger.info(f"OrderAggregate: Total broker executions (main + child): {len(broker_execs)} for parent_order_id={parent_order_id}")
+                
+            except Exception as e:
+                logger.error(f"OrderAggregate: Error fetching child order broker executions for parent_order_id={parent_order_id}: {e}")
+                # Continue with main order broker executions only
+            
             symbol = order_row.get("strike_symbol", "Unknown")
             broker_orders: List[BrokerOrder] = []
             for be in broker_execs:

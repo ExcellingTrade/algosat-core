@@ -589,9 +589,10 @@ class ZerodhaWrapper(BrokerInterface):
     async def cancel_order(self, broker_order_id, symbol=None, product_type=None, variety="regular", **kwargs):
         """
         Cancel a Zerodha order using the Kite Connect API. Requires variety and order_id.
+        Uses variety="regular" by default since all our orders are placed with regular variety.
         """
         try:
-            logger.info(f"Zerodha cancel_order: Cancelling order with id={broker_order_id}, variety={variety}")
+            logger.info(f"Zerodha cancel_order: Cancelling order with id={broker_order_id}, variety={variety}, product_type={product_type}")
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(None, self.kite.cancel_order, variety, broker_order_id)
             return {"status": True, "message": "Order cancelled", "result": result}

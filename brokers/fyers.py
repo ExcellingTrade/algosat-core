@@ -600,7 +600,7 @@ class FyersWrapper(BrokerInterface):
                 response = await result
             else:
                 response = result
-
+            
             if isinstance(response, dict) and response.get("code") == 200 and response.get("s") == "ok":
                 candles = response.get("candles", [])
                 if not candles:  # Safe check for empty or None candles
@@ -624,10 +624,13 @@ class FyersWrapper(BrokerInterface):
                 error_message = response.get("message", "Unknown error") if isinstance(response, dict) else str(response)
                 logger.debug(f"Failed to fetch history for {formatted_symbol}: {error_message}")
                 if "request limit reached" in error_message.lower():
-                    logger.debug("Getting 'request limit reached' error. Waiting 10 seconds before retrying...")
-                    await asyncio.sleep(10)
+                    logger.warning(f"Fyers rate limit reached for history: {error_message}. Adding delay before raising exception for retry.")
+                    await asyncio.sleep(1)  # Add delay before retrying
+                    raise Exception(f"Fyers rate limit exceeded for history: {error_message}")
         except Exception as e:
             logger.error(f"Exception while fetching async history for {symbol}: {e}")
+            if "rate limit" in str(e).lower():
+                raise  # Re-raise rate limit exceptions for retry
         return None
 
     def get_history_sync(self, symbol, from_date, to_date, ohlc_interval=1, ins_type="EQ"):
@@ -745,6 +748,14 @@ class FyersWrapper(BrokerInterface):
             if isinstance(response, dict):
                 order_id = response.get("id") or response.get("order_id") or response.get("data", {}).get("id")
                 order_message = response.get("message") or str(response)
+                
+                # Check for rate limit errors before proceeding
+                response_code = response.get("code")
+                if response_code == -429 or (order_message and "request limit reached" in order_message.lower()):
+                    logger.warning(f"Fyers rate limit reached: {order_message}. Adding delay before raising exception for retry.")
+                    await asyncio.sleep(1)  # Add delay before retrying
+                    raise Exception(f"Fyers rate limit exceeded: {order_message}")
+                    
             if order_id:
                 return OrderResponse(
                     status=OrderStatus.AWAITING_ENTRY,
@@ -758,6 +769,15 @@ class FyersWrapper(BrokerInterface):
                     order_type=getattr(order_request, 'order_type', None)
                 ).dict()
             else:
+                # Check if this is a rate limit error even when no order_id is present
+                if isinstance(response, dict):
+                    response_code = response.get("code")
+                    error_message = response.get("message", "Order placement failed")
+                    if response_code == -429 or "request limit reached" in error_message.lower():
+                        logger.warning(f"Fyers rate limit reached: {error_message}. Adding delay before raising exception for retry.")
+                        await asyncio.sleep(1)  # Add delay before retrying
+                        raise Exception(f"Fyers rate limit exceeded: {error_message}")
+                
                 return OrderResponse(
                     status=OrderStatus.FAILED,
                     order_id="",
@@ -969,6 +989,14 @@ class FyersWrapper(BrokerInterface):
             if asyncio.iscoroutine(response):
                 response = await response
             if not response or response.get("code") != 200 or response.get("s") != "ok":
+                # Check for rate limit errors
+                if isinstance(response, dict):
+                    error_message = response.get("message", "Unknown error")
+                    response_code = response.get("code")
+                    if response_code == -429 or "request limit reached" in error_message.lower():
+                        logger.warning(f"Fyers rate limit reached for quote: {error_message}. Adding delay before raising exception for retry.")
+                        await asyncio.sleep(1)  # Add delay before retrying
+                        raise Exception(f"Fyers rate limit exceeded for quote: {error_message}")
                 logger.error(f"Fyers get_quote failed: {response}")
                 return {}
             quotes = {}
@@ -979,6 +1007,8 @@ class FyersWrapper(BrokerInterface):
             return quotes
         except Exception as e:
             logger.error(f"Fyers get_quote exception: {e}")
+            if "rate limit" in str(e).lower():
+                raise  # Re-raise rate limit exceptions for retry
             return {}
 
     async def get_order_details_async(self, order_id=None):
@@ -1000,8 +1030,20 @@ class FyersWrapper(BrokerInterface):
                 #     }
             if isinstance(response, dict) and response.get("code") == 200 and response.get("s") == "ok":
                 return response.get('orderBook', [])
+            
+            # Check for rate limit errors
+            if isinstance(response, dict):
+                error_message = response.get("message", "Unknown error")
+                response_code = response.get("code")
+                if response_code == -429 or "request limit reached" in error_message.lower():
+                    logger.warning(f"Fyers rate limit reached for order details: {error_message}. Adding delay before raising exception for retry.")
+                    await asyncio.sleep(1)  # Add delay before retrying
+                    raise Exception(f"Fyers rate limit exceeded for order details: {error_message}")
+            
             return []
         except Exception as e:
+            if "rate limit" in str(e).lower():
+                raise  # Re-raise rate limit exceptions for retry
             raise RuntimeError(f"Failed to fetch order details (async): {e}")
 
     def get_order_details_sync(self, order_id=None):
@@ -1105,8 +1147,20 @@ class FyersWrapper(BrokerInterface):
             logger.info(f"Fyers cancel_order: Cancelling order with id={cancel_id}")
             response = await self.fyers.cancel_order(data)
             logger.info(f"Fyers cancel_order response: {response}")
+            
+            # Check for rate limit errors
+            if isinstance(response, dict):
+                error_message = response.get("message", "")
+                response_code = response.get("code")
+                if response_code == -429 or "request limit reached" in error_message.lower():
+                    logger.warning(f"Fyers rate limit reached for cancel order: {error_message}. Adding delay before raising exception for retry.")
+                    await asyncio.sleep(1)  # Add delay before retrying
+                    raise Exception(f"Fyers rate limit exceeded for cancel order: {error_message}")
+            
             return response
         except Exception as e:
+            if "rate limit" in str(e).lower():
+                raise  # Re-raise rate limit exceptions for retry
             logger.error(f"Fyers cancel_order failed for order {broker_order_id}: {e}")
             return {"status": False, "message": str(e)}
 
@@ -1119,9 +1173,19 @@ class FyersWrapper(BrokerInterface):
         try:
             response = await self.fyers.positions()
             if response.get("code") != 200 or response.get("s") != "ok":
+                # Check for rate limit errors
+                if isinstance(response, dict):
+                    error_message = response.get("message", "Unknown error")
+                    response_code = response.get("code")
+                    if response_code == -429 or "request limit reached" in error_message.lower():
+                        logger.warning(f"Fyers rate limit reached for positions: {error_message}. Adding delay before raising exception for retry.")
+                        await asyncio.sleep(1)  # Add delay before retrying
+                        raise Exception(f"Fyers rate limit exceeded for positions: {error_message}")
                 raise RuntimeError(f"Error fetching positions: {response.get('message', 'Unknown error')}")
             return response
         except Exception as e:
+            if "rate limit" in str(e).lower():
+                raise  # Re-raise rate limit exceptions for retry
             raise RuntimeError(f"Failed to fetch positions (async): {e}")
 
     def get_positions_sync(self):
