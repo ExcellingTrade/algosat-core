@@ -40,7 +40,7 @@ from algosat.utils.config_wrapper import get_config, get_trade_config
 from algosat.utils.indicators import calculate_atr
 from algosat.common.logger import get_logger
 from algosat.utils.rich_utils import ProgressHandler
-from algosat.utils.telegram_bot import TelegramBot
+from algosat.utils.telegram_notify import telegram_bot, send_telegram_async
 from algosat.utils.utils import get_action_icon
 
 logger = get_logger("broker_utils")
@@ -1370,9 +1370,9 @@ def send_telegram_message(message, total_p_n_l=None, check_last_sent_time=True):
     :param total_p_n_l: Total profit/loss for determining stickers.
     :param check_last_sent_time: To check last sent time or not
     """
-    telegram_bot = TelegramBot(bot_token=bot_token, chat_id=chat_id)
+    # Use the shared singleton and async wrapper for all notifications
     if not check_last_sent_time:
-        telegram_bot.send_message(message)
+        send_telegram_async(message)
         return
     global last_sent_time, last_sticker_sent_time
     sticker_send_interval = 1800
@@ -1393,7 +1393,7 @@ def send_telegram_message(message, total_p_n_l=None, check_last_sent_time=True):
 
     # ✅ Send message only if telegram_message_interval has passed
     if time_since_last_message >= telegram_message_interval:
-        telegram_bot.send_message(message)
+        send_telegram_async(message)
         last_sent_time = current_time  # Update last message sent time
 
     # ✅ Send sticker separately every 120 seconds, but NOT with the first message

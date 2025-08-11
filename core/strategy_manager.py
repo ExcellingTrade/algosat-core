@@ -19,8 +19,10 @@ from algosat.strategies.option_buy import OptionBuyStrategy
 from algosat.strategies.swing_highlow_buy import SwingHighLowBuyStrategy
 from algosat.strategies.option_sell import OptionSellStrategy
 from algosat.strategies.swing_highlow_sell import SwingHighLowSellStrategy
+from algosat.utils.telegram_notify import telegram_bot, send_telegram_async
 
 logger = get_logger("strategy_manager")
+send_telegram_async("🚀 Strategy Manager initialized")
 
 # 🕐 CENTRALIZED MARKET HOURS UTILITY
 class MarketHours:
@@ -130,14 +132,17 @@ class RiskManager:
                     
                     # Check if current loss exceeds max_loss
                     if current_pnl < -abs(max_loss):
+
                         logger.critical(f"🚨 EMERGENCY STOP: Broker {broker_name} exceeded max loss! "
                                       f"Current P&L: {current_pnl}, Max Loss: {max_loss}")
+                        send_telegram_async(f"🛑🚨 <b>EMERGENCY STOP</b> 🛑🚨\n<b>Broker:</b> <code>{broker_name}</code>\n<b>Reason:</b> Max <b>LOSS</b> breached!\n<b>P&L:</b> <code>{current_pnl}</code> | <b>Max Loss:</b> <code>{max_loss}</code>")
                         return True
                     
                     # Check if current profit exceeds max_profit (optional - for profit booking)
                     if max_profit > 0 and current_pnl > max_profit:
                         logger.critical(f"🚨 EMERGENCY STOP: Broker {broker_name} exceeded max profit! "
                                       f"Current P&L: {current_pnl}, Max Profit: {max_profit}")
+                        send_telegram_async(f"🟢💰 <b>EMERGENCY STOP</b> 🟢💰\n<b>Broker:</b> <code>{broker_name}</code>\n<b>Reason:</b> Max <b>PROFIT</b> target hit!\n<b>P&L:</b> <code>{current_pnl}</code> | <b>Max Profit:</b> <code>{max_profit}</code>")
                         return True
                         
                 return False

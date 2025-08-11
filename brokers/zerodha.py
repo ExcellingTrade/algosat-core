@@ -20,6 +20,7 @@ from algosat.core.time_utils import get_ist_datetime
 import pandas as pd
 import datetime
 from algosat.core.order_request import OrderRequest, Side, OrderType
+from algosat.utils.telegram_notify import telegram_bot, send_telegram_async
 
 logger = get_logger("zerodha_wrapper")
 
@@ -49,6 +50,7 @@ class ZerodhaWrapper(BrokerInterface):
                 credentials = full_config.get("credentials")
             if not credentials or not isinstance(credentials, dict):
                 logger.error("No Zerodha credentials found in database or credentials are invalid")
+                send_telegram_async("❌🔐 <b>Zerodha Auth Failed</b>\nNo credentials found or invalid in DB.")
                 return False
 
             access_token = credentials.get("access_token")
@@ -67,6 +69,7 @@ class ZerodhaWrapper(BrokerInterface):
                     self.kite.set_access_token(access_token)
                     self.access_token = access_token
                     logger.debug("Reusing existing Zerodha access token.")
+                    send_telegram_async(f"✅🔐 <b>Zerodha Auth Success</b>\nReused access token for <b>{api_key}</b>.")
                     return True
                 except Exception as e:
                     logger.warning(f"Token reuse check failed: {e}, will generate new token")
@@ -103,12 +106,14 @@ class ZerodhaWrapper(BrokerInterface):
                         redirected_url = sb.get_current_url()
                 except Exception as e:
                     logger.error(f"Zerodha authentication failed in Selenium: {e}")
+                    send_telegram_async(f"❌🔐 <b>Zerodha Auth Failed</b>\nSelenium error: {e}")
                     return False
             # Parse out the request_token from the redirect URL
             parsed = urlparse(redirected_url)
             request_token = parse_qs(parsed.query).get("request_token", [None])[0]
             if not request_token:
                 logger.error("Failed to obtain request_token from login flow.")
+                send_telegram_async("❌🔐 <b>Zerodha Auth Failed</b>\nCould not obtain <b>request_token</b> from login flow.")
                 return False
             try:
                 data = kite.generate_session(request_token, api_secret=api_secret)
@@ -121,12 +126,15 @@ class ZerodhaWrapper(BrokerInterface):
                 self.kite.set_access_token(access_token)
                 self.access_token = access_token
                 logger.debug("Successfully authenticated and stored new Zerodha access token.")
+                send_telegram_async(f"✅🔐 <b>Zerodha Auth Success</b>\nNew access token stored for <b>{api_key}</b>.")
                 return True
             except Exception as e:
                 logger.error(f"Failed to generate Zerodha session: {e}")
+                send_telegram_async(f"❌🔐 <b>Zerodha Auth Failed</b>\nSession error: {e}")
                 return False
         except Exception as e:
             logger.error(f"Zerodha authentication failed: {e}", exc_info=True)
+            send_telegram_async(f"🚨🔐 <b>Zerodha Auth Exception</b>\n{e}")
             return False
         
     async def get_order_history(self, order_id) -> Dict[str, Any]:

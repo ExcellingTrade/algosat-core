@@ -1,4 +1,5 @@
 from __future__ import annotations
+from algosat.utils.telegram_notify import telegram_bot, send_telegram_async
 from typing import Optional, Any
 import asyncio
 import time
@@ -289,6 +290,11 @@ class OrderMonitor:
                         if current_time_only >= square_off_time:
                             logger.info(f"OrderMonitor: Square-off time {square_off_time_str} reached for non-DELIVERY order_id={self.order_id}. Exiting order.")
                             try:
+                                msg = f"⏰ <b>Square-off Exit Triggered</b>\n<b>Order ID:</b> <code>{self.order_id}</code>\n<b>Time:</b> <code>{square_off_time_str}</code>"
+                                send_telegram_async(msg)
+                            except Exception as e:
+                                logger.error(f"Failed to send Telegram square-off notification: {e}")
+                            try:
                                 # --- BO/CO/OCO robust exit handling ---
                                 order_type_val = (order_row.get('order_type') or '').upper()
                                 from algosat.common import constants
@@ -314,8 +320,8 @@ class OrderMonitor:
                 market_close_time = dt_time(15, 30)  # 3:30 PM
                 if current_time_only >= market_close_time:
                     logger.info(f"OrderMonitor: Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
-                    # self.stop()
-                    # return
+                    self.stop()
+                    return
             
             # Exit AWAITING_ENTRY orders at 15:25 (regardless of product type)
             awaiting_entry_exit_time = dt_time(15, 25)  # 3:25 PM
@@ -323,6 +329,11 @@ class OrderMonitor:
             if (current_time_only >= awaiting_entry_exit_time and 
                 current_status in ('AWAITING_ENTRY', OrderStatus.AWAITING_ENTRY)):
                 logger.info(f"OrderMonitor: 15:25 reached for AWAITING_ENTRY order_id={self.order_id}. Exiting order.")
+                try:
+                    msg = f"🚫 <b>AWAITING_ENTRY Cancelled</b>\n<b>Order ID:</b> <code>{self.order_id}</code>\n<b>Reason:</b> <code>15:25 reached, cancelling unfilled order</code>"
+                    send_telegram_async(msg)
+                except Exception as e:
+                    logger.error(f"Failed to send Telegram awaiting_entry cancel notification: {e}")
                 try:
                     await self.order_manager.exit_order(self.order_id, exit_reason="AWAITING_ENTRY order exit at 15:25")
                     # Update status to CANCELLED
@@ -340,6 +351,13 @@ class OrderMonitor:
             current_ltp = None
             current_status = order_row.get('status') if order_row and order_row.get('status') else last_main_status
             logger.debug(f"CurrentStatus: {current_status} for order_id={self.order_id}")
+            # --- Telegram notification for status transition to OPEN ---
+            try:
+                if current_status == 'OPEN' and last_main_status != 'OPEN':
+                    msg = f"🟢 <b>Order OPEN</b>\n<b>Order ID:</b> <code>{self.order_id}</code>"
+                    send_telegram_async(msg)
+            except Exception as e:
+                logger.error(f"Failed to send Telegram OPEN notification: {e}")
             
             # For OPEN orders, we'll extract LTP during position monitoring
             # This eliminates the need for separate get_ltp() calls
@@ -604,6 +622,11 @@ class OrderMonitor:
                 last_main_status = main_status
                 if main_status in (OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.FAILED):
                     logger.info(f"OrderMonitor: Order {self.order_id} reached terminal status {main_status}. Stopping monitor.")
+                    try:
+                        msg = f"❗ <b>Order Terminal Status</b>\n<b>Order ID:</b> <code>{self.order_id}</code>\n<b>Status:</b> <code>{main_status}</code>\nAll brokers reported this status. Stopping monitor."
+                        send_telegram_async(msg)
+                    except Exception as e:
+                        logger.error(f"Failed to send Telegram terminal status notification: {e}")
                     self.stop()
                     return
                 
@@ -1116,6 +1139,12 @@ class OrderMonitor:
             # Extract the final exit status by removing _PENDING suffix
             final_exit_status = order_status.replace('_PENDING', '')
             exit_reason = f"Signal monitor triggered: {final_exit_status}"
+            # --- Telegram notification for finalized exit ---
+            try:
+                msg = f"🔴 <b>Order Exited</b>\n<b>Order ID:</b> <code>{self.order_id}</code>\n<b>Reason:</b> <code>{final_exit_status}</code>"
+                send_telegram_async(msg)
+            except Exception as e:
+                logger.error(f"Failed to send Telegram exit notification: {e}")
             
             # Get all broker order details instead of positions for accurate execution data
             logger.info(f"OrderMonitor: 🔍 Fetching broker order details for exit calculation - order_id={self.order_id}")

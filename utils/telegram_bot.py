@@ -74,24 +74,24 @@ class TelegramBot:
             return
 
         try:
-            pass
-            # response = requests.post(
-            #     f"{self.base_url}/sendMessage",
-            #     json={
-            #         "chat_id": self.chat_id,
-            #         "text": message,
-            #         "parse_mode": "HTML",
-            #     },
-            #     timeout=10
-            # )
-            # response_data = response.json()
+            # pass
+            response = requests.post(
+                f"{self.base_url}/sendMessage",
+                json={
+                    "chat_id": self.chat_id,
+                    "text": message,
+                    "parse_mode": "HTML",
+                },
+                timeout=10
+            )
+            response_data = response.json()
 
-            # if response.status_code == 200 and response_data.get("ok"):
-            #     logger.info(f"Message sent successfully: {message}")
-            #     return response_data
-            # else:
-            #     logger.error(f"Failed to send message. Response: {response.text}")
-            #     return None
+            if response.status_code == 200 and response_data.get("ok"):
+                logger.info(f"Message sent successfully: {message}")
+                return response_data
+            else:
+                logger.error(f"Failed to send message. Response: {response.text}")
+                return None
         except requests.exceptions.RequestException as e:
             logger.error(f"Error sending Telegram message: {e}")
             return None
@@ -138,14 +138,16 @@ if __name__ == "__main__":
     # bot_token = ""
     # chat_id = ""
     #
-    # telegram_bot = TelegramBot(bot_token=bot_token, chat_id=193841661)
-    #
-    # # Fetch chat ID dynamically
-    # updates = telegram_bot.get_updates()
-    # # print(updates)
-    #
-    # # # Send a message if chat ID is found
-    # # if telegram_bot.chat_id:
-    # #     telegram_bot.send_message("Hi Suresh! Your bot is working. 🚀")
-    # # else:
-    # #     logger.error("Could not send message. No chat ID found.")
+    bot_token = "7625027938:AAFh5gQFcRdNzbIBvVfqEMj54FlzE67aYE4"
+    # chat_id = "7715212804"
+    telegram_bot = TelegramBot(bot_token=bot_token, chat_id=193841661)
+    
+    # Fetch chat ID dynamically
+    updates = telegram_bot.get_updates()
+    # print(updates)
+    
+    # # Send a message if chat ID is found
+    if telegram_bot.chat_id:
+        telegram_bot.send_message("Hi Suresh! Your bot is working. 🚀")
+    else:
+        logger.error("Could not send message. No chat ID found.")

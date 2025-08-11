@@ -52,6 +52,7 @@ import pandas as pd
 from algosat.common import constants
 from algosat.core.order_request import OrderRequest, OrderResponse, OrderStatus
 from typing import Any, Optional, Dict, List, Union
+from algosat.utils.telegram_notify import telegram_bot, send_telegram_async
 
 # === Broker-specific API code mapping ===
 # These mappings translate generic enums to Fyers API codes. Do not move these to order_defaults.py.
@@ -268,6 +269,7 @@ class FyersWrapper(BrokerInterface):
                 credentials = full_config.get("credentials")
             if not credentials or not isinstance(credentials, dict):
                 logger.error("No Fyers credentials found in database or credentials are invalid")
+                send_telegram_async("❌🔐 <b>Fyers Auth Failed</b>\nNo credentials found or invalid in DB.")
                 return False
             fyers_creds = credentials
             access_token = fyers_creds.get("access_token")
@@ -307,6 +309,7 @@ class FyersWrapper(BrokerInterface):
             auth_code = self.authenticate(auth_url, mobile_number, password_2fa, totp_secret)
             if not auth_code:
                 logger.error("Failed to obtain auth_code from Fyers authentication flow.")
+                send_telegram_async("❌🔐 <b>Fyers Auth Failed</b>\nCould not obtain <b>auth_code</b> from authentication flow.")
                 return False
             # Step 2: Exchange auth_code for access_token
             session.set_token(auth_code)
@@ -328,9 +331,11 @@ class FyersWrapper(BrokerInterface):
                 log_path=constants.FYER_LOG_DIR
             )
             logger.debug("Successfully authenticated and stored new Fyers access token.")
+            send_telegram_async(f"✅🔐 <b>Fyers Auth Success</b>\nNew access token stored for <b>{api_key}</b>.")
             return True
         except Exception as e:
             logger.error(f"Fyers authentication failed: {e}", exc_info=True)
+            send_telegram_async(f"🚨🔐 <b>Fyers Auth Failed</b>\n{e}")
             return False
 
     async def setup_auth(self, is_async=True):

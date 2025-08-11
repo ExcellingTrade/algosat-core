@@ -20,6 +20,7 @@ from datetime import datetime
 from algosat.core.time_utils import to_ist
 import pytz
 from enum import Enum
+from algosat.utils.telegram_notify import telegram_bot, send_telegram_async
 
 logger = get_logger("OrderManager")
 
@@ -164,9 +165,26 @@ class OrderManager:
             for broker_name, response in broker_responses.items():
                 raw_action = getattr(order_payload, 'side', None) or response.get('side', None) or 'BUY'
                 action = self.normalize_action_field(raw_action)
-                logger.debug(f"OrderManager: Action normalization in place_order - raw_action='{raw_action}' -> action='{action}'")
+                # logger.debug(f"OrderManager: Action normalization in place_order - raw_action='{raw_action}' -> action='{action}'")
                 await self._insert_broker_execution(session, order_id, broker_name, response, side=ExecutionSide.ENTRY.value, action=action)
             await session.commit()
+        # Telegram notification for order placed
+        try:
+            msg_lines = [
+                f"🟢 <b>Order Placed</b>",
+                f"<b>Order ID:</b> <code>{order_id}</code>",
+                f"<b>Symbol:</b> <code>{order_payload.symbol}</code>",
+                f"<b>Qty:</b> <code>{order_payload.quantity}</code>",
+                f"<b>Side:</b> <code>{getattr(order_payload, 'side', 'N/A')}</code>",
+            ]
+            for broker_name, resp in broker_responses.items():
+                status = resp.get('status', 'N/A')
+                broker_order_id = resp.get('order_id', resp.get('broker_order_id', 'N/A'))
+                traded_price = resp.get('traded_price', resp.get('average_price', 'N/A'))
+                msg_lines.append(f"<b>{broker_name}:</b> <code>{status}</code> | <b>ID:</b> <code>{broker_order_id}</code> | <b>Price:</b> <code>{traded_price}</code>")
+            send_telegram_async("\n".join(msg_lines))
+        except Exception as e:
+            logger.error(f"Failed to send Telegram order notification: {e}")
         # Return enhanced response with traded_price
         return {
             "order_id": order_id,
@@ -1299,30 +1317,7 @@ class OrderManager:
             logical_symbol = order_row.get('strike_symbol') # or order_row.get('symbol') if order_row else None
             order_side = order_row.get('side') if order_row else None
             
-            # # If LTP is not provided, fetch it from the market
-            # if ltp is None and logical_symbol:
-            #     try:
-            #         from algosat.core.data_manager import DataManager
-            #         data_manager = DataManager(broker_manager=self.broker_manager)
-            #         await data_manager.ensure_broker()
-                    
-            #         ltp_response = await data_manager.get_ltp(logical_symbol)
-            #         if isinstance(ltp_response, dict):
-            #             ltp = ltp_response.get(logical_symbol)
-            #         else:
-            #             ltp = ltp_response
-                    
-            #         if ltp is not None:
-            #             logger.info(f"OrderManager: Fetched LTP for symbol {logical_symbol}: {ltp}")
-            #         else:
-            #             logger.warning(f"OrderManager: Could not fetch LTP for symbol {logical_symbol}")
-            #             ltp = 0.0
-            #     except Exception as e:
-            #         logger.error(f"OrderManager: Error fetching LTP for symbol {logical_symbol}: {e}")
-            #         ltp = 0.0
-            # elif ltp is None:
-            #     logger.warning(f"OrderManager: No LTP provided and no symbol available for order {parent_order_id}")
-            #     ltp = 0.0
+
             
             if not broker_execs:
                 logger.warning(f"OrderManager: No broker executions found for parent_order_id={parent_order_id} in exit_order.")
