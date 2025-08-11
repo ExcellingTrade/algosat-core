@@ -1310,7 +1310,9 @@ class OrderManager:
             ltp: If provided, use as exit price. If not provided, will fetch current LTP from the market
             check_live_status: If True, check live broker status via order_cache and update DB before proceeding
         """
+
         from algosat.core.db import AsyncSessionLocal, get_broker_executions_for_order, get_order_by_id
+        from algosat.common.constants import TRADE_STATUS_EXIT_MANUAL_PENDING
         async with AsyncSessionLocal() as session:
             broker_execs = await get_broker_executions_for_order(session, parent_order_id)
             order_row = await get_order_by_id(session, parent_order_id)
@@ -1369,7 +1371,6 @@ class OrderManager:
                 if broker_id is None or broker_order_id is None:
                     logger.error(f"OrderManager: Missing broker_id or broker_order_id in broker_execution for parent_order_id={parent_order_id}")
                     continue
-                    
                 # Get broker name for live status checking
                 broker_name = None
                 if check_live_status:
@@ -1757,6 +1758,13 @@ class OrderManager:
                     logger.error(f"OrderManager: Error exiting/cancelling order for broker_id={broker_id}, broker_order_id={cache_lookup_order_id}, broker_exec_id={broker_exec_id}: {e}")
             
             logger.info(f"OrderManager: Completed exit_order processing for parent_order_id={parent_order_id}. Processed {len(broker_execs)} broker executions.")
+            # After all exits, if exit_reason is manual, update order status to EXIT_MANUAL_PENDING
+            if exit_reason and exit_reason.lower() == 'manual':
+                logger.info(f"OrderManager: Setting order {parent_order_id} status to EXIT_MANUAL_PENDING after manual exit.")
+                await self.update_order_status_in_db(parent_order_id, TRADE_STATUS_EXIT_MANUAL_PENDING)
+                # send_telegram_async(
+                #     f"OrderManager: Order {parent_order_id} marked as EXIT_MANUAL_PENDING after manual exit request."
+                # )
             await session.commit()
             # # and set exit_price and exit_time
             # try:

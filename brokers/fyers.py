@@ -292,6 +292,7 @@ class FyersWrapper(BrokerInterface):
                         log_path=constants.FYER_LOG_DIR
                     )
                     logger.debug("Reusing existing Fyers access token (generated today after 6AM or before 6AM and still before 6AM)")
+                    send_telegram_async(f"✅🔐 <b>Fyers Auth Success</b>\nReused access token for <b>{api_key}</b>.")
                     return True
                 except Exception as e:
                     logger.warning(f"Token reuse check failed: {e}, will generate new token")
