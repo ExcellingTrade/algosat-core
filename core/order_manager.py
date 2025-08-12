@@ -235,14 +235,17 @@ class OrderManager:
                 return None
             while qty_left > 0:
                 qty = min(qty_left, max_nse_qty)
-                trigger_price = (current_price - trigger_price_diff) if order_payload.side == Side.BUY else (current_price + trigger_price_diff)
+                # Only calculate trigger_price for non-MARKET orders and when current_price > 0
+                if current_price > 0 and order_payload.order_type != OrderType.MARKET:
+                    trigger_price = (current_price - trigger_price_diff) if order_payload.side == Side.BUY else (current_price + trigger_price_diff)
+                else:
+                    trigger_price = None  # MARKET orders or zero-price orders should not have trigger_price
                 slice_payload = self.create_slice_payload(order_payload, qty, current_price, trigger_price, order_payload.side)
                 broker_responses = await self.broker_manager.place_order(slice_payload, strategy_name=strategy_name, check_margin=check_margin)
                 for broker_name, response in broker_responses.items():
                     # Insert a broker_executions row for this split order
                     raw_action = getattr(order_payload, 'side', None) or response.get('side', None) or 'BUY'
                     action = self.normalize_action_field(raw_action)
-                    logger.debug(f"OrderManager: Action normalization in split_and_place_order - raw_action='{raw_action}' -> action='{action}'")
                     try:
                         await self._insert_broker_execution(
                             session,
