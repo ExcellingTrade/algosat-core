@@ -662,7 +662,10 @@ class BrokerManager:
             extra['trigger_price_diff'] = trigger_price_diff if 'trigger_price_diff' in config.trade else 0.0
         if 'target_price' in extra:
             try:
-                extra['takeProfit'] = round(abs(extra['entry_price'] - extra['target_price']),2)
+                # Debug the actual values being used in takeProfit calculation
+                takeProfit_calc = round(abs(extra['entry_price'] - extra['target_price']),2)
+                logger.debug(f"takeProfit calculation: entry_price={extra['entry_price']}, target_price={extra['target_price']}, takeProfit={takeProfit_calc}")
+                extra['takeProfit'] = takeProfit_calc
                 extra['target_price'] = round(extra['target_price'] / 0.05) * 0.05
             except Exception as e:
                 logger.warning(f"Could not compute takeProfit/target_price: {e}")
@@ -850,6 +853,10 @@ class BrokerManager:
             logger.error(f"BrokerManager: No broker_name found for broker_id={broker_id}")
             return None
         
+        # Set default variety for Zerodha if not provided
+        if broker_name.lower() == "zerodha" and variety is None:
+            variety = "regular"
+        
         # Create retry config with rate limiting
         retry_config = get_retry_config("order_critical")
         retry_config.rate_limit_broker = broker_name
@@ -858,6 +865,11 @@ class BrokerManager:
         retry_config.initial_delay = delay
         
         async def _cancel_order():
-            return await broker.cancel_order(broker_order_id, symbol=symbol, product_type=product_type, variety=variety, cancel_reason=cancel_reason, **kwargs)
+            # Only pass variety parameter for brokers that support it
+            if broker_name.lower() == "zerodha":
+                return await broker.cancel_order(broker_order_id, symbol=symbol, product_type=product_type, variety=variety, cancel_reason=cancel_reason, **kwargs)
+            else:
+                # For other brokers (like Fyers), don't pass variety parameter
+                return await broker.cancel_order(broker_order_id, symbol=symbol, product_type=product_type, cancel_reason=cancel_reason, **kwargs)
         
         return await async_retry_with_rate_limit(_cancel_order, config=retry_config)

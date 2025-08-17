@@ -101,10 +101,20 @@ async def run_strategy_config(strategy_instance, order_queue):
                 logger.info(f"Processed cycle for strategy '{strategy_name}' with order result: {order_result}")
                 # Only push to queue if order was placed successfully
                 if order_result and isinstance(order_result, dict) and order_result.get("order_id"):
+                    # Queue the main order for monitoring
                     await order_queue.put({
                         "order_id": order_result["order_id"],
                         "strategy": strategy
                     })
+                    
+                    # Also queue hedge order if present
+                    hedge_order_id = order_result.get("hedge_order_id")
+                    if hedge_order_id:
+                        logger.info(f"Queueing hedge order {hedge_order_id} for monitoring")
+                        await order_queue.put({
+                            "order_id": hedge_order_id,
+                            "strategy": strategy
+                        })
             except Exception as e:
                 logger.error(f"Error in process_cycle for '{strategy_name}': {e}", exc_info=True)
             

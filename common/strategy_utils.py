@@ -718,14 +718,17 @@ def detect_regime(
     fh = regime_ref["first_candle_high"]
     fl = regime_ref["first_candle_low"]
 
-    
+    logger.debug(f"Detecting regime for entry_price={entry_price}, option_type={option_type}, strategy={strategy}")
+    logger.debug(f"Reference points: prev_day_high={ph}, prev_day_low={pl}, first_candle_high={fh}, first_candle_low={fl}")
+
+    # Validate inputs
     # BUY strategies
     if strategy.upper() == "BUY":
         if option_type.upper() == "CE":
             # CE BUY in uptrend
             if entry_price > ph and entry_price > fh:
                 return "Uptrend"
-            elif entry_price > fh:
+            elif entry_price < fh:
                 return "Sideways"
             else:
                 return "NoTrade"
@@ -733,7 +736,7 @@ def detect_regime(
             # PE BUY in downtrend
             if entry_price < pl and entry_price < fl:
                 return "Downtrend"
-            elif entry_price < fl:
+            elif entry_price > fl:
                 return "Sideways"
             else:
                 return "NoTrade"
@@ -744,7 +747,7 @@ def detect_regime(
             # PE SELL in uptrend
             if entry_price > ph and entry_price > fh:
                 return "Uptrend"
-            elif entry_price > fh:
+            elif entry_price < fh:
                 return "Sideways"
             else:
                 return "NoTrade"
@@ -752,7 +755,7 @@ def detect_regime(
             # CE SELL in downtrend
             if entry_price < pl and entry_price < fl:
                 return "Downtrend"
-            elif entry_price < fl:
+            elif entry_price > fl:
                 return "Sideways"
             else:
                 return "NoTrade"

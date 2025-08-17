@@ -349,13 +349,13 @@ class OrderManager:
                         check_live_status=check_live_status
                     )
                     
-                    # Update child order status to ENTRY_CANCELLED since it's being closed due to parent order failure
+                    # Update child order status to EXIT_CLOSED since it's being closed due to parent order exit
                     try:
-                        from algosat.common.constants import TRADE_STATUS_ENTRY_CANCELLED
-                        await self.update_order_status_in_db(child_order_id, TRADE_STATUS_ENTRY_CANCELLED)
-                        logger.info(f"OrderManager: Updated child order {child_order_id} status to ENTRY_CANCELLED due to parent order {parent_order_id} exit")
+                        from algosat.common.constants import TRADE_STATUS_EXIT_CLOSED
+                        await self.update_order_status_in_db(child_order_id, TRADE_STATUS_EXIT_CLOSED)
+                        logger.info(f"OrderManager: Updated child order {child_order_id} status to EXIT_CLOSED due to parent order {parent_order_id} exit")
                     except Exception as status_e:
-                        logger.error(f"OrderManager: Failed to update child order {child_order_id} status to ENTRY_CANCELLED: {status_e}")
+                        logger.error(f"OrderManager: Failed to update child order {child_order_id} status to EXIT_CLOSED: {status_e}")
                     
                     logger.info(f"OrderManager: Successfully initiated exit for child order {child_order_id}")
                     

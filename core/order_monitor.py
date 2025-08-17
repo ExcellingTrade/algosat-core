@@ -39,6 +39,8 @@ class OrderMonitor:
         self.strategy_id: int = strategy_id  # Store strategy_id if provided
         self.price_order_monitor_seconds: float = price_order_monitor_seconds
         self.signal_monitor_seconds: int = signal_monitor_seconds
+        self.is_hedge: bool = False  # Will be set to True if this order has a parent_order_id
+        self._hedge_detection_done: bool = False  # Flag to ensure hedge detection happens only once
                 # --- Add position cache fields ---
         self._positions_cache = None
         self._positions_cache_time = None
@@ -157,6 +159,16 @@ class OrderMonitor:
         """
         # Check cache first
         if order_id in self._order_strategy_cache:
+            # If cache hit, we still need to ensure hedge detection has been done
+            cached_order = self._order_strategy_cache[order_id][0]
+            if cached_order and not hasattr(self, '_hedge_detection_done'):
+                parent_order_id = cached_order.get('parent_order_id')
+                if parent_order_id:
+                    self.is_hedge = True
+                    logger.info(f"🔍 OrderMonitor: Detected hedge order {order_id} with parent {parent_order_id} (from cache)")
+                else:
+                    self.is_hedge = False
+                self._hedge_detection_done = True
             return self._order_strategy_cache[order_id]
         # Lazy-load session if not present
         from algosat.core.db import AsyncSessionLocal, get_order_by_id, get_strategy_symbol_by_id, get_strategy_by_id, get_strategy_config_by_id
@@ -168,6 +180,16 @@ class OrderMonitor:
                 self._order_strategy_cache[order_id] = (None, None, None, None)
                 self.stop()
                 return None, None, None, None
+                
+            # Check if this is a hedge order (has parent_order_id)
+            parent_order_id = order.get('parent_order_id')
+            if parent_order_id:
+                self.is_hedge = True
+                logger.info(f"🔍 OrderMonitor: Detected hedge order {order_id} with parent {parent_order_id}")
+            else:
+                self.is_hedge = False
+            self._hedge_detection_done = True
+                
             strategy_symbol_id = order.get('strategy_symbol_id')
             if not strategy_symbol_id:
                 logger.error(f"OrderMonitor: No strategy_symbol_id for order_id={order_id}")
@@ -243,6 +265,7 @@ class OrderMonitor:
                 logger.info(f"OrderMonitor: Stopping monitor for order_id={self.order_id} as order_row is None (order deleted).")
                 self.stop()
                 return
+                
             # Initialize last_broker_statuses from agg.broker_orders if empty (first run or after restart)
             if not last_broker_statuses:
                 current_entry_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
@@ -337,10 +360,7 @@ class OrderMonitor:
                     logger.error(f"OrderMonitor: Failed to exit AWAITING_ENTRY order {self.order_id} at 15:25: {e}")
                     return
 
-            # --- Position-based monitoring and LTP extraction for OPEN orders ---
-            # Collect aggregated LTP from all broker positions for price-based exit checks
-            aggregated_ltp = {}  # symbol -> latest_ltp
-            current_ltp = None
+            # --- Position monitoring for PnL calculation and position status ---
             current_status = order_row.get('status') if order_row and order_row.get('status') else last_main_status
             logger.debug(f"CurrentStatus: {current_status} for order_id={self.order_id}")
             # --- Telegram notification for status transition to OPEN ---
@@ -350,9 +370,6 @@ class OrderMonitor:
                     send_telegram_async(msg)
             except Exception as e:
                 logger.error(f"Failed to send Telegram OPEN notification: {e}")
-            
-            # For OPEN orders, we'll extract LTP during position monitoring
-            # This eliminates the need for separate get_ltp() calls
 
             # --- Use live broker order data from order_cache for ENTRY side ---
             entry_broker_db_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
@@ -666,18 +683,20 @@ class OrderMonitor:
             except Exception as e:
                 logger.error(f"OrderMonitor: Error refreshing order_row before position monitoring: {e}")
                 
-            # --- Price-based exit logic for OptionBuy and OptionSell strategies ---
+            # --- Combined OPEN order processing: Price-based exit logic + Position monitoring ---
             # Use actual database status as source of truth, not derived broker status
             actual_order_status = order_row.get('status') if order_row else None
             if actual_order_status == 'OPEN':
-                # Pass aggregated LTP from position monitoring instead of individual LTP
-                strike_symbol = order_row.get('strike_symbol') if order_row else None
-                position_ltp = aggregated_ltp.get(strike_symbol) if strike_symbol and aggregated_ltp else None
-                await self._check_price_based_exit(order_row, strategy, actual_order_status, position_ltp)
+                # Fetch current LTP once for both exit logic and position monitoring
+                current_ltp = await self._update_current_price_for_open_order(order_row)
                 
-            # --- monitor positions if status is OPEN ---
-            # Use actual database status to determine if position monitoring should run
-            if actual_order_status == 'OPEN':
+                # Price-based exit logic for OptionBuy and OptionSell strategies (skip for hedge orders)
+                if not self.is_hedge:
+                    await self._check_price_based_exit(order_row, strategy, actual_order_status, current_ltp)
+                else:
+                    logger.debug(f"OrderMonitor: Skipping price-based exit check for hedge order {self.order_id}")
+                
+                # Position monitoring logic
                 try:
                     # Use new helper to get all broker positions (with cache)
                     all_positions = await self._get_all_broker_positions_with_cache()
@@ -690,6 +709,14 @@ class OrderMonitor:
                     async with AsyncSessionLocal() as session:
                     # entry_broker_db_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
                         entry_broker_db_orders = await get_broker_executions_for_order(session, self.order_id, side='ENTRY') 
+                    
+                    # Use the LTP already fetched above for PnL calculations
+                    if current_ltp is None or current_ltp <= 0:
+                        logger.warning(f"OrderMonitor: Invalid LTP ({current_ltp}) for order_id={self.order_id}, setting to 0 for PnL calculation")
+                        current_ltp = 0.0
+                    else:
+                        logger.debug(f"OrderMonitor: Using fetched LTP={current_ltp} for PnL calculation for order_id={self.order_id}")
+                    
                     total_pnl = 0.0
                     all_closed = True
                     for bro in entry_broker_db_orders:
@@ -820,22 +847,6 @@ class OrderMonitor:
                         if matched_pos:
                             logger.info(f"OrderMonitor: Processing matched position for broker={broker_name}: {matched_pos}")
                             
-                            # Extract current market price from position data using helper method
-                            current_ltp = self._extract_ltp_from_position(matched_pos, broker_name)
-                            logger.info(f"OrderMonitor: Extracted LTP={current_ltp} from {broker_name} position data")
-                            
-                            # Store LTP for price-based exit checks (symbol -> ltp mapping)
-                            if current_ltp > 0 and symbol_val:
-                                aggregated_ltp[symbol_val] = current_ltp
-                                logger.debug(f"OrderMonitor: Added {symbol_val}={current_ltp} to aggregated_ltp")
-                                
-                                # Update current_price in orders table for UI display
-                                try:
-                                    await self._update_current_price_in_db(symbol_val, current_ltp)
-                                    logger.debug(f"OrderMonitor: Updated current_price={current_ltp} in orders table for symbol={symbol_val}, order_id={self.order_id}")
-                                except Exception as e:
-                                    logger.error(f"OrderMonitor: Error updating current_price in orders table: {e}")
-                            
                             # Extract current position quantity using helper method
                             broker_current_qty = self._extract_current_quantity_from_position(matched_pos, broker_name)
                             logger.info(f"OrderMonitor: Extracted current_qty={broker_current_qty} from {broker_name} position data")
@@ -844,6 +855,7 @@ class OrderMonitor:
                             closed = (broker_current_qty == 0)
                             
                             # Calculate order-specific PnL using our entry data + current market price
+                            # Use the LTP fetched outside the loop for better performance
                             our_qty = int(executed_quantity or 0)  # Use actual executed quantity for this broker
                             entry_price = float(bro.get('execution_price', 0))
                             entry_side = bro.get('action', '').upper()
@@ -860,7 +872,7 @@ class OrderMonitor:
                                     logger.warning(f"OrderMonitor: Unknown entry side '{entry_side}' for PnL calculation")
                                     order_specific_pnl = 0.0
                                 
-                                logger.info(f"OrderMonitor: Order-specific PnL calculation for {broker_name}:")
+                                logger.info(f"OrderMonitor: Order-specific PnL calculation for {broker_name} (using reused/fetched LTP):")
                                 logger.info(f"  Entry Side: {entry_side}")
                                 logger.info(f"  Entry Price: {entry_price}")
                                 logger.info(f"  Current LTP: {current_ltp}")
@@ -883,12 +895,6 @@ class OrderMonitor:
                             logger.warning(f"OrderMonitor: No matching position found for broker={broker_name}, symbol={symbol_val}, qty={qty}, product={product}")
                             all_closed = False
                     
-                    # Log aggregated LTP summary for debugging and UI verification
-                    if aggregated_ltp:
-                        logger.info(f"OrderMonitor: Aggregated LTP data for UI update: {aggregated_ltp}")
-                    else:
-                        logger.warning(f"OrderMonitor: No LTP data collected from positions for order_id={self.order_id}")
-                    
                     # Update order PnL field in DB
                     try:
                         logger.info(f"OrderMonitor: About to update PnL for order_id={self.order_id} with value={total_pnl}")
@@ -904,7 +910,13 @@ class OrderMonitor:
                     except Exception as e:
                         logger.error(f"OrderMonitor: Error updating order PnL for order_id={self.order_id}: {e}")
                     
-                    # 🚨 PER-TRADE LOSS VALIDATION 🚨
+                    # � UPDATE BROKER EXECUTIONS PNL: Update P&L for all ENTRY broker executions using current LTP
+                    try:
+                        await self._update_broker_executions_pnl(current_ltp, entry_broker_db_orders)
+                    except Exception as e:
+                        logger.error(f"OrderMonitor: Error updating broker executions P&L for order_id={self.order_id}: {e}")
+                    
+                    # �🚨 PER-TRADE LOSS VALIDATION 🚨
                     try:
                         # 1. Get trade enabled brokers count from risk summary and current order data
                         from algosat.core.db import get_broker_risk_summary
@@ -936,7 +948,7 @@ class OrderMonitor:
                                           f"(lot_qty: {lot_qty} × brokers: {trade_enabled_brokers} × max_loss_per_lot: {max_loss_per_lot})")
                             
                             # 6. Exit the order immediately
-                            await self.order_manager.exit_order(self.order_id, reason="Per-trade loss limit exceeded")
+                            await self.order_manager.exit_order(self.order_id, exit_reason="Per-trade loss limit exceeded")
                             # Update status to max loss exit PENDING - let check_and_complete_pending_exits handle completion
                             from algosat.common import constants
                             await self.order_manager.update_order_status_in_db(self.order_id, f"{constants.TRADE_STATUS_EXIT_MAX_LOSS}_PENDING")
@@ -1033,14 +1045,25 @@ class OrderMonitor:
                 logger.info(f"OrderMonitor: No target_price or stop_loss set for order_id={self.order_id} - skipping price check")
                 return
                 
-            # Use position-based LTP (passed from position monitoring)
+            # Use direct LTP API call instead of position-based LTP
             ltp = None
             if current_ltp is not None:
                 ltp = float(current_ltp)
-                logger.info(f"OrderMonitor: Using position-based LTP for price check: order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}")
+                logger.info(f"OrderMonitor: Using passed LTP for price check: order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}")
             else:
-                logger.warning(f"OrderMonitor: No position-based LTP available for price check, order_id={self.order_id}, symbol={strike_symbol}")
-                return
+                # Fallback: fetch LTP directly using data_manager.get_ltp()
+                try:
+                    logger.info(f"OrderMonitor: Fetching LTP directly for symbol={strike_symbol}, order_id={self.order_id}")
+                    ltp_data = await self.data_manager.get_ltp(strike_symbol)
+                    if ltp_data and isinstance(ltp_data, dict):
+                        ltp = float(ltp_data.get('ltp', 0))
+                        logger.info(f"OrderMonitor: Successfully fetched direct LTP for price check: order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}")
+                    else:
+                        logger.warning(f"OrderMonitor: Invalid LTP data for symbol={strike_symbol}, order_id={self.order_id}: {ltp_data}")
+                        return
+                except Exception as e:
+                    logger.error(f"OrderMonitor: Error fetching direct LTP for symbol={strike_symbol}, order_id={self.order_id}: {e}")
+                    return
                     
             logger.info(f"OrderMonitor: 🔍 PRICE CHECK - order_id={self.order_id}, symbol={strike_symbol}, LTP={ltp}, target={target_price}, SL={stop_loss}, side={side}")
             
@@ -1981,39 +2004,136 @@ class OrderMonitor:
         except Exception as e:
             logger.error(f"OrderMonitor: Error updating current_price for order_id={self.order_id}, symbol={strike_symbol}: {e}")
 
-    def _extract_ltp_from_position(self, position_data, broker_name):
+    async def _update_current_price_for_open_order(self, order_row):
         """
-        Extract LTP/last_price from position data based on broker type.
-        Centralized method for broker-specific field mapping.
+        Fetch LTP directly for an open order and update the current_price in the database.
         
         Args:
-            position_data: Position data dictionary from broker
-            broker_name: Name of the broker (zerodha, fyers, etc.)
+            order_row: Order data from database
             
         Returns:
-            float: Current LTP price, 0.0 if not available
+            float: Current LTP if successfully fetched, None otherwise
         """
         try:
-            if not position_data or not broker_name:
-                return 0.0
+            if not order_row:
+                return None
                 
-            broker_name_lower = broker_name.lower()
+            strike_symbol = order_row.get('strike_symbol')
+            if not strike_symbol:
+                logger.warning(f"OrderMonitor: No strike_symbol found for order_id={self.order_id}")
+                return None
+                
+            # Fetch LTP directly using data_manager.get_ltp()
+            logger.info(f"OrderMonitor: Fetching current LTP for order_id={self.order_id}, symbol={strike_symbol}")
+            ltp_data = await self.data_manager.get_ltp(strike_symbol)
             
-            if broker_name_lower == "zerodha":
-                # Zerodha uses 'last_price' field
-                ltp = position_data.get('last_price', 0)
-            elif broker_name_lower == "fyers":
-                # Fyers uses 'ltp' field
-                ltp = position_data.get('ltp', 0)
+            if ltp_data and isinstance(ltp_data, dict):
+                # Handle different LTP response formats
+                current_ltp = 0.0
+                if 'ltp' in ltp_data:
+                    # Format: {'ltp': 49.45}
+                    current_ltp = float(ltp_data.get('ltp', 0))
+                elif strike_symbol in ltp_data:
+                    # Format: {'NSE:SYMBOL': 49.45}
+                    current_ltp = float(ltp_data.get(strike_symbol, 0))
+                else:
+                    # Try to get first value if it's a single-item dict
+                    values = list(ltp_data.values())
+                    if values and len(values) == 1:
+                        current_ltp = float(values[0])
+                
+                logger.debug(f"OrderMonitor: Extracted current_ltp={current_ltp} from ltp_data={ltp_data}")
+                
+                if current_ltp > 0:
+                    # Update current_price in database
+                    await self._update_current_price_in_db(strike_symbol, current_ltp)
+                    logger.info(f"OrderMonitor: Successfully updated current_price={current_ltp} for order_id={self.order_id}, symbol={strike_symbol}")
+                    return current_ltp
+                else:
+                    logger.warning(f"OrderMonitor: Invalid LTP value ({current_ltp}) for order_id={self.order_id}, symbol={strike_symbol}")
+                    return None
             else:
-                # Fallback: try common field names
-                ltp = position_data.get('ltp', 0) or position_data.get('last_price', 0) or position_data.get('current_price', 0)
+                logger.warning(f"OrderMonitor: Invalid LTP data for order_id={self.order_id}, symbol={strike_symbol}: {ltp_data}")
+                return None
                 
-            return float(ltp) if ltp else 0.0
-            
         except Exception as e:
-            logger.error(f"OrderMonitor: Error extracting LTP from position data for broker={broker_name}: {e}")
-            return 0.0
+            logger.error(f"OrderMonitor: Error fetching/updating current price for order_id={self.order_id}: {e}")
+            return None
+
+    async def _update_broker_executions_pnl(self, current_ltp: float, entry_broker_db_orders: list):
+        """
+        Update P&L field for all ENTRY broker executions using current LTP.
+        This provides real-time P&L data for StrategyManager to consume.
+        
+        Args:
+            current_ltp: Current market price (LTP) for the symbol
+            entry_broker_db_orders: List of ENTRY broker execution records from database
+        """
+        try:
+            if not current_ltp or current_ltp <= 0:
+                logger.debug(f"OrderMonitor: Invalid LTP ({current_ltp}) for broker executions P&L update")
+                return
+                
+            if not entry_broker_db_orders:
+                logger.debug(f"OrderMonitor: No ENTRY broker executions found for P&L update")
+                return
+            
+            logger.info(f"OrderMonitor: Updating P&L for {len(entry_broker_db_orders)} broker executions using LTP={current_ltp}")
+            
+            from algosat.core.db import AsyncSessionLocal, update_rows_in_table
+            from algosat.core.dbschema import broker_executions
+            
+            async with AsyncSessionLocal() as session:
+                update_count = 0
+                
+                for bro in entry_broker_db_orders:
+                    try:
+                        # Extract execution details
+                        broker_exec_id = bro.get('id')
+                        executed_quantity = int(bro.get('executed_quantity', 0))
+                        execution_price = float(bro.get('execution_price', 0))
+                        entry_side = bro.get('action', '').upper()
+                        
+                        if not all([broker_exec_id, executed_quantity > 0, execution_price > 0]):
+                            logger.warning(f"OrderMonitor: Skipping P&L update for broker_exec_id={broker_exec_id} - invalid data")
+                            continue
+                        
+                        # Calculate P&L: (current_price - entry_price) * quantity for BUY
+                        #                (entry_price - current_price) * quantity for SELL
+                        if entry_side == 'BUY':
+                            # Long position: profit when current_price > entry_price
+                            calculated_pnl = (current_ltp - execution_price) * executed_quantity
+                        elif entry_side == 'SELL':
+                            # Short position: profit when current_price < entry_price
+                            calculated_pnl = (execution_price - current_ltp) * executed_quantity
+                        else:
+                            logger.warning(f"OrderMonitor: Unknown entry side '{entry_side}' for P&L calculation")
+                            calculated_pnl = 0.0
+                        
+                        # Round to 4 decimal places (matching database precision)
+                        calculated_pnl = round(calculated_pnl, 4)
+                        
+                        # Update broker_executions.pnl field
+                        await update_rows_in_table(
+                            target_table=broker_executions,
+                            condition=broker_executions.c.id == broker_exec_id,
+                            new_values={'pnl': calculated_pnl}
+                        )
+                        
+                        update_count += 1
+                        logger.debug(f"OrderMonitor: Updated P&L for broker_exec_id={broker_exec_id}: "
+                                   f"side={entry_side}, entry_price={execution_price}, ltp={current_ltp}, "
+                                   f"qty={executed_quantity}, pnl={calculated_pnl}")
+                        
+                    except Exception as e:
+                        logger.error(f"OrderMonitor: Error updating P&L for broker_exec_id={bro.get('id')}: {e}")
+                        continue
+                
+                await session.commit()
+                logger.info(f"OrderMonitor: Successfully updated P&L for {update_count}/{len(entry_broker_db_orders)} broker executions")
+                
+        except Exception as e:
+            logger.error(f"OrderMonitor: Error in _update_broker_executions_pnl: {e}")
 
     def _extract_current_quantity_from_position(self, position_data, broker_name):
         """
@@ -2317,8 +2437,13 @@ class OrderMonitor:
                     logger.info(f"OrderMonitor: Using fallback signal_monitor_seconds (300) for order_id={self.order_id}")
                     self.signal_monitor_seconds = 5 * 60
             logger.info(f"Starting monitors for order_id={self.order_id} (price: {self.price_order_monitor_seconds}s, signal: {self.signal_monitor_seconds}s)")
-            await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
-            # await asyncio.gather( self._signal_monitor())
+            
+            # For hedge orders, only run price monitor (skip signal monitor)
+            if self.is_hedge:
+                logger.info(f"OrderMonitor: Running only price monitor for hedge order {self.order_id}")
+                await self._price_order_monitor()
+            else:
+                await asyncio.gather(self._price_order_monitor(), self._signal_monitor())
 
     def stop(self) -> None:
         self._running = False

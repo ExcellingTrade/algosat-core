@@ -966,43 +966,61 @@ class SwingHighLowSellStrategy(StrategyBase):
             if not re_entry_record:
                 logger.info(f"🔄 No re-entry tracking found for order_id={order_id}, attempting to calculate pullback level")
                 
-                # Try to recalculate pullback level from smart level configuration
-                entry_level = smart_level.get('entry_level')
+                # Get pullback percentage from smart level - required for re-entry calculation
                 pullback_percentage = smart_level.get('pullback_percentage')
                 
-                if entry_level and pullback_percentage and pullback_percentage > 0:
-                    # Get smart level target for pullback calculation
-                    if signal_direction == "UP":
-                        target_level = smart_level.get('bullish_target')
-                    else:  # DOWN
-                        target_level = smart_level.get('bearish_target')
+                if not pullback_percentage or pullback_percentage <= 0:
+                    logger.error(f"❌ Re-entry check failed - invalid or missing pullback_percentage in smart level for order_id={order_id}")
+                    return None
+                
+                # Try to get swing levels from position data (preferred) or fall back to smart level targets
+                entry_spot_swing_high = position.get('entry_spot_swing_high')
+                entry_spot_swing_low = position.get('entry_spot_swing_low')
+                
+                if entry_spot_swing_high and entry_spot_swing_low:
+                    # Use swing distance approach (consistent with buy strategy)
+                    pullback_factor = pullback_percentage / 100.0
+                    swing_high = float(entry_spot_swing_high)
+                    swing_low = float(entry_spot_swing_low)
                     
-                    if target_level:
-                        # Calculate pullback level using smart level configuration
-                        pullback_factor = pullback_percentage / 100.0
-                        if signal_direction == "UP":
-                            # For UP trend: pullback level is between entry and target (downward)
-                            pullback_level = float(entry_level) + (float(target_level) - float(entry_level)) * pullback_factor
-                        else:  # DOWN
-                            # For DOWN trend: pullback level is between entry and target (upward)
-                            pullback_level = float(entry_level) - (float(entry_level) - float(target_level)) * pullback_factor
+                    # Calculate swing distance (high - low)
+                    swing_distance = swing_high - swing_low
+                    pullback_distance = swing_distance * pullback_factor
+                    
+                    logger.info(f"📊 Re-entry Swing Range Analysis:")
+                    logger.info(f"    Swing High: {swing_high}")
+                    logger.info(f"    Swing Low: {swing_low}")
+                    logger.info(f"    Swing Distance: {swing_distance}")
+                    logger.info(f"    Pullback %: {pullback_percentage}%")
+                    logger.info(f"    Pullback Distance: {pullback_distance}")
+                    
+                    if signal_direction == "UP":
+                        # For UP trades: pullback is percentage down from swing high based on swing distance
+                        pullback_level = swing_high - pullback_distance
+                        logger.info(f"📈 Recalculating UP pullback: {swing_high} - {pullback_distance} = {pullback_level}")
                         
-                        # Round to 2 decimal places
-                        pullback_level = round(pullback_level, 2)
-                        
-                        # Create re-entry tracking record
-                        success = await create_re_entry_tracking(order_id, pullback_level)
-                        if success:
-                            logger.info(f"✅ Recalculated and stored pullback level for order_id={order_id}: {pullback_level}")
-                            re_entry_record = {'pullback_touched': False, 're_entry_attempted': False}
-                        else:
-                            logger.error(f"❌ Failed to store recalculated pullback level for order_id={order_id}")
-                            return None
+                    else:  # DOWN
+                        # For DOWN trades: pullback is percentage up from swing low based on swing distance
+                        pullback_level = swing_low + pullback_distance
+                        logger.info(f"📉 Recalculating DOWN pullback: {swing_low} + {pullback_distance} = {pullback_level}")
+                    
+                    # Round to 2 decimal places
+                    pullback_level = round(pullback_level, 2)
+                    
+                    # Create re-entry tracking record
+                    success = await create_re_entry_tracking(order_id, pullback_level)
+                    if success:
+                        logger.info(f"✅ Recalculated and stored pullback level for order_id={order_id}: {pullback_level}")
+                        re_entry_record = {'pullback_touched': False, 're_entry_attempted': False}
                     else:
-                        logger.warning(f"❌ Cannot recalculate pullback - missing target level for {signal_direction} direction")
+                        logger.error(f"❌ Failed to store recalculated pullback level for order_id={order_id}")
                         return None
                 else:
-                    logger.warning(f"❌ Cannot recalculate pullback - missing entry_level or pullback_percentage in smart level")
+                    # No swing levels available - cannot calculate pullback without them
+                    logger.error(f"❌ Cannot recalculate pullback - missing swing levels for order_id={order_id}")
+                    logger.error(f"    entry_spot_swing_high: {entry_spot_swing_high}")
+                    logger.error(f"    entry_spot_swing_low: {entry_spot_swing_low}")
+                    logger.error(f"    Swing levels are required for consistent pullback calculation")
                     return None
             
             # Calculate pullback level from re-entry record or use the one we just calculated
@@ -1215,18 +1233,13 @@ class SwingHighLowSellStrategy(StrategyBase):
                 logger.error("❌ Cannot calculate pullback level - missing order_id")
                 return False
             
-            # Get smart level entry level
+            # Get smart level for pullback configuration
             smart_level = self.get_active_smart_level()
             if not smart_level:
                 logger.error("❌ Cannot calculate pullback level - no active smart level")
                 return False
             
-            entry_level = smart_level.get('entry_level')
-            if entry_level is None:
-                logger.error("❌ Cannot calculate pullback level - missing entry_level in smart level")
-                return False
-            
-            # Get pullback percentage from smart level
+            # Get pullback percentage from smart level - required for pullback calculation
             pullback_percentage = smart_level.get('pullback_percentage')
             if not pullback_percentage or pullback_percentage <= 0:
                 logger.error(f"❌ Cannot calculate pullback level - invalid pullback_percentage={pullback_percentage} in smart level")
@@ -1240,25 +1253,46 @@ class SwingHighLowSellStrategy(StrategyBase):
             
             logger.info(f"🔄 Calculating pullback level for order_id={order_id}")
             logger.info(f"    Signal Direction: {signal_direction}")
-            logger.info(f"    Entry Level: {entry_level}")
             logger.info(f"    Current Spot Price: {current_spot_price}")
             logger.info(f"    Pullback Percentage: {pullback_percentage}%")
             
-            # Calculate pullback level using smart level percentage
+            # Calculate pullback level using swing distance approach
             pullback_factor = pullback_percentage / 100.0
+            
+            # Get swing levels for consistent pullback calculation
+            entry_spot_swing_high = signal_payload.entry_spot_swing_high
+            entry_spot_swing_low = signal_payload.entry_spot_swing_low
+            
+            # Validate that we have both swing levels for distance calculation
+            if not entry_spot_swing_high or not entry_spot_swing_low:
+                logger.error(f"❌ Cannot calculate pullback - missing swing levels. High: {entry_spot_swing_high}, Low: {entry_spot_swing_low}")
+                return False
+            
+            swing_high = float(entry_spot_swing_high)
+            swing_low = float(entry_spot_swing_low)
+            
+            # Calculate swing distance (high - low)
+            swing_distance = swing_high - swing_low
+            pullback_distance = swing_distance * pullback_factor
+            
+            logger.info(f"📊 Swing Range Analysis:")
+            logger.info(f"    Swing High: {swing_high}")
+            logger.info(f"    Swing Low: {swing_low}")
+            logger.info(f"    Swing Distance: {swing_distance}")
+            logger.info(f"    Pullback Percentage: {pullback_percentage}%")
+            logger.info(f"    Pullback Distance: {pullback_distance}")
+            
             if signal_direction == "UP":
-                # For UP trades: pullback = entry_level + pullback_factor * (current_price - entry_level)
-                pullback_level = float(entry_level) + pullback_factor * (float(current_spot_price) - float(entry_level))
-                logger.info(f"📈 UP Trade Pullback Calculation:")
-                logger.info(f"    Formula: entry_level + {pullback_factor} * (current_price - entry_level)")
-                logger.info(f"    Calculation: {entry_level} + {pullback_factor} * ({current_spot_price} - {entry_level}) = {pullback_level}")
+                # For UP trades: pullback is percentage down from swing high based on swing distance
+                pullback_level = swing_high - pullback_distance
+                logger.info(f"� UP Trade Pullback Calculation:")
+                logger.info(f"    Pullback Level: {swing_high} - {pullback_distance} = {pullback_level}")
                 
             elif signal_direction == "DOWN":
-                # For DOWN trades: pullback = entry_level - pullback_factor * (entry_level - current_price)
-                pullback_level = float(entry_level) - pullback_factor * (float(entry_level) - float(current_spot_price))
+                # For DOWN trades: pullback is percentage up from swing low based on swing distance
+                pullback_level = swing_low + pullback_distance
                 logger.info(f"📉 DOWN Trade Pullback Calculation:")
-                logger.info(f"    Formula: entry_level - {pullback_factor} * (entry_level - current_price)")
-                logger.info(f"    Calculation: {entry_level} - {pullback_factor} * ({entry_level} - {current_spot_price}) = {pullback_level}")
+                logger.info(f"    Pullback Level: {swing_low} + {pullback_distance} = {pullback_level}")
                 
             else:
                 logger.error(f"❌ Invalid signal direction for pullback calculation: {signal_direction}")
@@ -1276,7 +1310,6 @@ class SwingHighLowSellStrategy(StrategyBase):
                 logger.info(f"✅ Pullback level calculated and stored successfully:")
                 logger.info(f"    Order ID: {order_id}")
                 logger.info(f"    Direction: {signal_direction}")
-                logger.info(f"    Entry Level: {entry_level}")
                 logger.info(f"    Current Price: {current_spot_price}")
                 logger.info(f"    Pullback Level: {pullback_level}")
                 logger.info(f"    Re-entry will trigger when price reaches {pullback_level}")
@@ -1445,13 +1478,13 @@ class SwingHighLowSellStrategy(StrategyBase):
                         exit_result = await self.order_manager.exit_order(hedge_order_id, exit_reason="All hedge orders failure", check_live_status=True)
                         
                         # Update hedge order status to CLOSED after cleanup
-                        if exit_result:
-                            try:
-                                logger.info(f"🔄 Updating failed hedge order {hedge_order_id} status to CLOSED")
-                                await self.order_manager.update_order_status(hedge_order_id, "CLOSED", "All hedge orders failed")
-                                logger.info(f"✅ Failed hedge order {hedge_order_id} status updated to CLOSED")
-                            except Exception as status_e:
-                                logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to CLOSED: {status_e}")
+                        # Note: exit_order doesn't return a meaningful value, but if we reach here, it completed successfully
+                        try:
+                            logger.info(f"🔄 Updating failed hedge order {hedge_order_id} status to CLOSED")
+                            await self.order_manager.update_order_status_in_db(hedge_order_id, "CLOSED")
+                            logger.info(f"✅ Failed hedge order {hedge_order_id} status updated to CLOSED")
+                        except Exception as status_e:
+                            logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to CLOSED: {status_e}")
                     except Exception as cleanup_e:
                         logger.error(f"💥 Failed to clean up failed hedge order {hedge_order_id}: {cleanup_e}")
                 return None
@@ -1526,8 +1559,7 @@ class SwingHighLowSellStrategy(StrategyBase):
                 if main_order_id:
                     try:
                         logger.info(f"🔄 Updating main order {main_order_id} status to FAILED")
-                        await self.order_manager.update_order_status(main_order_id, "FAILED", 
-                                                                   f"All brokers failed: {failed_main_brokers}")
+                        await self.order_manager.update_order_status_in_db(main_order_id, "FAILED")
                         logger.info(f"✅ Main order {main_order_id} status updated to FAILED")
                     except Exception as status_e:
                         logger.error(f"⚠️ Failed to update main order {main_order_id} status to FAILED: {status_e}")
@@ -1554,7 +1586,15 @@ class SwingHighLowSellStrategy(StrategyBase):
                 order_request_dict = order_request.dict()
             else:
                 order_request_dict = dict(order_request)
-            return {**order_request_dict, **main_order_result}
+            
+            result = {**order_request_dict, **main_order_result}
+            
+            # Include hedge_order_id if available for order monitoring
+            if hedge_order_id:
+                result["hedge_order_id"] = hedge_order_id
+                logger.debug(f"🎯 Including hedge_order_id {hedge_order_id} in process_cycle result")
+                
+            return result
 
         except Exception as e:
             logger.critical(f"🚨 CRITICAL: Main SELL order failed for {option_symbol} after hedge was placed. Attempting to exit hedge. Error: {e}", exc_info=True)
@@ -1591,14 +1631,13 @@ class SwingHighLowSellStrategy(StrategyBase):
                         logger.info(f"📊 Hedge order cleanup initiated for brokers: {list(hedge_broker_responses.keys())}")
                     
                     # Update hedge order status to CLOSED after successful exit
-                    if exit_result:
-                        try:
-                            logger.info(f"🔄 Updating hedge order {hedge_order_id} status to CLOSED after exit")
-                            await self.order_manager.update_order_status(hedge_order_id, "CLOSED", 
-                                                                       f"Exited due to main order failure: {str(e)[:100]}")
-                            logger.info(f"✅ Hedge order {hedge_order_id} status updated to CLOSED")
-                        except Exception as status_e:
-                            logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to CLOSED: {status_e}")
+                    # Note: exit_order doesn't return a meaningful value, but if we reach here, it completed successfully
+                    try:
+                        logger.info(f"🔄 Updating hedge order {hedge_order_id} status to CLOSED after exit")
+                        await self.order_manager.update_order_status_in_db(hedge_order_id, "CLOSED")
+                        logger.info(f"✅ Hedge order {hedge_order_id} status updated to CLOSED")
+                    except Exception as status_e:
+                        logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to CLOSED: {status_e}")
                         
                 except Exception as exit_e:
                     logger.error(f"💥 FATAL: Failed to exit orphaned hedge order {hedge_order_id} for {option_symbol}. "
@@ -2337,7 +2376,7 @@ class SwingHighLowSellStrategy(StrategyBase):
                 completed_trades = [order for order in all_orders if order.get('status') in completed_statuses]
                 total_completed_trades = len(completed_trades)
                 
-                # Count loss trades (excluding profitable trades)
+                # Count loss trades (excluding profitable trades) - check all orders for negative PnL
                 loss_statuses = [
                     constants.TRADE_STATUS_EXIT_STOPLOSS,
                     constants.TRADE_STATUS_EXIT_MAX_LOSS,
@@ -2345,7 +2384,7 @@ class SwingHighLowSellStrategy(StrategyBase):
                 ]
                 
                 # loss_trades = [order for order in completed_trades if order.get('status') in loss_statuses]
-                loss_trades = [order for order in completed_trades if order.get('pnl') is not None and order.get('pnl') < 0]
+                loss_trades = [order for order in all_orders if order.get('pnl') is not None and order.get('pnl') < 0]
                 
                 total_loss_trades = len(loss_trades)
                 

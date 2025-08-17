@@ -249,6 +249,9 @@ broker_executions = Table(
     Column("order_type", String(20), nullable=True),  # MARKET, LIMIT, SL, etc.
     Column("product_type", String(20), nullable=True),  # MARKET, LIMIT, SL, etc.
     Column("notes", String(500), nullable=True),  # Any additional notes (manual exit, BO leg, etc.)
+    
+    # P&L tracking - updated by OrderMonitor
+    Column("pnl", Numeric(15, 4), nullable=True, server_default=text("0.0")),  # Current P&L from broker positions
 
     # Legacy and raw data
     Column("raw_execution_data", JSONB, nullable=True),  # Complete broker response for this execution

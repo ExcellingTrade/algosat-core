@@ -32,7 +32,7 @@ def send_telegram_async(message: str):
 	else:
 		# If not in an event loop, just call directly (blocking)
 		telegram_bot.send_message(message)
-
+	print("Sending message to Telegram...")
 # Usage:
 # 1. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in your environment or in a .env file at project root.
 # 2. Never commit your .env file to git (add to .gitignore).

@@ -429,8 +429,8 @@ class OptionBuyStrategy(StrategyBase):
                 completed_trades = [order for order in all_orders if order.get('status') in completed_statuses]
                 total_completed_trades = len(completed_trades)
                 
-                # Count loss trades based on negative PnL
-                loss_trades = [order for order in completed_trades if order.get('pnl') is not None and order.get('pnl') < 0]
+                # Count loss trades based on negative PnL - check all orders for negative PnL
+                loss_trades = [order for order in all_orders if order.get('pnl') is not None and order.get('pnl') < 0]
                 total_loss_trades = len(loss_trades)
                 
                 logger.debug(f"Trade limits check - Total completed trades: {total_completed_trades}, Loss trades: {total_loss_trades}")
@@ -600,6 +600,7 @@ class OptionBuyStrategy(StrategyBase):
             order_request = await self.order_manager.broker_manager.build_order_request_for_strategy(
                 signal_payload, self.cfg
             )
+            logger.debug(f"Order request for {strike}: {order_request}")
             # Place order(s) with broker(s) via OrderManager, which handles DB updates
             result = await self.order_manager.place_order(
                 self.cfg,  # config (StrategyConfig, has id)

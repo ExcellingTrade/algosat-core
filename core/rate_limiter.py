@@ -37,6 +37,29 @@ class TokenBucket:
         self.last_refill = time.time()
         self._lock = asyncio.Lock()
     
+    async def acquire_with_wait(self, tokens: int = 1) -> bool:
+        """
+        Atomically acquire tokens, waiting if necessary.
+        Returns True when tokens are successfully acquired.
+        """
+        while True:
+            async with self._lock:
+                await self._refill()
+                if self.tokens >= tokens:
+                    self.tokens -= tokens
+                    return True
+                
+                # Calculate wait time for needed tokens
+                needed_tokens = tokens - self.tokens
+                wait_time = needed_tokens / self.refill_rate
+            
+            # Wait outside the lock to allow other operations
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
+            else:
+                # Small delay to prevent busy waiting
+                await asyncio.sleep(0.001)
+
     async def acquire(self, tokens: int = 1) -> bool:
         """
         Try to acquire tokens from bucket.
@@ -89,18 +112,9 @@ class BrokerRateLimiter:
         Context manager for rate-limited API calls.
         Waits if necessary to respect rate limits.
         """
-        # Wait for tokens to be available
-        wait_time = await self.bucket.wait_for_tokens(tokens)
-        if wait_time > 0:
-            logger.debug(f"Rate limiting {self.broker_name}: waiting {wait_time:.2f}s for {tokens} tokens")
-            await asyncio.sleep(wait_time)
-        
-        # Acquire tokens
-        acquired = await self.bucket.acquire(tokens)
-        if not acquired:
-            # This shouldn't happen after wait_for_tokens, but just in case
-            logger.warning(f"Failed to acquire tokens for {self.broker_name} after waiting")
-            await asyncio.sleep(1.0 / self.rate_config.rps)
+        # Use the atomic acquire_with_wait method to prevent race conditions
+        logger.debug(f"Rate limiting {self.broker_name}: requesting {tokens} tokens")
+        await self.bucket.acquire_with_wait(tokens)
         
         self.call_count += 1
         self.last_call_time = time.time()

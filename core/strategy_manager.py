@@ -101,9 +101,6 @@ class RiskManager:
     def __init__(self, order_manager: OrderManager):
         self.order_manager = order_manager
         self.emergency_stop_active = False
-        self._positions_cache = None
-        self._cache_timestamp = None
-        self._cache_duration = 30  # Cache for 30 seconds
         
     async def check_broker_risk_limits(self):
         """
@@ -153,148 +150,78 @@ class RiskManager:
     
     async def _calculate_broker_pnl(self, session, broker_name: str) -> float:
         """
-        Calculate current P&L for a specific broker using actual broker positions.
-        This matches entry executions with current positions to get real P&L from broker APIs.
+        Calculate current P&L for a specific broker using database P&L values.
+        This uses P&L values updated by OrderMonitor instead of fetching broker positions.
+        Much faster and more reliable than the previous approach.
         """
         try:
             from algosat.core.dbschema import broker_executions
             from sqlalchemy import select, func
             from datetime import date
             
-            # Get all broker positions (with cache)
-            all_positions = await self._get_all_broker_positions_with_cache()
-            if not all_positions or broker_name.lower() not in all_positions:
-                logger.debug(f"No positions found for broker {broker_name}")
+            # Get broker_id using cached method (same as OrderMonitor)
+            broker_id = await self._get_broker_id_from_name(broker_name)
+            if not broker_id:
+                logger.debug(f"No broker found with name {broker_name}")
                 return 0.0
             
-            broker_positions = all_positions.get(broker_name.lower(), [])
-            total_pnl = 0.0
-            
-            # Get today's ENTRY executions for this broker
+            # Get today's ENTRY executions P&L for this broker
             today = date.today()
-            entry_query = select(broker_executions).where(
+            pnl_query = select(func.coalesce(func.sum(broker_executions.c.pnl), 0.0)).where(
                 and_(
-                    broker_executions.c.broker_name == broker_name,
+                    broker_executions.c.broker_id == broker_id,
                     broker_executions.c.side == 'ENTRY',
                     func.date(broker_executions.c.execution_time) == today
                 )
             )
             
-            entry_executions = await session.execute(entry_query)
-            entry_executions = entry_executions.fetchall()
+            result = await session.execute(pnl_query)
+            total_pnl = float(result.scalar() or 0.0)
             
-            # Match entry executions with current positions (similar to OrderMonitor logic)
-            for execution in entry_executions:
-                symbol_val = execution.symbol
-                execution_price = float(execution.execution_price)
-                product_type = execution.product_type
-                executed_qty = execution.executed_quantity
-                action = execution.action
-                
-                # Find matching position using broker-specific logic
-                matched_pos = None
-                
-                if broker_name.lower() == "zerodha":
-                    for pos in broker_positions:
-                        try:
-                            # Match by tradingsymbol, product, and buy_quantity
-                            product_match = (str(pos.get('product')).upper() == str(product_type).upper()) if product_type else True
-                            entry_price_match = (float(pos.get('buy_price', 0)) == float(execution_price)) if execution_price else True
-                            qty_match = (int(pos.get('buy_quantity', 0)) == int(executed_qty)) or (int(pos.get('overnight_quantity', 0)) == int(executed_qty))
-                            
-                            if (pos.get('tradingsymbol') == symbol_val and 
-                                qty_match and product_match and entry_price_match):
-                                matched_pos = pos
-                                break
-                        except Exception as e:
-                            logger.error(f"Error matching Zerodha position: {e}")
-                
-                elif broker_name.lower() == "fyers":
-                    for pos in broker_positions:
-                        try:
-                            # Fyers fields: 'symbol', 'qty', 'productType', 'buyAvg', 'side'
-                            product_match = (str(pos.get('productType')).upper() == str(product_type).upper()) if product_type else True
-                            qty_match = (int(pos.get('buyQty', 0)) == int(executed_qty))
-                            symbol_match = (pos.get('symbol') == symbol_val)
-                            
-                            if symbol_match and qty_match and product_match:
-                                matched_pos = pos
-                                break
-                        except Exception as e:
-                            logger.error(f"Error matching Fyers position: {e}")
-                
-                elif broker_name.lower() == "angel":
-                    # Add Angel One specific matching logic here
-                    for pos in broker_positions:
-                        try:
-                            # Assuming Angel has similar fields - adjust as needed
-                            product_match = (str(pos.get('product')).upper() == str(product_type).upper()) if product_type else True
-                            symbol_match = (pos.get('symbol') == symbol_val or pos.get('tradingsymbol') == symbol_val)
-                            
-                            if symbol_match and product_match:
-                                matched_pos = pos
-                                break
-                        except Exception as e:
-                            logger.error(f"Error matching Angel position: {e}")
-                
-                # Extract P&L from matched position
-                if matched_pos:
-                    pnl_val = 0.0
-                    
-                    if broker_name.lower() == "zerodha":
-                        pnl_val = float(matched_pos.get('pnl', 0))
-                    elif broker_name.lower() == "fyers":
-                        pnl_val = float(matched_pos.get('pl', 0))
-                    elif broker_name.lower() == "angel":
-                        # Angel might use 'pnl' or 'unrealisedpnl' - adjust as needed
-                        pnl_val = float(matched_pos.get('pnl', 0)) or float(matched_pos.get('unrealisedpnl', 0))
-                    
-                    total_pnl += pnl_val
-                    logger.debug(f"Matched position P&L for {symbol_val}: {pnl_val} (Broker: {broker_name})")
-            
-            logger.debug(f"Total calculated P&L for broker {broker_name}: {total_pnl}")
-            return float(total_pnl)
+            logger.debug(f"Database P&L for broker {broker_name} (broker_id={broker_id}): {total_pnl}")
+            return total_pnl
             
         except Exception as e:
             logger.error(f"Error calculating P&L for broker {broker_name}: {e}")
             return 0.0
     
-    async def _get_all_broker_positions_with_cache(self):
+    async def _get_broker_id_from_name(self, broker_name: str) -> int:
         """
-        Get all broker positions with caching (similar to OrderMonitor approach).
-        Returns dict: {'fyers': [...], 'zerodha': [...], 'angel': [...]}
+        Get broker_id from broker_name using cached lookup (same approach as OrderMonitor).
+        This avoids repeated database queries for broker mapping.
         """
         try:
-            import time
+            # Use the same caching approach as OrderMonitor
+            if not hasattr(self, '_broker_cache'):
+                self._broker_cache = {}
             
-            # Check cache validity
-            current_time = time.time()
-            if (self._positions_cache is not None and 
-                self._cache_timestamp is not None and 
-                (current_time - self._cache_timestamp) < self._cache_duration):
-                logger.debug("Using cached broker positions")
-                return self._positions_cache
+            if broker_name in self._broker_cache:
+                return self._broker_cache[broker_name]
             
-            # Cache expired or doesn't exist, fetch fresh data
-            logger.debug("Fetching fresh broker positions")
+            from algosat.core.dbschema import broker_credentials
+            from sqlalchemy import select
             
-            # Get all positions using broker_manager (same as OrderMonitor)
-            if hasattr(self.order_manager, 'broker_manager'):
-                all_positions = await self.order_manager.broker_manager.get_all_broker_positions()
-            else:
-                logger.warning("order_manager.broker_manager not found - using empty positions")
-                all_positions = {}
-            
-            # Cache the results
-            self._positions_cache = all_positions
-            self._cache_timestamp = current_time
-            
-            logger.debug(f"Cached positions for brokers: {list(all_positions.keys()) if all_positions else 'None'}")
-            return all_positions
-            
+            # Create a fresh session for broker lookup
+            from algosat.core.db import AsyncSessionLocal
+            async with AsyncSessionLocal() as broker_session:
+                broker_query = select(broker_credentials.c.id).where(
+                    broker_credentials.c.broker_name == broker_name
+                )
+                broker_result = await broker_session.execute(broker_query)
+                broker_row = broker_result.fetchone()
+                
+                if broker_row:
+                    broker_id = broker_row.id
+                    self._broker_cache[broker_name] = broker_id
+                    logger.debug(f"Cached broker mapping: {broker_name} -> broker_id={broker_id}")
+                    return broker_id
+                else:
+                    logger.warning(f"Broker not found in credentials table: {broker_name}")
+                    return None
+                    
         except Exception as e:
-            logger.error(f"Error fetching broker positions: {e}")
-            return {}
+            logger.error(f"Error getting broker_id for {broker_name}: {e}")
+            return None
     
     async def emergency_stop_all_strategies(self):
         """

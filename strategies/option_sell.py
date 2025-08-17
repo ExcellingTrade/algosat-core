@@ -440,7 +440,7 @@ class OptionSellStrategy(StrategyBase):
                 completed_trades = [order for order in all_orders if order.get('status') in completed_statuses]
                 total_completed_trades = len(completed_trades)
                 
-                # Count loss trades (excluding profitable trades)
+                # Count loss trades (excluding profitable trades) - check all orders for negative PnL
                 loss_statuses = [
                     constants.TRADE_STATUS_EXIT_STOPLOSS,
                     constants.TRADE_STATUS_EXIT_MAX_LOSS,
@@ -448,7 +448,7 @@ class OptionSellStrategy(StrategyBase):
                 ]
                 
                 # loss_trades = [order for order in completed_trades if order.get('status') in loss_statuses]
-                loss_trades = [order for order in completed_trades if order.get('pnl') is not None and order.get('pnl') < 0]
+                loss_trades = [order for order in all_orders if order.get('pnl') is not None and order.get('pnl') < 0]
                 
                 total_loss_trades = len(loss_trades)
                 
@@ -702,13 +702,13 @@ class OptionSellStrategy(StrategyBase):
                         exit_result = await self.order_manager.exit_order(hedge_order_id, exit_reason="All hedge orders failure", check_live_status=True)
                         
                         # Update hedge order status to CLOSED after cleanup
-                        if exit_result:
-                            try:
-                                logger.info(f"🔄 Updating failed hedge order {hedge_order_id} status to CLOSED")
-                                await self.order_manager.update_order_status(hedge_order_id, "CLOSED", "All hedge orders failed")
-                                logger.info(f"✅ Failed hedge order {hedge_order_id} status updated to CLOSED")
-                            except Exception as status_e:
-                                logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to CLOSED: {status_e}")
+                        # Note: exit_order doesn't return a meaningful value, but if we reach here, it completed successfully
+                        try:
+                            logger.info(f"🔄 Updating failed hedge order {hedge_order_id} status to CLOSED")
+                            await self.order_manager.update_order_status_in_db(hedge_order_id, "CLOSED")
+                            logger.info(f"✅ Failed hedge order {hedge_order_id} status updated to CLOSED")
+                        except Exception as status_e:
+                            logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to CLOSED: {status_e}")
                     except Exception as cleanup_e:
                         logger.error(f"💥 Failed to clean up failed hedge order {hedge_order_id}: {cleanup_e}")
                 return None
@@ -783,8 +783,7 @@ class OptionSellStrategy(StrategyBase):
                 if main_order_id:
                     try:
                         logger.info(f"🔄 Updating main order {main_order_id} status to FAILED")
-                        await self.order_manager.update_order_status(main_order_id, "FAILED", 
-                                                                   f"All brokers failed: {failed_main_brokers}")
+                        await self.order_manager.update_order_status_in_db(main_order_id, "FAILED")
                         logger.info(f"✅ Main order {main_order_id} status updated to FAILED")
                     except Exception as status_e:
                         logger.error(f"⚠️ Failed to update main order {main_order_id} status to FAILED: {status_e}")
@@ -811,7 +810,11 @@ class OptionSellStrategy(StrategyBase):
                 order_request_dict = order_request.dict()
             else:
                 order_request_dict = dict(order_request)
-            return {**order_request_dict, **main_order_result}
+            
+            # Include hedge order information for monitoring
+            result = {**order_request_dict, **main_order_result}
+            
+            return result
 
         except Exception as e:
             logger.critical(f"🚨 CRITICAL: Main SELL order failed for {option_symbol} after hedge was placed. Attempting to exit hedge. Error: {e}", exc_info=True)
@@ -848,14 +851,13 @@ class OptionSellStrategy(StrategyBase):
                         logger.info(f"📊 Hedge order cleanup initiated for brokers: {list(hedge_broker_responses.keys())}")
                     
                     # Update hedge order status to CLOSED after successful exit
-                    if exit_result:
-                        try:
-                            logger.info(f"🔄 Updating hedge order {hedge_order_id} status to CLOSED after exit")
-                            await self.order_manager.update_order_status(hedge_order_id, "CLOSED", 
-                                                                       f"Exited due to main order failure: {str(e)[:100]}")
-                            logger.info(f"✅ Hedge order {hedge_order_id} status updated to CLOSED")
-                        except Exception as status_e:
-                            logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to CLOSED: {status_e}")
+                    # Note: exit_order doesn't return a meaningful value, but if we reach here, it completed successfully
+                    try:
+                        logger.info(f"🔄 Updating hedge order {hedge_order_id} status to CLOSED after exit")
+                        await self.order_manager.update_order_status_in_db(hedge_order_id, "CLOSED")
+                        logger.info(f"✅ Hedge order {hedge_order_id} status updated to CLOSED")
+                    except Exception as status_e:
+                        logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to CLOSED: {status_e}")
                         
                 except Exception as exit_e:
                     logger.error(f"💥 FATAL: Failed to exit orphaned hedge order {hedge_order_id} for {option_symbol}. "
