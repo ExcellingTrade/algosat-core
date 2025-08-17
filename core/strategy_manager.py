@@ -105,13 +105,13 @@ class RiskManager:
     async def check_broker_risk_limits(self):
         """
         Check if any broker has exceeded max_loss or max_profit limits.
-        Returns True if emergency stop should be triggered.
+        Returns tuple (breach_found: bool, broker_name: str, reason: str) for broker-specific handling.
         Only checks during market hours for efficiency.
         """
         # Skip risk checks during market close
         if not MarketHours.is_market_open():
             logger.debug("🌙 Market closed - skipping risk limit checks")
-            return False
+            return False, None, None
             
         try:
             from algosat.core.db import get_broker_risk_summary, AsyncSessionLocal
@@ -129,24 +129,21 @@ class RiskManager:
                     
                     # Check if current loss exceeds max_loss
                     if current_pnl < -abs(max_loss):
-
-                        logger.critical(f"🚨 EMERGENCY STOP: Broker {broker_name} exceeded max loss! "
+                        logger.critical(f"🚨 BROKER RISK BREACH: {broker_name} exceeded max loss! "
                                       f"Current P&L: {current_pnl}, Max Loss: {max_loss}")
-                        send_telegram_async(f"🛑🚨 <b>EMERGENCY STOP</b> 🛑🚨\n<b>Broker:</b> <code>{broker_name}</code>\n<b>Reason:</b> Max <b>LOSS</b> breached!\n<b>P&L:</b> <code>{current_pnl}</code> | <b>Max Loss:</b> <code>{max_loss}</code>")
-                        return True
+                        return True, broker_name, f"Max loss breached: P&L {current_pnl} vs limit {max_loss}"
                     
                     # Check if current profit exceeds max_profit (optional - for profit booking)
                     if max_profit > 0 and current_pnl > max_profit:
-                        logger.critical(f"🚨 EMERGENCY STOP: Broker {broker_name} exceeded max profit! "
+                        logger.critical(f"🚨 BROKER RISK BREACH: {broker_name} exceeded max profit! "
                                       f"Current P&L: {current_pnl}, Max Profit: {max_profit}")
-                        send_telegram_async(f"🟢💰 <b>EMERGENCY STOP</b> 🟢💰\n<b>Broker:</b> <code>{broker_name}</code>\n<b>Reason:</b> Max <b>PROFIT</b> target hit!\n<b>P&L:</b> <code>{current_pnl}</code> | <b>Max Profit:</b> <code>{max_profit}</code>")
-                        return True
+                        return True, broker_name, f"Max profit target hit: P&L {current_pnl} vs target {max_profit}"
                         
-                return False
+                return False, None, None
                 
         except Exception as e:
             logger.error(f"Error checking broker risk limits: {e}")
-            return False
+            return False, None, None
     
     async def _calculate_broker_pnl(self, session, broker_name: str) -> float:
         """
@@ -268,6 +265,31 @@ class RiskManager:
                 await self.order_manager.exit_all_orders(reason="Emergency Stop - Error Fallback")
             except Exception as exit_error:
                 logger.error(f"Failed to exit orders during emergency fallback: {exit_error}")
+    
+    async def emergency_stop_broker_orders(self, broker_name: str, reason: str = "Broker risk limit exceeded"):
+        """
+        Emergency stop for a specific broker: Exit all orders for that broker only.
+        This keeps other brokers' orders open while closing only the problematic broker.
+        
+        Args:
+            broker_name: Name of the broker to stop (e.g., "zerodha", "fyers")
+            reason: Reason for the broker-specific emergency stop
+        """
+        try:
+            logger.critical(f"🚨 BROKER-SPECIFIC EMERGENCY STOP: {broker_name} - {reason}")
+            
+            # Exit all orders for the specific broker only
+            await self.order_manager.exit_all_orders(
+                exit_reason=f"Broker Emergency Stop - {reason}",
+                broker_names_filter=[broker_name]
+            )
+            
+            logger.critical(f"🚨 Broker-specific emergency stop completed for {broker_name}")
+            send_telegram_async(f"🛑⚠️ <b>BROKER EMERGENCY STOP</b> ⚠️🛑\n<b>Broker:</b> <code>{broker_name}</code>\n<b>Reason:</b> {reason}\n<b>Action:</b> Exited all orders for this broker only")
+            
+        except Exception as e:
+            logger.error(f"Error during broker-specific emergency stop for {broker_name}: {e}")
+            # If exit fails, log the error but don't raise to avoid stopping the monitoring loop
     
     def is_emergency_stop_active(self):
         """Check if emergency stop is currently active."""
@@ -561,11 +583,15 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                     order_cache._started = True
                 
                 # 🚨 PRIORITY 1: Check risk limits before any strategy operations (only during market hours)
-                risk_limit_exceeded = await risk_manager.check_broker_risk_limits()
+                risk_limit_exceeded, breached_broker, breach_reason = await risk_manager.check_broker_risk_limits()
                 
                 if risk_limit_exceeded and not risk_manager.is_emergency_stop_active():
-                    # Trigger emergency stop (only during market hours)
-                    await risk_manager.emergency_stop_all_strategies()
+                    if breached_broker:
+                        # Trigger broker-specific emergency stop (only exit orders for that broker)
+                        await risk_manager.emergency_stop_broker_orders(breached_broker, breach_reason)
+                    else:
+                        # Fallback to full emergency stop if broker name is not available
+                        await risk_manager.emergency_stop_all_strategies()
                 
                 # Continue normal strategy management (emergency stop disables strategies in DB)
                 # The polling logic will naturally stop runners when no active symbols are found

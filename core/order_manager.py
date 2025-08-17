@@ -706,7 +706,7 @@ class OrderManager:
             logger.info(f"OrderManager: Inserted new EXIT broker_execution for parent_order_id={parent_order_id}, broker_id={broker_id}, broker_order_id={broker_order_id}, exit_broker_order_id={exit_broker_order_id}")
 
 
-    async def exit_all_orders(self, exit_reason: str = None, strategy_id: int = None, check_live_status: bool = False):
+    async def exit_all_orders(self, exit_reason: str = None, strategy_id: int = None, check_live_status: bool = False, broker_ids_filter: List[int] = None, broker_names_filter: List[str] = None):
         """
         Exit all open orders by querying the orders table for orders with open statuses
         and calling exit_order for each of them.
@@ -716,10 +716,43 @@ class OrderManager:
             strategy_id: Optional strategy ID to filter orders by. If provided, only orders 
                         belonging to this strategy will be exited.
             check_live_status: If True, check live broker status before exit decisions
+            broker_ids_filter: Optional list of broker IDs to filter by. If provided, only 
+                             broker executions from these brokers will be exited.
+            broker_names_filter: Optional list of broker names to filter by. If provided, only 
+                               broker executions from these brokers will be exited.
         """
         from algosat.core.db import AsyncSessionLocal, get_orders_by_strategy_id
         from algosat.core.dbschema import orders
         from sqlalchemy import select
+        
+        # Convert broker names to broker IDs if needed using cached approach
+        final_broker_ids_filter = None
+        if broker_ids_filter or broker_names_filter:
+            final_broker_ids_filter = list(broker_ids_filter) if broker_ids_filter else []
+            
+            if broker_names_filter:
+                # Use cached broker name to ID mapping (similar to get_all_broker_order_details)
+                broker_name_to_id = {}
+                
+                async def get_broker_id_cached(broker_name):
+                    if broker_name in broker_name_to_id:
+                        return broker_name_to_id[broker_name]
+                    broker_id = await self._get_broker_id(broker_name)
+                    broker_name_to_id[broker_name] = broker_id
+                    return broker_id
+                
+                # Convert broker names to IDs using cached lookup
+                for broker_name in broker_names_filter:
+                    broker_id = await get_broker_id_cached(broker_name)
+                    if broker_id:
+                        final_broker_ids_filter.append(broker_id)
+                        logger.info(f"OrderManager: Mapped broker_name '{broker_name}' to broker_id {broker_id}")
+                    else:
+                        logger.warning(f"OrderManager: Broker name '{broker_name}' not found in credentials table")
+            
+            # Create filter description for logging
+            filter_description = f" (filtered to broker_ids: {final_broker_ids_filter})" if final_broker_ids_filter else ""
+            logger.info(f"OrderManager: Exit orders with broker filter{filter_description}")
         
         # Define open order statuses
         open_statuses = [
@@ -760,11 +793,13 @@ class OrderManager:
                 symbol = order.get('strike_symbol') or order.get('symbol', 'Unknown')
                 
                 try:
-                    logger.info(f"OrderManager: Exiting order {order_id} (symbol={symbol}, status={order_status}) with check_live_status={check_live_status}")
+                    broker_filter_desc = f" with broker filter {final_broker_ids_filter}" if final_broker_ids_filter else ""
+                    logger.info(f"OrderManager: Exiting order {order_id} (symbol={symbol}, status={order_status}){broker_filter_desc} with check_live_status={check_live_status}")
                     await self.exit_order(
                         parent_order_id=order_id,
                         exit_reason=exit_reason or "Exit all orders requested",
-                        check_live_status=check_live_status
+                        check_live_status=check_live_status,
+                        broker_ids_filter=final_broker_ids_filter
                     )
                     logger.info(f"OrderManager: Successfully initiated exit for order {order_id}")
                 except Exception as e:
@@ -1385,7 +1420,7 @@ class OrderManager:
         logger.warning(f"OrderManager: Unrecognized cancel response format: {cancel_resp}")
         return False
 
-    async def exit_order(self, parent_order_id: int, exit_reason: str = None, ltp: float = None, check_live_status: bool = False):
+    async def exit_order(self, parent_order_id: int, exit_reason: str = None, ltp: float = None, check_live_status: bool = False, broker_ids_filter: List[int] = None):
         """
         Standardized exit: For a logical order, fetch all broker_executions. For each FILLED row, call exit_order. For PARTIALLY_FILLED/PARTIAL, call exit_order then cancel_order. For AWAITING_ENTRY/PENDING, call cancel_order. For REJECTED/FAILED, do nothing.
         After exit/cancel, insert a new broker_executions row with side=EXIT, exit price as LTP (passed in), and update exit_time.
@@ -1395,6 +1430,8 @@ class OrderManager:
             exit_reason: Reason for exiting the order
             ltp: If provided, use as exit price. If not provided, will fetch current LTP from the market
             check_live_status: If True, check live broker status via order_cache and update DB before proceeding
+            broker_ids_filter: Optional list of broker IDs to filter by. If provided, only 
+                             broker executions from these brokers will be processed.
         """
 
         from algosat.core.db import AsyncSessionLocal, get_broker_executions_for_order, get_order_by_id
@@ -1452,6 +1489,11 @@ class OrderManager:
                 symbol = be.get('symbol') or logical_symbol
                 product_type = be.get('product_type')
                 broker_exec_id = be.get('id')
+                
+                # Apply broker filter if specified
+                if broker_ids_filter is not None and broker_id not in broker_ids_filter:
+                    logger.info(f"OrderManager: Skipping broker_exec_id={broker_exec_id} (broker_id={broker_id}) - not in filter {broker_ids_filter}")
+                    continue
                 
                 self.validate_broker_fields(broker_id, symbol, context_msg=f"exit_order (parent_order_id={parent_order_id})")
                 if broker_id is None or broker_order_id is None:
