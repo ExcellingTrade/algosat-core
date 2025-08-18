@@ -41,9 +41,6 @@ class OrderMonitor:
         self.signal_monitor_seconds: int = signal_monitor_seconds
         self.is_hedge: bool = False  # Will be set to True if this order has a parent_order_id
         self._hedge_detection_done: bool = False  # Flag to ensure hedge detection happens only once
-                # --- Add position cache fields ---
-        self._positions_cache = None
-        self._positions_cache_time = None
         self._running: bool = True
         # Track last main order status to avoid redundant DB updates
         self._last_main_status = None
@@ -360,7 +357,7 @@ class OrderMonitor:
                     logger.error(f"OrderMonitor: Failed to exit AWAITING_ENTRY order {self.order_id} at 15:25: {e}")
                     return
 
-            # --- Position monitoring for PnL calculation and position status ---
+            # --- P&L monitoring using DB data and current LTP (simplified approach) ---
             current_status = order_row.get('status') if order_row and order_row.get('status') else last_main_status
             logger.debug(f"CurrentStatus: {current_status} for order_id={self.order_id}")
             # --- Telegram notification for status transition to OPEN ---
@@ -696,18 +693,10 @@ class OrderMonitor:
                 else:
                     logger.debug(f"OrderMonitor: Skipping price-based exit check for hedge order {self.order_id}")
                 
-                # Position monitoring logic
+                # P&L calculation using DB data and current LTP (simplified approach)
                 try:
-                    # Use new helper to get all broker positions (with cache)
-                    all_positions = await self._get_all_broker_positions_with_cache()
-                    logger.info(f"OrderMonitor: Fetched all broker positions for order_id={self.order_id}: {all_positions}")
-                    # Map broker_id to positions
-                    broker_positions_map = {}
-                    if all_positions and isinstance(all_positions, dict):
-                        broker_positions_map = all_positions
-                    # For each broker_exec in ENTRY, match to broker positions by broker, symbol, quantity, product
+                    # Get ENTRY broker executions from database
                     async with AsyncSessionLocal() as session:
-                    # entry_broker_db_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
                         entry_broker_db_orders = await get_broker_executions_for_order(session, self.order_id, side='ENTRY') 
                     
                     # Use the LTP already fetched above for PnL calculations
@@ -718,182 +707,53 @@ class OrderMonitor:
                         logger.debug(f"OrderMonitor: Using fetched LTP={current_ltp} for PnL calculation for order_id={self.order_id}")
                     
                     total_pnl = 0.0
-                    all_closed = True
+                    valid_executions_count = 0
+                    
                     for bro in entry_broker_db_orders:
                         # Skip processing if broker execution is invalid or failed
                         broker_status = bro.get('status', '').upper()
                         symbol_val = bro.get('symbol', None) or bro.get('tradingsymbol', None)
-                        qty = bro.get('quantity', None)
-                        executed_quantity = bro.get('executed_quantity', None)  # Get executed_quantity from bro
+                        executed_quantity = bro.get('executed_quantity', None) or bro.get('quantity', None)
+                        entry_price = bro.get('execution_price', None)
+                        entry_side = bro.get('action', '').upper()
                         
-                        # Simple validation checks: skip if status is FAILED or missing essential data
-                        if (broker_status == 'FAILED' or 
+                        # Simple validation: skip if essential data is missing or execution failed
+                        if (broker_status != 'FILLED' or 
                             symbol_val is None or 
-                            qty is None or 
-                            qty == 0):
-                            logger.debug(f"OrderMonitor: Skipping position matching for order_id={self.order_id} - "
-                                       f"invalid broker execution: status={broker_status}, symbol={symbol_val}, qty={qty}")
+                            executed_quantity is None or 
+                            executed_quantity <= 0 or
+                            entry_price is None or 
+                            entry_price <= 0):
+                            logger.debug(f"OrderMonitor: Skipping P&L calculation for broker execution - "
+                                       f"status={broker_status}, symbol={symbol_val}, qty={executed_quantity}, price={entry_price}")
                             continue
                         
-                        # broker_id = getattr(bro, 'broker_id', None)
-                        broker_id = bro.get('broker_id', None)
-                        broker_name = None
-                        if broker_id is not None:
-                            try:
-                                broker_name = await self._get_broker_name_with_cache(broker_id)
-                            except Exception as e:
-                                logger.error(f"OrderMonitor: Could not get broker name for broker_id={broker_id}: {e}")
-                        # broker_name = await self.data_manager.get_broker_name_by_id(bro.get("broker_id"))
-                        product = bro.get('product_type', None) or bro.get('product', None)
-                        exec_price = bro.get('execution_price', None)
-                        # Find matching position for this broker
-                        positions = broker_positions_map.get(broker_name.lower() if broker_name else "", None)
-                        matched_pos = None
-                        logger.info(f"OrderMonitor: Looking for positions for broker_name={broker_name}, symbol={symbol_val}, qty={qty}, product={product}")
-                        logger.info(f"OrderMonitor: Available broker_positions_map keys: {list(broker_positions_map.keys()) if broker_positions_map else 'None'}")
-                        
-                        if positions:
-                            logger.info(f"OrderMonitor: Found {len(positions)} positions for broker {broker_name}")
-                            # --- Robust quantity/time-based matching for Zerodha ---
-                            if broker_name and broker_name.lower() == "zerodha":
-                                best_match = None
-                                best_match_score = 0
-                                for pos in positions:
-                                    try:
-                                        product_match = (str(pos.get('product')).upper() == str(product).upper()) if product else True
-                                        symbol_match = (pos.get('tradingsymbol') == symbol_val)
-                                        if not symbol_match or not product_match:
-                                            continue
-                                        broker_current_qty = int(pos.get('quantity', 0))
-                                        broker_buy_qty = int(pos.get('buy_quantity', 0))
-                                        broker_overnight_qty = int(pos.get('overnight_quantity', 0))
-                                        db_qty = int(qty)
-                                        # For closed positions (quantity=0), match against buy/overnight qty; for open, match current qty
-                                        qty_match = False
-                                        if broker_current_qty == 0:
-                                            # Closed: match buy/overnight qty
-                                            if broker_buy_qty > 0 and db_qty > 0 and (broker_buy_qty == db_qty or broker_buy_qty % db_qty == 0 or db_qty % broker_buy_qty == 0):
-                                                qty_match = True
-                                            elif broker_overnight_qty > 0 and db_qty > 0 and (broker_overnight_qty == db_qty or broker_overnight_qty % db_qty == 0 or db_qty % broker_overnight_qty == 0):
-                                                qty_match = True
-                                        else:
-                                            # Open: match current qty
-                                            if broker_current_qty > 0 and db_qty > 0 and (broker_current_qty == db_qty or broker_current_qty % db_qty == 0 or db_qty % broker_current_qty == 0):
-                                                qty_match = True
-                                        # Score: prefer exact match, then multiples, then fallback
-                                        match_score = 0
-                                        if qty_match:
-                                            match_score += 10
-                                            # Prefer most recent update time if available
-                                            update_time = pos.get('update_time') or pos.get('timestamp')
-                                            if update_time:
-                                                match_score += 1
-                                        if match_score > best_match_score:
-                                            best_match = pos
-                                            best_match_score = match_score
-                                    except Exception as e:
-                                        logger.error(f"OrderMonitor: Error matching Zerodha position: {e}")
-                                if best_match:
-                                    matched_pos = best_match
-                                    broker_qty = int(best_match.get('buy_quantity', 0)) or int(best_match.get('overnight_quantity', 0)) or int(best_match.get('quantity', 0))
-                                    position_status = "CLOSED" if int(best_match.get('quantity', 0)) == 0 else "OPEN"
-                                    if broker_qty > int(qty) and broker_qty % int(qty) == 0:
-                                        multiplier = broker_qty // int(qty)
-                                        logger.warning(f"OrderMonitor: Detected potential duplicate orders - Broker quantity ({broker_qty}) is {multiplier}x DB quantity ({qty}) for symbol={symbol_val} (Position: {position_status})")
-                                    logger.info(f"OrderMonitor: Matched Zerodha position for symbol={symbol_val} (Status: {position_status}): {best_match}")
-                            # --- Robust quantity/time-based matching for Fyers ---
-                            elif broker_name and broker_name.lower() == "fyers":
-                                best_match = None
-                                best_match_score = 0
-                                for pos in positions:
-                                    try:
-                                        product_match = (str(pos.get('productType')).upper() == str(product).upper()) if product else True
-                                        symbol_match = (pos.get('symbol') == symbol_val)
-                                        if not symbol_match or not product_match:
-                                            continue
-                                        broker_current_qty = int(pos.get('qty', 0))
-                                        broker_buy_qty = int(pos.get('buyQty', 0))
-                                        db_qty = int(qty)
-                                        qty_match = False
-                                        if broker_current_qty == 0:
-                                            if broker_buy_qty > 0 and db_qty > 0 and (broker_buy_qty == db_qty or broker_buy_qty % db_qty == 0 or db_qty % broker_buy_qty == 0):
-                                                qty_match = True
-                                        else:
-                                            if broker_current_qty > 0 and db_qty > 0 and (broker_current_qty == db_qty or broker_current_qty % db_qty == 0 or db_qty % broker_current_qty == 0):
-                                                qty_match = True
-                                        match_score = 0
-                                        if qty_match:
-                                            match_score += 10
-                                            update_time = pos.get('update_time') or pos.get('timestamp')
-                                            if update_time:
-                                                match_score += 1
-                                        if match_score > best_match_score:
-                                            best_match = pos
-                                            best_match_score = match_score
-                                    except Exception as e:
-                                        logger.error(f"OrderMonitor: Error matching Fyers position: {e}")
-                                if best_match:
-                                    matched_pos = best_match
-                                    broker_qty = int(best_match.get('buyQty', 0)) or int(best_match.get('qty', 0))
-                                    position_status = "CLOSED" if int(best_match.get('qty', 0)) == 0 else "OPEN"
-                                    if broker_qty > int(qty) and broker_qty % int(qty) == 0:
-                                        multiplier = broker_qty // int(qty)
-                                        logger.warning(f"OrderMonitor: Detected potential duplicate orders - Broker quantity ({broker_qty}) is {multiplier}x DB quantity ({qty}) for symbol={symbol_val} (Position: {position_status})")
-                                    logger.info(f"OrderMonitor: Matched Fyers position for symbol={symbol_val} (Status: {position_status}): {best_match}")
+                        # Calculate P&L for this execution using DB data + current LTP
+                        execution_pnl = 0.0
+                        if entry_side == 'BUY':
+                            # Long position: profit when current_price > entry_price
+                            execution_pnl = (current_ltp - entry_price) * executed_quantity
+                        elif entry_side == 'SELL':
+                            # Short position: profit when current_price < entry_price
+                            execution_pnl = (entry_price - current_ltp) * executed_quantity
                         else:
-                            logger.warning(f"OrderMonitor: No positions found for broker={broker_name} (positions data: {positions})")
+                            logger.warning(f"OrderMonitor: Unknown entry side '{entry_side}' for P&L calculation")
+                            continue
                         
-                        # If match found, update order/broker_exec status and accumulate PnL
-                        if matched_pos:
-                            logger.info(f"OrderMonitor: Processing matched position for broker={broker_name}: {matched_pos}")
-                            
-                            # Extract current position quantity using helper method
-                            broker_current_qty = self._extract_current_quantity_from_position(matched_pos, broker_name)
-                            logger.info(f"OrderMonitor: Extracted current_qty={broker_current_qty} from {broker_name} position data")
-                            
-                            # Position closure detection
-                            closed = (broker_current_qty == 0)
-                            
-                            # Calculate order-specific PnL using our entry data + current market price
-                            # Use the LTP fetched outside the loop for better performance
-                            our_qty = int(executed_quantity or 0)  # Use actual executed quantity for this broker
-                            entry_price = float(bro.get('execution_price', 0))
-                            entry_side = bro.get('action', '').upper()
-                            
-                            if current_ltp > 0 and entry_price > 0 and our_qty > 0:
-                                # Order-specific PnL calculation (mathematically precise)
-                                if entry_side == 'BUY':
-                                    # Long position: profit when current_price > entry_price
-                                    order_specific_pnl = (current_ltp - entry_price) * our_qty
-                                elif entry_side == 'SELL':
-                                    # Short position: profit when current_price < entry_price
-                                    order_specific_pnl = (entry_price - current_ltp) * our_qty
-                                else:
-                                    logger.warning(f"OrderMonitor: Unknown entry side '{entry_side}' for PnL calculation")
-                                    order_specific_pnl = 0.0
-                                
-                                logger.info(f"OrderMonitor: Order-specific PnL calculation for {broker_name} (using reused/fetched LTP):")
-                                logger.info(f"  Entry Side: {entry_side}")
-                                logger.info(f"  Entry Price: {entry_price}")
-                                logger.info(f"  Current LTP: {current_ltp}")
-                                logger.info(f"  Our Quantity: {our_qty}")
-                                logger.info(f"  Calculated PnL: {order_specific_pnl}")
-                            else:
-                                order_specific_pnl = 0.0
-                                logger.warning(f"OrderMonitor: Cannot calculate PnL - current_ltp={current_ltp}, entry_price={entry_price}, our_qty={our_qty}")
-                            
-                            total_pnl += order_specific_pnl
-                            logger.info(f"OrderMonitor: Added order-specific PnL {order_specific_pnl} from {broker_name} position. Total PnL now: {total_pnl}")
-                            
-                            # Position closure detection - simply track if this broker position is closed
-                            if closed:
-                                logger.info(f"OrderMonitor: Position is CLOSED for broker={broker_name}, symbol={symbol_val}")
-                            else:
-                                all_closed = False
-                                logger.debug(f"OrderMonitor: Position is OPEN for broker={broker_name}, symbol={symbol_val}, qty={broker_current_qty}")
-                        else:
-                            logger.warning(f"OrderMonitor: No matching position found for broker={broker_name}, symbol={symbol_val}, qty={qty}, product={product}")
-                            all_closed = False
+                        total_pnl += execution_pnl
+                        valid_executions_count += 1
+                        
+                        logger.info(f"OrderMonitor: P&L calculation for execution:")
+                        logger.info(f"  Broker ID: {bro.get('broker_id')}")
+                        logger.info(f"  Entry Side: {entry_side}")
+                        logger.info(f"  Entry Price: {entry_price}")
+                        logger.info(f"  Current LTP: {current_ltp}")
+                        logger.info(f"  Executed Quantity: {executed_quantity}")
+                        logger.info(f"  Execution P&L: {execution_pnl}")
+                    
+                    logger.info(f"OrderMonitor: Total P&L calculation completed for order_id={self.order_id}:")
+                    logger.info(f"  Valid executions processed: {valid_executions_count}")
+                    logger.info(f"  Total P&L: {total_pnl}")
                     
                     # Update order PnL field in DB
                     try:
@@ -962,40 +822,11 @@ class OrderMonitor:
                     except Exception as e:
                         logger.error(f"OrderMonitor: Error in per-trade loss validation for order_id={self.order_id}: {e}")
                     
-                    # If all positions are squared off, call exit_order and set status to EXIT_CLOSED
-                    if all_closed and entry_broker_db_orders:
-                        # Get current order status to check if we should call exit_order
-                        current_order_status = order_row.get('status') if order_row else None
-                        allowed_statuses_for_exit = ['OPEN', 'AWAITING_ENTRY', str(OrderStatus.OPEN), str(OrderStatus.AWAITING_ENTRY)]
-                        
-                        if current_order_status in allowed_statuses_for_exit:
-                            try:
-                                logger.critical(f"🚨 ALL BROKER POSITIONS CLOSED for order_id={self.order_id}! Calling exit_order and setting EXIT_CLOSED status.")
-                                
-                                # Call exit_order to handle broker-side exit processing
-                                await self.order_manager.exit_order(
-                                    self.order_id, 
-                                    exit_reason="All broker positions detected as closed",
-                                    check_live_status=True,  # Ensure live status check to confirm closure
-                                )
-                                
-                                # Set status to EXIT_CLOSED PENDING - let check_and_complete_pending_exits handle completion
-                                await self.order_manager.update_order_status_in_db(self.order_id, "EXIT_CLOSED_PENDING")
-                                await self._clear_order_cache("All positions closed - status updated to EXIT_CLOSED_PENDING")
-                                
-                                logger.critical(f"✅ All-closed detection set to PENDING for order_id={self.order_id}. PENDING processor will complete the exit.")
-                                # Continue monitoring loop - PENDING check at beginning will handle completion
-                                
-                            except Exception as e:
-                                logger.error(f"OrderMonitor: Error handling all-closed detection for order_id={self.order_id}: {e}")
-                        else:
-                            logger.info(
-                                f"OrderMonitor: All positions closed for order_id={self.order_id}, "
-                                f"but current status '{current_order_status}' is not in running state. "
-                                f"Skipping exit_order call to preserve exit status."
-                            )
+                    # Note: Position closure detection has been removed since we now rely on 
+                    # exit order status tracking instead of broker position matching
+                    
                 except Exception as e:
-                    logger.error(f"OrderMonitor: Error in broker position monitoring: {e}", exc_info=True)
+                    logger.error(f"OrderMonitor: Error in P&L monitoring: {e}", exc_info=True)
             logger.debug(f"OrderMonitor: Broker position monitoring completed for order_id={self.order_id}")
             logger.debug("Next check in {self.price_order_monitor_seconds} seconds...")
             await asyncio.sleep(self.price_order_monitor_seconds)
@@ -1289,15 +1120,16 @@ class OrderMonitor:
                             if entry_order_time and order_time:
                                 try:
                                     from dateutil.parser import parse as parse_dt
+                                    from datetime import timezone as dt_timezone
                                     entry_dt = parse_dt(str(entry_order_time))
                                     order_dt = parse_dt(str(order_time))
                                     # Use localize_to_ist to ensure order_dt is IST aware, entry_dt is UTC aware
                                     order_dt_ist = localize_to_ist(order_dt)
                                     # entry_dt is UTC (from DB), order_dt_ist is IST (from broker)
                                     # Convert order_dt_ist to UTC for comparison
-                                    order_dt_utc = order_dt_ist.astimezone(timezone.utc)
+                                    order_dt_utc = order_dt_ist.astimezone(dt_timezone.utc)
                                     if entry_dt.tzinfo is None:
-                                        entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                                        entry_dt = entry_dt.replace(tzinfo=dt_timezone.utc)
                                     time_valid = order_dt_utc >= entry_dt
                                 except Exception as e:
                                     logger.warning(f"OrderMonitor: Could not parse/convert order times for time check: {e}")
@@ -1368,15 +1200,16 @@ class OrderMonitor:
                             if entry_order_time and order_time:
                                 try:
                                     from dateutil.parser import parse as parse_dt
+                                    from datetime import timezone as dt_timezone
                                     entry_dt = parse_dt(str(entry_order_time))
                                     order_dt = parse_dt(str(order_time))
                                     # Use localize_to_ist to ensure order_dt is IST aware, entry_dt is UTC aware
                                     order_dt_ist = localize_to_ist(order_dt)
                                     # entry_dt is UTC (from DB), order_dt_ist is IST (from broker)
                                     # Convert order_dt_ist to UTC for comparison
-                                    order_dt_utc = order_dt_ist.astimezone(timezone.utc)
+                                    order_dt_utc = order_dt_ist.astimezone(dt_timezone.utc)
                                     if entry_dt.tzinfo is None:
-                                        entry_dt = entry_dt.replace(tzinfo=timezone.utc)
+                                        entry_dt = entry_dt.replace(tzinfo=dt_timezone.utc)
                                     time_valid = order_dt_utc >= entry_dt
                                 except Exception as e:
                                     logger.warning(f"OrderMonitor: Could not parse/convert order times for time check: {e}")
@@ -2135,40 +1968,6 @@ class OrderMonitor:
         except Exception as e:
             logger.error(f"OrderMonitor: Error in _update_broker_executions_pnl: {e}")
 
-    def _extract_current_quantity_from_position(self, position_data, broker_name):
-        """
-        Extract current quantity from position data based on broker type.
-        Used to detect if position is closed (qty=0).
-        
-        Args:
-            position_data: Position data dictionary from broker
-            broker_name: Name of the broker (zerodha, fyers, etc.)
-            
-        Returns:
-            int: Current position quantity, 0 if closed or not available
-        """
-        try:
-            if not position_data or not broker_name:
-                return 0
-                
-            broker_name_lower = broker_name.lower()
-            
-            if broker_name_lower == "zerodha":
-                # Zerodha uses 'quantity' field for current position
-                qty = position_data.get('quantity', 0)
-            elif broker_name_lower == "fyers":
-                # Fyers uses 'qty' field for current position
-                qty = position_data.get('qty', 0)
-            else:
-                # Fallback: try common field names
-                qty = position_data.get('qty', 0) or position_data.get('quantity', 0)
-                
-            return int(qty) if qty is not None else 0
-            
-        except Exception as e:
-            logger.error(f"OrderMonitor: Error extracting current quantity from position data for broker={broker_name}: {e}")
-            return 0
-
     async def _get_normalized_broker_status(self, bro, broker_name, cache_lookup_order_id):
         """
         Helper to get latest broker status from cache (if available), fallback to DB, and normalize.
@@ -2458,30 +2257,3 @@ class OrderMonitor:
             return self.strategy_instance
         _, _, _, strategy = await self._get_order_and_strategy(self.order_id)
         return strategy
-
-    async def _get_all_broker_positions_with_cache(self):
-        """
-        Helper to get all broker positions, fetches fresh data every time (no cache).
-        """
-        logger.info(f"OrderMonitor: Fetching fresh broker positions from broker_manager...")
-        try:
-            positions = await self.order_manager.broker_manager.get_all_broker_positions()
-            logger.info(f"OrderMonitor: Successfully fetched broker positions: {type(positions)}")
-            
-            if positions:
-                if isinstance(positions, dict):
-                    logger.info(f"OrderMonitor: Positions summary: {len(positions)} brokers")
-                    for broker, pos_list in positions.items():
-                        if isinstance(pos_list, list):
-                            logger.info(f"  - {broker}: {len(pos_list)} positions")
-                        else:
-                            logger.warning(f"  - {broker}: positions not a list - {type(pos_list)}")
-                else:
-                    logger.warning(f"OrderMonitor: Positions response is not a dict: {positions}")
-            else:
-                logger.warning(f"OrderMonitor: No positions returned from broker_manager")
-            
-            return positions
-        except Exception as e:
-            logger.error(f"OrderMonitor: Error fetching broker positions: {e}", exc_info=True)
-            return None
