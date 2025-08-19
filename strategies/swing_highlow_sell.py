@@ -1672,6 +1672,8 @@ class SwingHighLowSellStrategy(StrategyBase):
                         else:
                             logger.error(f"💥   Broker {broker_id}: No response data available")
             
+            # Note: Return None since both hedge cleanup was attempted and main order failed
+            # The hedge order should be marked as CLOSED by the cleanup above
             return None
         
     async def evaluate_exit(self, order_row):

@@ -814,6 +814,11 @@ class OptionSellStrategy(StrategyBase):
             # Include hedge order information for monitoring
             result = {**order_request_dict, **main_order_result}
             
+            # Include hedge_order_id if available for order monitoring
+            if hedge_order_id:
+                result["hedge_order_id"] = hedge_order_id
+                logger.debug(f"🎯 Including hedge_order_id {hedge_order_id} in process_cycle result")
+            
             return result
 
         except Exception as e:

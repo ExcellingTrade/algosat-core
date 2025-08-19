@@ -230,13 +230,19 @@ class OrderMonitor:
                     quick_order_check = await get_order_by_id(session, self.order_id)
                     if quick_order_check:
                         quick_status = quick_order_check.get('status')
+                        hedge_indicator = "🛡️[HEDGE]" if self.is_hedge else "📈[MAIN]"
+                        order_symbol = quick_order_check.get('strike_symbol', 'N/A')
+                        parent_id = quick_order_check.get('parent_order_id')
+                        
                         if quick_status and quick_status.endswith('_PENDING'):
-                            logger.info(f"OrderMonitor: 🚨 PENDING status detected immediately: {quick_status} for order_id={self.order_id}")
+                            logger.info(f"OrderMonitor: {hedge_indicator} 🚨 PENDING status detected immediately: {quick_status} " +
+                                       f"for order_id={self.order_id}, symbol={order_symbol}" + 
+                                       (f", parent_id={parent_id}" if parent_id else ""))
                             # Process PENDING exit with minimal data
                             await self._check_and_complete_pending_exits(quick_order_check, quick_status)
                             # If monitor stopped during PENDING processing, exit loop
                             if not self._running:
-                                logger.info(f"OrderMonitor: Monitor stopped after immediate PENDING processing for order_id={self.order_id}")
+                                logger.info(f"OrderMonitor: {hedge_indicator} Monitor stopped after immediate PENDING processing for order_id={self.order_id}")
                                 return
                             # Clear cache after PENDING processing to get fresh data
                             await self._clear_order_cache("After immediate PENDING processing")
@@ -295,75 +301,92 @@ class OrderMonitor:
             current_time = datetime.now(pytz.timezone('Asia/Kolkata'))
             current_time_only = current_time.time()
             
-            # For non-DELIVERY orders: check square_off_time
-            if product_type and product_type.upper() != 'DELIVERY':
-                square_off_time_str = None
-                if trade_config:
-                    square_off_time_str = trade_config.get('square_off_time')
+            # HEDGE ORDER PROTECTION: Hedge orders should NOT trigger time-based exits
+            # Only main orders should handle square-off and AWAITING_ENTRY exits
+            if self.is_hedge:
+                logger.info(f"OrderMonitor: {hedge_indicator} Skipping time-based exit logic for hedge order_id={self.order_id}")
+            else:
+                logger.debug(f"OrderMonitor: {hedge_indicator} Checking time-based exit logic for main order_id={self.order_id}")
+            
+                # For non-DELIVERY orders: check square_off_time
+                if product_type and product_type.upper() != 'DELIVERY':
+                    square_off_time_str = None
+                    if trade_config:
+                        square_off_time_str = trade_config.get('square_off_time')
+                    
+                    if square_off_time_str:
+                        try:
+                            # Parse square_off_time (e.g., "15:25" -> time(15, 25))
+                            hour, minute = map(int, square_off_time_str.split(':'))
+                            square_off_time = dt_time(hour, minute)
+                            
+                            if current_time_only >= square_off_time:
+                                logger.info(f"OrderMonitor: {hedge_indicator} Square-off time {square_off_time_str} reached for non-DELIVERY order_id={self.order_id}. Exiting order.")
+                                try:
+                                    msg = f"⏰ <b>Square-off Exit Triggered</b>\n<b>Order ID:</b> <code>{self.order_id}</code>\n<b>Time:</b> <code>{square_off_time_str}</code>"
+                                    send_telegram_async(msg)
+                                except Exception as e:
+                                    logger.error(f"Failed to send Telegram square-off notification: {e}")
+                                try:
+                                    # Square-off time exit handling
+                                    from algosat.common import constants
+                                    await self.order_manager.exit_order(self.order_id, exit_reason=f"Square-off time {square_off_time_str} reached")
+                                    await self.order_manager.update_order_status_in_db(self.order_id, f"{constants.TRADE_STATUS_EXIT_EOD}_PENDING")
+                                    await self._clear_order_cache("Square-off time exit status updated to PENDING")
+                                    logger.info(f"OrderMonitor: {hedge_indicator} EOD exit set to PENDING for order_id={self.order_id}. PENDING processor will complete the exit.")
+                                    # Continue monitoring loop - PENDING check at beginning will handle completion
+                                    continue
+                                except Exception as e:
+                                    logger.error(f"OrderMonitor: {hedge_indicator} Failed to exit order {self.order_id} at square-off time: {e}")
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: {hedge_indicator} Error parsing square_off_time '{square_off_time_str}': {e}")
                 
-                if square_off_time_str:
+                # For DELIVERY orders: stop monitoring at 3:30 PM
+                elif product_type and product_type.upper() == 'DELIVERY':
+                    market_close_time = dt_time(15, 30)  # 3:30 PM
+                    if current_time_only >= market_close_time:
+                        logger.info(f"OrderMonitor: {hedge_indicator} Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
+                        self.stop()
+                        return
+                
+                # Exit AWAITING_ENTRY orders at 15:25 (regardless of product type)
+                awaiting_entry_exit_time = dt_time(15, 25)  # 3:25 PM
+                current_status = order_row.get('status') if order_row else None
+                if (current_time_only >= awaiting_entry_exit_time and 
+                    current_status in ('AWAITING_ENTRY', OrderStatus.AWAITING_ENTRY)):
+                    logger.info(f"OrderMonitor: {hedge_indicator} 15:25 reached for AWAITING_ENTRY order_id={self.order_id}. Exiting order.")
                     try:
-                        # Parse square_off_time (e.g., "15:25" -> time(15, 25))
-                        hour, minute = map(int, square_off_time_str.split(':'))
-                        square_off_time = dt_time(hour, minute)
-                        
-                        if current_time_only >= square_off_time:
-                            logger.info(f"OrderMonitor: Square-off time {square_off_time_str} reached for non-DELIVERY order_id={self.order_id}. Exiting order.")
-                            try:
-                                msg = f"⏰ <b>Square-off Exit Triggered</b>\n<b>Order ID:</b> <code>{self.order_id}</code>\n<b>Time:</b> <code>{square_off_time_str}</code>"
-                                send_telegram_async(msg)
-                            except Exception as e:
-                                logger.error(f"Failed to send Telegram square-off notification: {e}")
-                            try:
-                                # Square-off time exit handling
-                                from algosat.common import constants
-                                await self.order_manager.exit_order(self.order_id, exit_reason=f"Square-off time {square_off_time_str} reached")
-                                await self.order_manager.update_order_status_in_db(self.order_id, f"{constants.TRADE_STATUS_EXIT_EOD}_PENDING")
-                                await self._clear_order_cache("Square-off time exit status updated to PENDING")
-                                logger.info(f"OrderMonitor: EOD exit set to PENDING for order_id={self.order_id}. PENDING processor will complete the exit.")
-                                # Continue monitoring loop - PENDING check at beginning will handle completion
-                            except Exception as e:
-                                logger.error(f"OrderMonitor: Failed to exit order {self.order_id} at square-off time: {e}")
+                        msg = f"🚫 <b>AWAITING_ENTRY Cancelled</b>\n<b>Order ID:</b> <code>{self.order_id}</code>\n<b>Reason:</b> <code>15:25 reached, cancelling unfilled order</code>"
+                        send_telegram_async(msg)
                     except Exception as e:
-                        logger.error(f"OrderMonitor: Error parsing square_off_time '{square_off_time_str}': {e}")
-            
-            # For DELIVERY orders: stop monitoring at 3:30 PM
-            elif product_type and product_type.upper() == 'DELIVERY':
-                market_close_time = dt_time(15, 30)  # 3:30 PM
-                if current_time_only >= market_close_time:
-                    logger.info(f"OrderMonitor: Market close time 15:30 reached for DELIVERY order_id={self.order_id}. Stopping monitoring.")
-                    self.stop()
-                    return
-            
-            # Exit AWAITING_ENTRY orders at 15:25 (regardless of product type)
-            awaiting_entry_exit_time = dt_time(15, 25)  # 3:25 PM
-            current_status = order_row.get('status') if order_row else None
-            if (current_time_only >= awaiting_entry_exit_time and 
-                current_status in ('AWAITING_ENTRY', OrderStatus.AWAITING_ENTRY)):
-                logger.info(f"OrderMonitor: 15:25 reached for AWAITING_ENTRY order_id={self.order_id}. Exiting order.")
-                try:
-                    msg = f"🚫 <b>AWAITING_ENTRY Cancelled</b>\n<b>Order ID:</b> <code>{self.order_id}</code>\n<b>Reason:</b> <code>15:25 reached, cancelling unfilled order</code>"
-                    send_telegram_async(msg)
-                except Exception as e:
-                    logger.error(f"Failed to send Telegram awaiting_entry cancel notification: {e}")
-                try:
-                    await self.order_manager.exit_order(self.order_id, exit_reason="AWAITING_ENTRY order exit at 15:25")
-                    # Update status to CANCELLED
-                    await self.order_manager.update_order_status_in_db(self.order_id, "CANCELLED")
-                    await self._clear_order_cache("AWAITING_ENTRY exit status updated")
-                    self.stop()
-                    return
-                except Exception as e:
-                    logger.error(f"OrderMonitor: Failed to exit AWAITING_ENTRY order {self.order_id} at 15:25: {e}")
-                    return
+                        logger.error(f"Failed to send Telegram awaiting_entry cancel notification: {e}")
+                    try:
+                        await self.order_manager.exit_order(self.order_id, exit_reason="AWAITING_ENTRY order exit at 15:25")
+                        # Update status to CANCELLED
+                        await self.order_manager.update_order_status_in_db(self.order_id, "CANCELLED")
+                        await self._clear_order_cache("AWAITING_ENTRY exit status updated")
+                        self.stop()
+                        return
+                    except Exception as e:
+                        logger.error(f"OrderMonitor: {hedge_indicator} Failed to exit AWAITING_ENTRY order {self.order_id} at 15:25: {e}")
+                        return
 
             # --- P&L monitoring using DB data and current LTP (simplified approach) ---
             current_status = order_row.get('status') if order_row and order_row.get('status') else last_main_status
-            logger.debug(f"CurrentStatus: {current_status} for order_id={self.order_id}")
+            order_symbol = order_row.get('strike_symbol') if order_row else 'N/A'
+            hedge_indicator = "🛡️[HEDGE]" if self.is_hedge else "📈[MAIN]"
+            parent_id = order_row.get('parent_order_id') if order_row else None
+            
+            logger.info(f"OrderMonitor: {hedge_indicator} CurrentStatus: {current_status} for order_id={self.order_id}, symbol={order_symbol}" + 
+                       (f", parent_id={parent_id}" if parent_id else ""))
+            
             # --- Telegram notification for status transition to OPEN ---
             try:
                 if current_status == 'OPEN' and last_main_status != 'OPEN':
-                    msg = f"🟢 <b>Order OPEN</b>\n<b>Order ID:</b> <code>{self.order_id}</code>"
+                    hedge_tag = "🛡️ HEDGE " if self.is_hedge else ""
+                    msg = f"🟢 <b>{hedge_tag}Order OPEN</b>\n<b>Order ID:</b> <code>{self.order_id}</code>" + \
+                          (f"\n<b>Parent ID:</b> <code>{parent_id}</code>" if parent_id else "") + \
+                          f"\n<b>Symbol:</b> <code>{order_symbol}</code>"
                     send_telegram_async(msg)
             except Exception as e:
                 logger.error(f"Failed to send Telegram OPEN notification: {e}")
@@ -372,22 +395,31 @@ class OrderMonitor:
             entry_broker_db_orders = [bro for bro in agg.broker_orders if getattr(bro, 'side', None) == 'ENTRY']
             all_statuses = []
             status_set = set()
+            
+            logger.info(f"OrderMonitor: {hedge_indicator} Processing {len(entry_broker_db_orders)} ENTRY broker executions for order_id={self.order_id}, symbol={order_symbol}")
+            
             try:
                 for bro in entry_broker_db_orders:
                     try:
                         broker_exec_id = getattr(bro, 'id', None)
                         broker_order_id = getattr(bro, 'order_id', None)
                         broker_id = getattr(bro, 'broker_id', None)
+                        broker_symbol = getattr(bro, 'symbol', None) or getattr(bro, 'tradingsymbol', None)
+                        
+                        logger.debug(f"OrderMonitor: {hedge_indicator} Processing broker_exec_id={broker_exec_id}, " +
+                                   f"broker_order_id={broker_order_id}, broker_id={broker_id}, symbol={broker_symbol} for order_id={self.order_id}")
+                        
                         broker_name = None
                         if broker_id is not None:
                             try:
                                 broker_name = await self._get_broker_name_with_cache(broker_id)
                             except Exception as e:
-                                logger.error(f"OrderMonitor: Could not get broker name for broker_id={broker_id}: {e}")
+                                logger.error(f"OrderMonitor: {hedge_indicator} Could not get broker name for broker_id={broker_id}: {e}")
                         # If broker_order_id is None or empty, order is not placed, set status to FAILED
                         cache_order = None
                         if not broker_order_id:
                             broker_status = "FAILED"
+                            logger.warning(f"OrderMonitor: {hedge_indicator} No broker_order_id for exec_id={broker_exec_id}, setting status to FAILED")
                         else:
                             cache_lookup_order_id = self._get_cache_lookup_order_id(
                                 broker_order_id, broker_name, product_type
@@ -396,15 +428,19 @@ class OrderMonitor:
                             if broker_name and cache_lookup_order_id:
                                 try:
                                     cache_order = await self.order_cache.get_order_by_id(broker_name, cache_lookup_order_id)
-                                    logger.debug(f"OrderMonitor: Fetched order from cache for order_id={self.order_id}, broker_name={broker_name}, broker_order_id={cache_lookup_order_id}: {cache_order}")  
+                                    logger.debug(f"OrderMonitor: {hedge_indicator} Fetched order from cache for order_id={self.order_id}, " +
+                                               f"broker_name={broker_name}, broker_order_id={cache_lookup_order_id}: {cache_order}")  
                                 except Exception as e:
-                                    logger.error(f"OrderMonitor: Error fetching order from cache for for order_id={self.order_id},broker_name={broker_name}, order_id={cache_lookup_order_id}: {e}")
+                                    logger.error(f"OrderMonitor: {hedge_indicator} Error fetching order from cache for order_id={self.order_id}," +
+                                               f"broker_name={broker_name}, order_id={cache_lookup_order_id}: {e}")
                             # Use status from cache_order if available, else fallback to DB
                             broker_status = None
                             if cache_order and 'status' in cache_order:
                                 broker_status = cache_order['status']
+                                logger.debug(f"OrderMonitor: {hedge_indicator} Using cache status '{broker_status}' for broker_exec_id={broker_exec_id}")
                             else:
-                                logger.info(f"OrderMonitor: Using DB status for broker_order_id={broker_order_id} as cache_order not found or missing status for order_id {self.order_id}")
+                                logger.info(f"OrderMonitor: {hedge_indicator} Using DB status for broker_order_id={broker_order_id} " +
+                                          f"as cache_order not found or missing status for order_id {self.order_id}")
                                 broker_status = getattr(bro, 'status', None)
                             if broker_status and isinstance(broker_status, int) and broker_name == "fyers":
                                 broker_status = FYERS_STATUS_MAP.get(broker_status, broker_status)
@@ -417,8 +453,12 @@ class OrderMonitor:
 
                         all_statuses.append(broker_status)
                         status_set.add(broker_status)
+                        
+                        logger.info(f"OrderMonitor: {hedge_indicator} Broker execution status: exec_id={broker_exec_id}, " +
+                                  f"broker={broker_name}, symbol={broker_symbol}, status={broker_status}")
                     except Exception as e:
-                        logger.error(f"OrderMonitor: Unexpected error processing broker order (exec_id={getattr(bro, 'id', None)}): {e}", exc_info=True)
+                        logger.error(f"OrderMonitor: {hedge_indicator} Unexpected error processing broker order " +
+                                   f"(exec_id={getattr(bro, 'id', None)}): {e}", exc_info=True)
                         all_statuses.append("FAILED")
                         status_set.add("FAILED")
                     last_status = last_broker_statuses.get(broker_exec_id)
@@ -505,7 +545,8 @@ class OrderMonitor:
                             # Remove None values to avoid unnecessary DB updates
                             comprehensive_update_fields = {k: v for k, v in comprehensive_update_fields.items() if v is not None}
                             
-                            logger.info(f"OrderMonitor: Comprehensive update for broker_exec_id={broker_exec_id} with fields: {list(comprehensive_update_fields.keys())}")
+                            logger.info(f"OrderMonitor: {hedge_indicator} Comprehensive update for broker_exec_id={broker_exec_id} " +
+                                      f"with fields: {list(comprehensive_update_fields.keys())}")
                             
                             async with AsyncSessionLocal() as comp_session:
                                 await update_rows_in_table(
@@ -513,13 +554,14 @@ class OrderMonitor:
                                     condition=broker_executions.c.id == broker_exec_id,
                                     new_values=comprehensive_update_fields
                                 )
-                                logger.debug(f"OrderMonitor: Successfully updated broker_exec_id={broker_exec_id} with comprehensive data")
+                                logger.debug(f"OrderMonitor: {hedge_indicator} Successfully updated broker_exec_id={broker_exec_id} with comprehensive data")
                         else:
                             # Simple status-only update
+                            logger.info(f"OrderMonitor: {hedge_indicator} Simple status update for broker_exec_id={broker_exec_id}: {broker_status}")
                             await self.order_manager.update_broker_exec_status_in_db(broker_exec_id, broker_status)
                         last_broker_statuses[broker_exec_id] = broker_status
             except Exception as e:
-                logger.error(f"OrderMonitor: Unexpected error in broker order status loop: {e}", exc_info=True)
+                logger.error(f"OrderMonitor: {hedge_indicator} Unexpected error in broker order status loop: {e}", exc_info=True)
                
 
             # --- Aggregate and update Orders table with sum of broker_execs quantities ---
@@ -574,16 +616,20 @@ class OrderMonitor:
                             condition=orders.c.id == self.order_id,
                             new_values=update_fields
                         )
-                        logger.info(f"OrderMonitor: Updated Orders table for order_id={self.order_id} with qty={total_quantity}, executed_quantity={total_executed_quantity}, entry_price={entry_price}")
+                        logger.info(f"OrderMonitor: {hedge_indicator} Updated Orders table for order_id={self.order_id} " +
+                                  f"with qty={total_quantity}, executed_quantity={total_executed_quantity}, entry_price={entry_price}")
                     else:
-                        logger.debug(f"OrderMonitor: No change in qty, executed_quantity, entry_price for order_id={self.order_id}. Skipping DB update.")
+                        logger.debug(f"OrderMonitor: {hedge_indicator} No change in qty, executed_quantity, entry_price for order_id={self.order_id}. Skipping DB update.")
             except Exception as e:
-                logger.error(f"OrderMonitor: Error updating aggregated quantity/executed_quantity for order_id={self.order_id}: {e}")
-            logger.info(f"OrderMonitor: Order {self.order_id} ENTRY broker statuses (live): {all_statuses}")
+                logger.error(f"OrderMonitor: {hedge_indicator} Error updating aggregated quantity/executed_quantity for order_id={self.order_id}: {e}")
+            logger.info(f"OrderMonitor: {hedge_indicator} Order {self.order_id} ENTRY broker statuses (live): {all_statuses}")
             # --- Decision logic for main order status ---
             # PRESERVE EXIT STATUS PRIORITY: Don't overwrite exit statuses with broker-derived OPEN status
             current_db_status = order_row.get('status') if order_row else None
             main_status = None
+            
+            logger.info(f"OrderMonitor: {hedge_indicator} Status decision logic: current_db_status={current_db_status}, " +
+                       f"broker_status_set={status_set}")
             
             # Check if current order status is an exit status (base or PENDING) - preserve it
             if current_db_status and (
@@ -593,7 +639,8 @@ class OrderMonitor:
             ):
                 # Preserve the exit/terminal status, don't override with broker status
                 main_status = current_db_status
-                logger.info(f"OrderMonitor: Preserving exit/terminal status '{current_db_status}' for order_id={self.order_id} (not overriding with broker status)")
+                logger.info(f"OrderMonitor: {hedge_indicator} Preserving exit/terminal status '{current_db_status}' " +
+                           f"for order_id={self.order_id} (not overriding with broker status)")
             else:
                 # Normal broker-based status logic for non-exit statuses
                 if any(s in ("FILLED", "PARTIALLY_FILLED", "OPEN") for s in status_set):
@@ -617,7 +664,7 @@ class OrderMonitor:
                 elif main_status == OrderStatus.OPEN and any(s in ("FILLED", "PARTIALLY_FILLED") for s in status_set):
                     from datetime import datetime, timezone
                     entry_time = datetime.now(timezone.utc)
-                    logger.info(f"OrderMonitor: Updating order_id={self.order_id} to {main_status} with entry_time={entry_time}")
+                    logger.info(f"OrderMonitor: {hedge_indicator} Updating order_id={self.order_id} to {main_status} with entry_time={entry_time}")
                     await self.order_manager.update_order_status_in_db(self.order_id, main_status)
                     await self.order_manager.update_order_stop_loss_in_db(self.order_id, order_row.get('stop_loss'))
                     from algosat.core.db import AsyncSessionLocal, update_rows_in_table
@@ -630,32 +677,39 @@ class OrderMonitor:
                     )
                     await self._clear_order_cache("Order status updated to OPEN with entry_time")
                 else:
-                    logger.info(f"OrderMonitor: Updating order_id={self.order_id} to {main_status}")
+                    logger.info(f"OrderMonitor: {hedge_indicator} Updating order_id={self.order_id} to {main_status}")
                     await self.order_manager.update_order_status_in_db(self.order_id, main_status)
                     await self._clear_order_cache(f"Order status updated to {main_status}")
                 last_main_status = main_status
                 if main_status in (OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.FAILED):
-                    logger.info(f"OrderMonitor: Order {self.order_id} reached terminal status {main_status}. Checking for child orders to close.")
+                    logger.info(f"OrderMonitor: {hedge_indicator} Order {self.order_id} reached terminal status {main_status}. Checking for child orders to close.")
                     
                     # CRITICAL FIX: Close child orders when main order fails
-                    try:
-                        if await self.order_manager.has_child_orders(self.order_id):
-                            logger.info(f"OrderMonitor: Found child orders for failed order {self.order_id}. Closing them before stopping monitor.")
-                            await self.order_manager.exit_child_orders(
-                                parent_order_id=self.order_id,
-                                exit_reason=f"Parent order {self.order_id} reached terminal status {main_status}",
-                                check_live_status=True  # Check live status to update hedge orders before exit decisions
-                            )
-                            logger.info(f"OrderMonitor: Successfully closed child orders for failed order {self.order_id}")
-                        else:
-                            logger.debug(f"OrderMonitor: No child orders found for order {self.order_id}")
-                    except Exception as e:
-                        logger.error(f"OrderMonitor: Error closing child orders for failed order {self.order_id}: {e}", exc_info=True)
-                        # Continue to stop monitor even if child order closure fails
+                    # NOTE: This should only apply to main orders, not hedge orders
+                    if not self.is_hedge:
+                        try:
+                            if await self.order_manager.has_child_orders(self.order_id):
+                                logger.info(f"OrderMonitor: {hedge_indicator} Found child orders for failed main order {self.order_id}. Closing them before stopping monitor.")
+                                await self.order_manager.exit_child_orders(
+                                    parent_order_id=self.order_id,
+                                    exit_reason=f"Parent order {self.order_id} reached terminal status {main_status}",
+                                    check_live_status=True  # Check live status to update hedge orders before exit decisions
+                                )
+                                logger.info(f"OrderMonitor: {hedge_indicator} Successfully closed child orders for failed order {self.order_id}")
+                            else:
+                                logger.debug(f"OrderMonitor: {hedge_indicator} No child orders found for order {self.order_id}")
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: {hedge_indicator} Error closing child orders for failed order {self.order_id}: {e}", exc_info=True)
+                            # Continue to stop monitor even if child order closure fails
+                    else:
+                        logger.info(f"OrderMonitor: {hedge_indicator} Hedge order {self.order_id} reached terminal status {main_status}. Skipping child order closure logic.")
                     
-                    logger.info(f"OrderMonitor: Order {self.order_id} reached terminal status {main_status}. Stopping monitor.")
+                    logger.info(f"OrderMonitor: {hedge_indicator} Order {self.order_id} reached terminal status {main_status}. Stopping monitor.")
                     try:
-                        msg = f"❗ <b>Order Terminal Status</b>\n<b>Order ID:</b> <code>{self.order_id}</code>\n<b>Status:</b> <code>{main_status}</code>\nAll brokers reported this status. Stopping monitor."
+                        hedge_tag = "🛡️ HEDGE " if self.is_hedge else ""
+                        msg = f"❗ <b>{hedge_tag}Order Terminal Status</b>\n<b>Order ID:</b> <code>{self.order_id}</code>" + \
+                              (f"\n<b>Parent ID:</b> <code>{parent_id}</code>" if parent_id else "") + \
+                              f"\n<b>Status:</b> <code>{main_status}</code>\n<b>Symbol:</b> <code>{order_symbol}</code>\nAll brokers reported this status. Stopping monitor."
                         send_telegram_async(msg)
                     except Exception as e:
                         logger.error(f"Failed to send Telegram terminal status notification: {e}")
@@ -687,13 +741,14 @@ class OrderMonitor:
                 # Fetch current LTP once for both exit logic and position monitoring
                 current_ltp = await self._update_current_price_for_open_order(order_row)
                 
-                # Price-based exit logic for OptionBuy and OptionSell strategies (skip for hedge orders)
+                # HEDGE ORDER PROTECTION: Price-based exits should only apply to main orders
                 if not self.is_hedge:
                     await self._check_price_based_exit(order_row, strategy, actual_order_status, current_ltp)
                 else:
-                    logger.debug(f"OrderMonitor: Skipping price-based exit check for hedge order {self.order_id}")
+                    logger.debug(f"OrderMonitor: {hedge_indicator} Skipping price-based exit check for hedge order {self.order_id}")
                 
                 # P&L calculation using DB data and current LTP (simplified approach)
+                # NOTE: This P&L calculation should apply to both main and hedge orders for monitoring purposes
                 try:
                     # Get ENTRY broker executions from database
                     async with AsyncSessionLocal() as session:
@@ -701,10 +756,10 @@ class OrderMonitor:
                     
                     # Use the LTP already fetched above for PnL calculations
                     if current_ltp is None or current_ltp <= 0:
-                        logger.warning(f"OrderMonitor: Invalid LTP ({current_ltp}) for order_id={self.order_id}, setting to 0 for PnL calculation")
+                        logger.warning(f"OrderMonitor: {hedge_indicator} Invalid LTP ({current_ltp}) for order_id={self.order_id}, setting to 0 for PnL calculation")
                         current_ltp = 0.0
                     else:
-                        logger.debug(f"OrderMonitor: Using fetched LTP={current_ltp} for PnL calculation for order_id={self.order_id}")
+                        logger.debug(f"OrderMonitor: {hedge_indicator} Using fetched LTP={current_ltp} for PnL calculation for order_id={self.order_id}")
                     
                     total_pnl = 0.0
                     valid_executions_count = 0
@@ -724,7 +779,7 @@ class OrderMonitor:
                             executed_quantity <= 0 or
                             entry_price is None or 
                             entry_price <= 0):
-                            logger.debug(f"OrderMonitor: Skipping P&L calculation for broker execution - "
+                            logger.debug(f"OrderMonitor: {hedge_indicator} Skipping P&L calculation for broker execution - "
                                        f"status={broker_status}, symbol={symbol_val}, qty={executed_quantity}, price={entry_price}")
                             continue
                         
@@ -732,18 +787,18 @@ class OrderMonitor:
                         execution_pnl = 0.0
                         if entry_side == 'BUY':
                             # Long position: profit when current_price > entry_price
-                            execution_pnl = (current_ltp - entry_price) * executed_quantity
+                            execution_pnl = (current_ltp - float(entry_price)) * executed_quantity
                         elif entry_side == 'SELL':
                             # Short position: profit when current_price < entry_price
-                            execution_pnl = (entry_price - current_ltp) * executed_quantity
+                            execution_pnl = (float(entry_price) - current_ltp) * executed_quantity
                         else:
-                            logger.warning(f"OrderMonitor: Unknown entry side '{entry_side}' for P&L calculation")
+                            logger.warning(f"OrderMonitor: {hedge_indicator} Unknown entry side '{entry_side}' for P&L calculation")
                             continue
                         
                         total_pnl += execution_pnl
                         valid_executions_count += 1
                         
-                        logger.info(f"OrderMonitor: P&L calculation for execution:")
+                        logger.info(f"OrderMonitor: {hedge_indicator} P&L calculation for execution:")
                         logger.info(f"  Broker ID: {bro.get('broker_id')}")
                         logger.info(f"  Entry Side: {entry_side}")
                         logger.info(f"  Entry Price: {entry_price}")
@@ -751,86 +806,91 @@ class OrderMonitor:
                         logger.info(f"  Executed Quantity: {executed_quantity}")
                         logger.info(f"  Execution P&L: {execution_pnl}")
                     
-                    logger.info(f"OrderMonitor: Total P&L calculation completed for order_id={self.order_id}:")
+                    logger.info(f"OrderMonitor: {hedge_indicator} Total P&L calculation completed for order_id={self.order_id}:")
                     logger.info(f"  Valid executions processed: {valid_executions_count}")
                     logger.info(f"  Total P&L: {total_pnl}")
                     
                     # Update order PnL field in DB
                     try:
-                        logger.info(f"OrderMonitor: About to update PnL for order_id={self.order_id} with value={total_pnl}")
+                        logger.info(f"OrderMonitor: {hedge_indicator} About to update PnL for order_id={self.order_id} with value={total_pnl}")
                         await self.order_manager.update_order_pnl_in_db(self.order_id, total_pnl)
-                        logger.info(f"OrderMonitor: Successfully called update_order_pnl_in_db for order_id={self.order_id}: {total_pnl}")
+                        logger.info(f"OrderMonitor: {hedge_indicator} Successfully called update_order_pnl_in_db for order_id={self.order_id}: {total_pnl}")
                         
                         # Verify the update by reading back from DB
                         from algosat.core.db import AsyncSessionLocal, get_order_by_id
                         async with AsyncSessionLocal() as session:
                             updated_order = await get_order_by_id(session, self.order_id)
                             current_pnl_in_db = updated_order.get('pnl') if updated_order else None
-                            logger.info(f"OrderMonitor: PnL verification for order_id={self.order_id} - Expected: {total_pnl}, Actual in DB: {current_pnl_in_db}")
+                            logger.info(f"OrderMonitor: {hedge_indicator} PnL verification for order_id={self.order_id} - Expected: {total_pnl}, Actual in DB: {current_pnl_in_db}")
                     except Exception as e:
-                        logger.error(f"OrderMonitor: Error updating order PnL for order_id={self.order_id}: {e}")
+                        logger.error(f"OrderMonitor: {hedge_indicator} Error updating order PnL for order_id={self.order_id}: {e}")
                     
                     # � UPDATE BROKER EXECUTIONS PNL: Update P&L for all ENTRY broker executions using current LTP
                     try:
                         await self._update_broker_executions_pnl(current_ltp, entry_broker_db_orders)
                     except Exception as e:
-                        logger.error(f"OrderMonitor: Error updating broker executions P&L for order_id={self.order_id}: {e}")
+                        logger.error(f"OrderMonitor: {hedge_indicator} Error updating broker executions P&L for order_id={self.order_id}: {e}")
                     
-                    # �🚨 PER-TRADE LOSS VALIDATION 🚨
-                    try:
-                        # 1. Get trade enabled brokers count from risk summary and current order data
-                        from algosat.core.db import get_broker_risk_summary
-                        async with AsyncSessionLocal() as session:
-                            risk_data = await get_broker_risk_summary(session)
-                            trade_enabled_brokers = risk_data.get('summary', {}).get('trade_enabled_brokers', 0)
+                    # �🚨 PER-TRADE LOSS VALIDATION - ONLY FOR MAIN ORDERS 🚨
+                    # HEDGE ORDER PROTECTION: Hedge orders should NOT trigger loss limit exits
+                    if not self.is_hedge:
+                        try:
+                            # 1. Get trade enabled brokers count from risk summary and current order data
+                            from algosat.core.db import get_broker_risk_summary
+                            async with AsyncSessionLocal() as session:
+                                risk_data = await get_broker_risk_summary(session)
+                                trade_enabled_brokers = risk_data.get('summary', {}).get('trade_enabled_brokers', 0)
+                                
+                                # 2. Get lot_qty from current order (within same session)
+                                current_order = await get_order_by_id(session, self.order_id)
+                                lot_qty = current_order.get('lot_qty', 0) if current_order else 0
                             
-                            # 2. Get lot_qty from current order (within same session)
-                            current_order = await get_order_by_id(session, self.order_id)
-                            lot_qty = current_order.get('lot_qty', 0) if current_order else 0
-                        
-                        # 3. Get max_loss_per_lot from strategy config
-                        max_loss_per_lot = 0
-                        if strategy_config and strategy_config.get('trade'):
-                            import json
-                            try:
-                                trade_config = json.loads(strategy_config['trade']) if isinstance(strategy_config['trade'], str) else strategy_config['trade']
-                                max_loss_per_lot = trade_config.get('max_loss_per_lot', 0)
-                            except Exception as e:
-                                logger.error(f"OrderMonitor: Error parsing trade config for max_loss_per_lot: {e}")
-                        
-                        # 4. Calculate total risk exposure
-                        total_risk_exposure = lot_qty * trade_enabled_brokers * max_loss_per_lot
-                        
-                        # 5. Check if loss exceeds limit
-                        if total_risk_exposure > 0 and total_pnl < -abs(total_risk_exposure):
-                            logger.critical(f"🚨 PER-TRADE LOSS LIMIT EXCEEDED for order_id={self.order_id}! "
-                                          f"Current P&L: {total_pnl}, Max Loss: {total_risk_exposure} "
-                                          f"(lot_qty: {lot_qty} × brokers: {trade_enabled_brokers} × max_loss_per_lot: {max_loss_per_lot})")
+                            # 3. Get max_loss_per_lot from strategy config
+                            max_loss_per_lot = 0
+                            if strategy_config and strategy_config.get('trade'):
+                                import json
+                                try:
+                                    trade_config = json.loads(strategy_config['trade']) if isinstance(strategy_config['trade'], str) else strategy_config['trade']
+                                    max_loss_per_lot = trade_config.get('max_loss_per_lot', 0)
+                                except Exception as e:
+                                    logger.error(f"OrderMonitor: {hedge_indicator} Error parsing trade config for max_loss_per_lot: {e}")
                             
-                            # 6. Exit the order immediately
-                            await self.order_manager.exit_order(self.order_id, exit_reason="Per-trade loss limit exceeded")
-                            # Update status to max loss exit PENDING - let check_and_complete_pending_exits handle completion
-                            from algosat.common import constants
-                            await self.order_manager.update_order_status_in_db(self.order_id, f"{constants.TRADE_STATUS_EXIT_MAX_LOSS}_PENDING")
-                            await self._clear_order_cache("Per-trade loss limit exit status updated to PENDING")
-                            logger.critical(f"🚨 Per-trade loss limit exit set to PENDING for order_id={self.order_id}. PENDING processor will complete the exit.")
-                            # Continue monitoring loop - PENDING check at beginning will handle completion
-                        else:
-                            logger.debug(f"OrderMonitor: Per-trade risk check passed for order_id={self.order_id}. "
-                                       f"P&L: {total_pnl}, Risk exposure: {total_risk_exposure}")
+                            # 4. Calculate total risk exposure
+                            total_risk_exposure = lot_qty * trade_enabled_brokers * max_loss_per_lot
                             
-                    except Exception as e:
-                        logger.error(f"OrderMonitor: Error in per-trade loss validation for order_id={self.order_id}: {e}")
+                            # 5. Check if loss exceeds limit
+                            if total_risk_exposure > 0 and total_pnl < -abs(total_risk_exposure):
+                                logger.critical(f"🚨 {hedge_indicator} PER-TRADE LOSS LIMIT EXCEEDED for order_id={self.order_id}! "
+                                              f"Current P&L: {total_pnl}, Max Loss: {total_risk_exposure} "
+                                              f"(lot_qty: {lot_qty} × brokers: {trade_enabled_brokers} × max_loss_per_lot: {max_loss_per_lot})")
+                                
+                                # 6. Exit the order immediately
+                                await self.order_manager.exit_order(self.order_id, exit_reason="Per-trade loss limit exceeded")
+                                # Update status to max loss exit PENDING - let check_and_complete_pending_exits handle completion
+                                from algosat.common import constants
+                                await self.order_manager.update_order_status_in_db(self.order_id, f"{constants.TRADE_STATUS_EXIT_MAX_LOSS}_PENDING")
+                                await self._clear_order_cache("Per-trade loss limit exit status updated to PENDING")
+                                logger.critical(f"🚨 {hedge_indicator} Per-trade loss limit exit set to PENDING for order_id={self.order_id}. PENDING processor will complete the exit.")
+                                # Continue monitoring loop - PENDING check at beginning will handle completion
+                                continue
+                            else:
+                                logger.debug(f"OrderMonitor: {hedge_indicator} Per-trade risk check passed for order_id={self.order_id}. "
+                                           f"P&L: {total_pnl}, Risk exposure: {total_risk_exposure}")
+                                
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: {hedge_indicator} Error in per-trade loss validation for order_id={self.order_id}: {e}")
+                    else:
+                        logger.debug(f"OrderMonitor: {hedge_indicator} Skipping per-trade loss validation for hedge order {self.order_id}")
                     
                     # Note: Position closure detection has been removed since we now rely on 
                     # exit order status tracking instead of broker position matching
                     
                 except Exception as e:
-                    logger.error(f"OrderMonitor: Error in P&L monitoring: {e}", exc_info=True)
-            logger.debug(f"OrderMonitor: Broker position monitoring completed for order_id={self.order_id}")
+                    logger.error(f"OrderMonitor: {hedge_indicator} Error in P&L monitoring: {e}", exc_info=True)
+            logger.debug(f"OrderMonitor: {hedge_indicator} Broker position monitoring completed for order_id={self.order_id}")
             logger.debug("Next check in {self.price_order_monitor_seconds} seconds...")
             await asyncio.sleep(self.price_order_monitor_seconds)
-        logger.info(f"OrderMonitor: Stopping price monitor for order_id={self.order_id} (last status: {last_main_status})")
+        logger.info(f"OrderMonitor: {hedge_indicator} Stopping price monitor for order_id={self.order_id} (last status: {last_main_status})")
     
     async def _check_price_based_exit(self, order_row, strategy, current_main_status, current_ltp=None):
         """
@@ -844,11 +904,23 @@ class OrderMonitor:
             current_ltp: Pre-fetched LTP to avoid duplicate API calls (optional)
         """
         try:
-            logger.info(f"OrderMonitor: Starting price-based exit check for order_id={self.order_id}, status={current_main_status}")
+            order_symbol = order_row.get('strike_symbol', 'N/A') if order_row else 'N/A'
+            hedge_indicator = "🛡️[HEDGE]" if self.is_hedge else "📈[MAIN]"
+            parent_id = order_row.get('parent_order_id') if order_row else None
+            
+            logger.info(f"OrderMonitor: {hedge_indicator} Starting price-based exit check for order_id={self.order_id}, " +
+                       f"symbol={order_symbol}, status={current_main_status}" + 
+                       (f", parent_id={parent_id}" if parent_id else ""))
+            
+            # HEDGE ORDER PROTECTION: Hedge orders should NEVER trigger price-based exits
+            if self.is_hedge:
+                logger.info(f"OrderMonitor: {hedge_indicator} BLOCKING price-based exit check for hedge order_id={self.order_id}. " +
+                           f"Hedge orders should not trigger independent exits.")
+                return
             
             # Only check for OPEN orders
             if current_main_status != 'OPEN':
-                logger.debug(f"OrderMonitor: ⏸️ SKIP: Price check skipped - order_id={self.order_id} status is '{current_main_status}', not 'OPEN'")
+                logger.debug(f"OrderMonitor: {hedge_indicator} ⏸️ SKIP: Price check skipped - order_id={self.order_id} status is '{current_main_status}', not 'OPEN'")
                 return
             
             # Only for OptionBuy and OptionSell strategies
@@ -1935,10 +2007,10 @@ class OrderMonitor:
                         #                (entry_price - current_price) * quantity for SELL
                         if entry_side == 'BUY':
                             # Long position: profit when current_price > entry_price
-                            calculated_pnl = (current_ltp - execution_price) * executed_quantity
+                            calculated_pnl = (current_ltp - float(execution_price)) * executed_quantity
                         elif entry_side == 'SELL':
                             # Short position: profit when current_price < entry_price
-                            calculated_pnl = (execution_price - current_ltp) * executed_quantity
+                            calculated_pnl = (float(execution_price) - current_ltp) * executed_quantity
                         else:
                             logger.warning(f"OrderMonitor: Unknown entry side '{entry_side}' for P&L calculation")
                             calculated_pnl = 0.0

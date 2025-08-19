@@ -427,27 +427,6 @@ class DataManager:
             # Get broker executions for main order
             broker_execs = await get_broker_executions_for_order(session, parent_order_id)
             
-            # ENHANCEMENT: Also get broker executions for child orders (hedge orders)
-            # This ensures hedge orders get status updates without separate monitoring
-            try:
-                from algosat.core.db import get_child_orders
-                child_orders = await get_child_orders(session, parent_order_id)
-                logger.debug(f"OrderAggregate: Found {len(child_orders)} child orders for parent_order_id={parent_order_id}")
-                
-                for child_order in child_orders:
-                    child_order_id = child_order['id']
-                    child_broker_execs = await get_broker_executions_for_order(session, child_order_id)
-                    logger.debug(f"OrderAggregate: Found {len(child_broker_execs)} broker executions for child_order_id={child_order_id}")
-                    # Add child broker executions to the main list
-                    for child_be in child_broker_execs:
-                        broker_execs.append(child_be)
-                
-                logger.info(f"OrderAggregate: Total broker executions (main + child): {len(broker_execs)} for parent_order_id={parent_order_id}")
-                
-            except Exception as e:
-                logger.error(f"OrderAggregate: Error fetching child order broker executions for parent_order_id={parent_order_id}: {e}")
-                # Continue with main order broker executions only
-            
             symbol = order_row.get("strike_symbol", "Unknown")
             broker_orders: List[BrokerOrder] = []
             for be in broker_execs:
