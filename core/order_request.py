@@ -114,7 +114,10 @@ class OrderRequest(BaseModel):
         # Get base values
         limit_price = float(self.price) if self.price is not None else 0
         stop_loss_raw = getattr(self, 'stop_loss', None) or self.extra.get("stopLoss") or self.extra.get("stoploss") or self.extra.get("stop_loss") or 0
-        take_profit_raw = self.extra.get("takeProfit", 0)
+        
+        # For takeProfit, prioritize target_price over pre-calculated takeProfit
+        target_price_from_extra = self.extra.get("target_price")
+        take_profit_raw = target_price_from_extra if target_price_from_extra is not None else self.extra.get("takeProfit", 0)
         
         # Calculate stopLoss and takeProfit for BO/CO product types
         final_product_type = PRODUCT_TYPE_MAP.get(product_type, "INTRADAY") if isinstance(product_type, str) else PRODUCT_TYPE_MAP.get(product_type.value, "INTRADAY")
@@ -125,11 +128,13 @@ class OrderRequest(BaseModel):
             if self.side == Side.BUY:
                 # BUY: stop is below entry, target is above entry
                 stop_loss_raw_value = abs(limit_price - float(stop_loss_raw)) if stop_loss_raw else 0
-                take_profit_raw_value = abs(float(take_profit_raw) - limit_price) if take_profit_raw else 0
+                # For BUY: takeProfit = target_price - entry_price (target should be above entry)
+                take_profit_raw_value = float(take_profit_raw) - limit_price if take_profit_raw and float(take_profit_raw) > limit_price else 0
             else:  # SELL
                 # SELL: stop is above entry, target is below entry
                 stop_loss_raw_value = abs(float(stop_loss_raw) - limit_price) if stop_loss_raw else 0
-                take_profit_raw_value = abs(limit_price - float(take_profit_raw)) if take_profit_raw else 0
+                # For SELL: takeProfit = entry_price - target_price (target should be below entry)
+                take_profit_raw_value = limit_price - float(take_profit_raw) if take_profit_raw and float(take_profit_raw) < limit_price else 0
             
             # Round to nearest 0.05 with 2 decimal places
             stop_loss_value = round(round(stop_loss_raw_value / 0.05) * 0.05, 2) if stop_loss_raw_value > 0 else 0

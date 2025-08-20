@@ -236,9 +236,19 @@ class OrderMonitor:
                     quick_order_check = await get_order_by_id(session, self.order_id)
                     if quick_order_check:
                         quick_status = quick_order_check.get('status')
-                        hedge_indicator = "🛡️[HEDGE]" if self.is_hedge else "📈[MAIN]"
                         order_symbol = quick_order_check.get('strike_symbol', 'N/A')
                         parent_id = quick_order_check.get('parent_order_id')
+                        
+                        # Detect hedge status from database if not already done
+                        if not hasattr(self, '_hedge_detection_done') or not self._hedge_detection_done:
+                            if parent_id:
+                                self.is_hedge = True
+                                logger.info(f"🔍 OrderMonitor: Detected hedge order {self.order_id} with parent {parent_id} (from quick check)")
+                            else:
+                                self.is_hedge = False
+                            self._hedge_detection_done = True
+                        
+                        hedge_indicator = "🛡️[HEDGE]" if self.is_hedge else "📈[MAIN]"
                         
                         if quick_status and quick_status.endswith('_PENDING'):
                             logger.info(f"OrderMonitor: {hedge_indicator} 🚨 PENDING status detected immediately: {quick_status} " +
@@ -771,131 +781,131 @@ class OrderMonitor:
                     
                     # Use the LTP already fetched above for PnL calculations
                     if current_ltp is None or current_ltp <= 0:
-                        logger.warning(f"OrderMonitor: {hedge_indicator} Invalid LTP ({current_ltp}) for order_id={self.order_id}, setting to 0 for PnL calculation")
-                        current_ltp = 0.0
+                        logger.warning(f"OrderMonitor: {hedge_indicator} Invalid LTP ({current_ltp}) for order_id={self.order_id}, skipping PnL calculation until valid price is available")
+                        # Skip PnL calculation this cycle, continue monitoring on next iteration
                     else:
                         logger.debug(f"OrderMonitor: {hedge_indicator} Using fetched LTP={current_ltp} for PnL calculation for order_id={self.order_id}")
-                    
-                    total_pnl = 0.0
-                    valid_executions_count = 0
-                    
-                    for bro in entry_broker_db_orders:
-                        # Skip processing if broker execution is invalid or failed
-                        broker_status = bro.get('status', '').upper()
-                        symbol_val = bro.get('symbol', None) or bro.get('tradingsymbol', None)
-                        executed_quantity = bro.get('executed_quantity', None) or bro.get('quantity', None)
-                        entry_price = bro.get('execution_price', None)
-                        entry_side = bro.get('action', '').upper()
                         
-                        # Simple validation: skip if essential data is missing or execution failed
-                        if (broker_status != 'FILLED' or 
-                            symbol_val is None or 
-                            executed_quantity is None or 
-                            executed_quantity <= 0 or
-                            entry_price is None or 
-                            entry_price <= 0):
-                            logger.debug(f"OrderMonitor: {hedge_indicator} Skipping P&L calculation for broker execution - "
-                                       f"status={broker_status}, symbol={symbol_val}, qty={executed_quantity}, price={entry_price}")
-                            continue
+                        total_pnl = 0.0
+                        valid_executions_count = 0
                         
-                        # Calculate P&L for this execution using DB data + current LTP
-                        execution_pnl = 0.0
-                        if entry_side == 'BUY':
-                            # Long position: profit when current_price > entry_price
-                            execution_pnl = (current_ltp - float(entry_price)) * executed_quantity
-                        elif entry_side == 'SELL':
-                            # Short position: profit when current_price < entry_price
-                            execution_pnl = (float(entry_price) - current_ltp) * executed_quantity
-                        else:
-                            logger.warning(f"OrderMonitor: {hedge_indicator} Unknown entry side '{entry_side}' for P&L calculation")
-                            continue
-                        
-                        total_pnl += execution_pnl
-                        valid_executions_count += 1
-                        
-                        logger.info(f"OrderMonitor: {hedge_indicator} P&L calculation for execution:")
-                        logger.info(f"  Broker ID: {bro.get('broker_id')}")
-                        logger.info(f"  Entry Side: {entry_side}")
-                        logger.info(f"  Entry Price: {entry_price}")
-                        logger.info(f"  Current LTP: {current_ltp}")
-                        logger.info(f"  Executed Quantity: {executed_quantity}")
-                        logger.info(f"  Execution P&L: {execution_pnl}")
-                    
-                    logger.info(f"OrderMonitor: {hedge_indicator} Total P&L calculation completed for order_id={self.order_id}:")
-                    logger.info(f"  Valid executions processed: {valid_executions_count}")
-                    logger.info(f"  Total P&L: {total_pnl}")
-                    
-                    # Update order PnL field in DB
-                    try:
-                        logger.info(f"OrderMonitor: {hedge_indicator} About to update PnL for order_id={self.order_id} with value={total_pnl}")
-                        await self.order_manager.update_order_pnl_in_db(self.order_id, total_pnl)
-                        logger.info(f"OrderMonitor: {hedge_indicator} Successfully called update_order_pnl_in_db for order_id={self.order_id}: {total_pnl}")
-                        
-                        # Verify the update by reading back from DB
-                        from algosat.core.db import AsyncSessionLocal, get_order_by_id
-                        async with AsyncSessionLocal() as session:
-                            updated_order = await get_order_by_id(session, self.order_id)
-                            current_pnl_in_db = updated_order.get('pnl') if updated_order else None
-                            logger.info(f"OrderMonitor: {hedge_indicator} PnL verification for order_id={self.order_id} - Expected: {total_pnl}, Actual in DB: {current_pnl_in_db}")
-                    except Exception as e:
-                        logger.error(f"OrderMonitor: {hedge_indicator} Error updating order PnL for order_id={self.order_id}: {e}")
-                    
-                    # � UPDATE BROKER EXECUTIONS PNL: Update P&L for all ENTRY broker executions using current LTP
-                    try:
-                        await self._update_broker_executions_pnl(current_ltp, entry_broker_db_orders)
-                    except Exception as e:
-                        logger.error(f"OrderMonitor: {hedge_indicator} Error updating broker executions P&L for order_id={self.order_id}: {e}")
-                    
-                    # �🚨 PER-TRADE LOSS VALIDATION - ONLY FOR MAIN ORDERS 🚨
-                    # HEDGE ORDER PROTECTION: Hedge orders should NOT trigger loss limit exits
-                    if not self.is_hedge:
-                        try:
-                            # 1. Get trade enabled brokers count from risk summary and current order data
-                            from algosat.core.db import get_broker_risk_summary
-                            async with AsyncSessionLocal() as session:
-                                risk_data = await get_broker_risk_summary(session)
-                                trade_enabled_brokers = risk_data.get('summary', {}).get('trade_enabled_brokers', 0)
-                                
-                                # 2. Get lot_qty from current order (within same session)
-                                current_order = await get_order_by_id(session, self.order_id)
-                                lot_qty = current_order.get('lot_qty', 0) if current_order else 0
+                        for bro in entry_broker_db_orders:
+                            # Skip processing if broker execution is invalid or failed
+                            broker_status = bro.get('status', '').upper()
+                            symbol_val = bro.get('symbol', None) or bro.get('tradingsymbol', None)
+                            executed_quantity = bro.get('executed_quantity', None) or bro.get('quantity', None)
+                            entry_price = bro.get('execution_price', None)
+                            entry_side = bro.get('action', '').upper()
                             
-                            # 3. Get max_loss_per_lot from strategy config
-                            max_loss_per_lot = 0
-                            if strategy_config and strategy_config.get('trade'):
-                                import json
-                                try:
-                                    trade_config = json.loads(strategy_config['trade']) if isinstance(strategy_config['trade'], str) else strategy_config['trade']
-                                    max_loss_per_lot = trade_config.get('max_loss_per_lot', 0)
-                                except Exception as e:
-                                    logger.error(f"OrderMonitor: {hedge_indicator} Error parsing trade config for max_loss_per_lot: {e}")
-                            
-                            # 4. Calculate total risk exposure
-                            total_risk_exposure = lot_qty * trade_enabled_brokers * max_loss_per_lot
-                            
-                            # 5. Check if loss exceeds limit
-                            if total_risk_exposure > 0 and total_pnl < -abs(total_risk_exposure):
-                                logger.critical(f"🚨 {hedge_indicator} PER-TRADE LOSS LIMIT EXCEEDED for order_id={self.order_id}! "
-                                              f"Current P&L: {total_pnl}, Max Loss: {total_risk_exposure} "
-                                              f"(lot_qty: {lot_qty} × brokers: {trade_enabled_brokers} × max_loss_per_lot: {max_loss_per_lot})")
-                                
-                                # 6. Exit the order immediately
-                                await self.order_manager.exit_order(self.order_id, exit_reason="Per-trade loss limit exceeded")
-                                # Update status to max loss exit PENDING - let check_and_complete_pending_exits handle completion
-                                from algosat.common import constants
-                                await self.order_manager.update_order_status_in_db(self.order_id, f"{constants.TRADE_STATUS_EXIT_MAX_LOSS}_PENDING")
-                                await self._clear_order_cache("Per-trade loss limit exit status updated to PENDING")
-                                logger.critical(f"🚨 {hedge_indicator} Per-trade loss limit exit set to PENDING for order_id={self.order_id}. PENDING processor will complete the exit.")
-                                # Continue monitoring loop - PENDING check at beginning will handle completion
+                            # Simple validation: skip if essential data is missing or execution failed
+                            if (broker_status != 'FILLED' or 
+                                symbol_val is None or 
+                                executed_quantity is None or 
+                                executed_quantity <= 0 or
+                                entry_price is None or 
+                                entry_price <= 0):
+                                logger.debug(f"OrderMonitor: {hedge_indicator} Skipping P&L calculation for broker execution - "
+                                           f"status={broker_status}, symbol={symbol_val}, qty={executed_quantity}, price={entry_price}")
                                 continue
+                            
+                            # Calculate P&L for this execution using DB data + current LTP
+                            execution_pnl = 0.0
+                            if entry_side == 'BUY':
+                                # Long position: profit when current_price > entry_price
+                                execution_pnl = (current_ltp - float(entry_price)) * executed_quantity
+                            elif entry_side == 'SELL':
+                                # Short position: profit when current_price < entry_price
+                                execution_pnl = (float(entry_price) - current_ltp) * executed_quantity
                             else:
-                                logger.debug(f"OrderMonitor: {hedge_indicator} Per-trade risk check passed for order_id={self.order_id}. "
-                                           f"P&L: {total_pnl}, Risk exposure: {total_risk_exposure}")
-                                
+                                logger.warning(f"OrderMonitor: {hedge_indicator} Unknown entry side '{entry_side}' for P&L calculation")
+                                continue
+                            
+                            total_pnl += execution_pnl
+                            valid_executions_count += 1
+                            
+                            logger.info(f"OrderMonitor: {hedge_indicator} P&L calculation for execution:")
+                            logger.info(f"  Broker ID: {bro.get('broker_id')}")
+                            logger.info(f"  Entry Side: {entry_side}")
+                            logger.info(f"  Entry Price: {entry_price}")
+                            logger.info(f"  Current LTP: {current_ltp}")
+                            logger.info(f"  Executed Quantity: {executed_quantity}")
+                            logger.info(f"  Execution P&L: {execution_pnl}")
+                        
+                        logger.info(f"OrderMonitor: {hedge_indicator} Total P&L calculation completed for order_id={self.order_id}:")
+                        logger.info(f"  Valid executions processed: {valid_executions_count}")
+                        logger.info(f"  Total P&L: {total_pnl}")
+                        
+                        # Update order PnL field in DB
+                        try:
+                            logger.info(f"OrderMonitor: {hedge_indicator} About to update PnL for order_id={self.order_id} with value={total_pnl}")
+                            await self.order_manager.update_order_pnl_in_db(self.order_id, total_pnl)
+                            logger.info(f"OrderMonitor: {hedge_indicator} Successfully called update_order_pnl_in_db for order_id={self.order_id}: {total_pnl}")
+                            
+                            # Verify the update by reading back from DB
+                            from algosat.core.db import AsyncSessionLocal, get_order_by_id
+                            async with AsyncSessionLocal() as session:
+                                updated_order = await get_order_by_id(session, self.order_id)
+                                current_pnl_in_db = updated_order.get('pnl') if updated_order else None
+                                logger.info(f"OrderMonitor: {hedge_indicator} PnL verification for order_id={self.order_id} - Expected: {total_pnl}, Actual in DB: {current_pnl_in_db}")
                         except Exception as e:
-                            logger.error(f"OrderMonitor: {hedge_indicator} Error in per-trade loss validation for order_id={self.order_id}: {e}")
-                    else:
-                        logger.debug(f"OrderMonitor: {hedge_indicator} Skipping per-trade loss validation for hedge order {self.order_id}")
+                            logger.error(f"OrderMonitor: {hedge_indicator} Error updating order PnL for order_id={self.order_id}: {e}")
+                        
+                        # � UPDATE BROKER EXECUTIONS PNL: Update P&L for all ENTRY broker executions using current LTP
+                        try:
+                            await self._update_broker_executions_pnl(current_ltp, entry_broker_db_orders)
+                        except Exception as e:
+                            logger.error(f"OrderMonitor: {hedge_indicator} Error updating broker executions P&L for order_id={self.order_id}: {e}")
+                        
+                        # �🚨 PER-TRADE LOSS VALIDATION - ONLY FOR MAIN ORDERS 🚨
+                        # HEDGE ORDER PROTECTION: Hedge orders should NOT trigger loss limit exits
+                        if not self.is_hedge:
+                            try:
+                                # 1. Get trade enabled brokers count from risk summary and current order data
+                                from algosat.core.db import get_broker_risk_summary
+                                async with AsyncSessionLocal() as session:
+                                    risk_data = await get_broker_risk_summary(session)
+                                    trade_enabled_brokers = risk_data.get('summary', {}).get('trade_enabled_brokers', 0)
+                                    
+                                    # 2. Get lot_qty from current order (within same session)
+                                    current_order = await get_order_by_id(session, self.order_id)
+                                    lot_qty = current_order.get('lot_qty', 0) if current_order else 0
+                                
+                                # 3. Get max_loss_per_lot from strategy config
+                                max_loss_per_lot = 0
+                                if strategy_config and strategy_config.get('trade'):
+                                    import json
+                                    try:
+                                        trade_config = json.loads(strategy_config['trade']) if isinstance(strategy_config['trade'], str) else strategy_config['trade']
+                                        max_loss_per_lot = trade_config.get('max_loss_per_lot', 0)
+                                    except Exception as e:
+                                        logger.error(f"OrderMonitor: {hedge_indicator} Error parsing trade config for max_loss_per_lot: {e}")
+                                
+                                # 4. Calculate total risk exposure
+                                total_risk_exposure = lot_qty * trade_enabled_brokers * max_loss_per_lot
+                                
+                                # 5. Check if loss exceeds limit
+                                if total_risk_exposure > 0 and total_pnl < -abs(total_risk_exposure):
+                                    logger.critical(f"🚨 {hedge_indicator} PER-TRADE LOSS LIMIT EXCEEDED for order_id={self.order_id}! "
+                                                  f"Current P&L: {total_pnl}, Max Loss: {total_risk_exposure} "
+                                                  f"(lot_qty: {lot_qty} × brokers: {trade_enabled_brokers} × max_loss_per_lot: {max_loss_per_lot})")
+                                    
+                                    # 6. Exit the order immediately
+                                    await self.order_manager.exit_order(self.order_id, exit_reason="Per-trade loss limit exceeded")
+                                    # Update status to max loss exit PENDING - let check_and_complete_pending_exits handle completion
+                                    from algosat.common import constants
+                                    await self.order_manager.update_order_status_in_db(self.order_id, f"{constants.TRADE_STATUS_EXIT_MAX_LOSS}_PENDING")
+                                    await self._clear_order_cache("Per-trade loss limit exit status updated to PENDING")
+                                    logger.critical(f"🚨 {hedge_indicator} Per-trade loss limit exit set to PENDING for order_id={self.order_id}. PENDING processor will complete the exit.")
+                                    # Continue monitoring loop - PENDING check at beginning will handle completion
+                                    continue
+                                else:
+                                    logger.debug(f"OrderMonitor: {hedge_indicator} Per-trade risk check passed for order_id={self.order_id}. "
+                                               f"P&L: {total_pnl}, Risk exposure: {total_risk_exposure}")
+                                    
+                            except Exception as e:
+                                logger.error(f"OrderMonitor: {hedge_indicator} Error in per-trade loss validation for order_id={self.order_id}: {e}")
+                        else:
+                            logger.debug(f"OrderMonitor: {hedge_indicator} Skipping per-trade loss validation for hedge order {self.order_id}")
                     
                     # Note: Position closure detection has been removed since we now rely on 
                     # exit order status tracking instead of broker position matching
@@ -2002,6 +2012,7 @@ class OrderMonitor:
             # Fetch LTP directly using data_manager.get_ltp()
             logger.info(f"OrderMonitor: Fetching current LTP for order_id={self.order_id}, symbol={strike_symbol}")
             ltp_data = await self.data_manager.get_ltp(strike_symbol)
+            logger.debug(f"OrderMonitor: Fetched LTP data for order_id={self.order_id}, symbol={strike_symbol}: {ltp_data}")
             
             if ltp_data and isinstance(ltp_data, dict):
                 # Handle different LTP response formats

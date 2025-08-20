@@ -35,6 +35,7 @@ class ZerodhaWrapper(BrokerInterface):
         self.broker_name = broker_name
         self.kite = None
         self.access_token = None
+        self._instruments_cache = None  # Cache for instruments data
         
     async def login(self, force_reauth: bool = False) -> bool:
         """
@@ -300,15 +301,63 @@ class ZerodhaWrapper(BrokerInterface):
         valid_intervals = set(interval_map.values())
         if interval not in valid_intervals:
             interval = "5minute"
-        def get_token(kite, symbol):
-            instruments = kite.instruments("NFO")
-            for i in instruments:
-                if i["tradingsymbol"] == symbol and i["segment"] == "NFO-OPT":
-                    return i["instrument_token"]
+        def get_token(kite, symbol, instruments_cache=None):
+            # Use cached DataFrame if available, else fetch and cache
+            if instruments_cache is not None:
+                df = instruments_cache
+            else:
+                instruments = pd.DataFrame(kite.instruments())
+                df = instruments
+            
+            # Sanitize symbol (remove exchange prefix if present)
+            sanitized_symbol = symbol
+            if ':' in symbol:
+                sanitized_symbol = symbol.split(':', 1)[1]
+            sanitized_symbol = sanitized_symbol.split('-')[0] if '-' in sanitized_symbol else sanitized_symbol
+            
+            # Determine instrument type based on symbol pattern
+            instrument_type = None
+            if sanitized_symbol in ['NIFTY 50', 'NIFTYBANK', 'BANKNIFTY']:
+                logger.debug(f"Zerodha: Detected index symbol {sanitized_symbol}, using INDEX segment")
+                instrument_type = 'INDEX'
+            elif sanitized_symbol.endswith('CE') or sanitized_symbol.endswith('PE'):
+                instrument_type = 'NFO-OPT'
+                logger.debug(f"Zerodha: Detected option symbol {sanitized_symbol}, using NFO-OPT segment")
+            else:
+                instrument_type = 'NSE'
+                logger.debug(f"Zerodha: Detected equity symbol {sanitized_symbol}, using NSE segment")
+            
+            match = None
+            # For index (e.g., NIFTY, BANKNIFTY)
+            if instrument_type == 'INDEX':
+                # Zerodha uses 'INDICES' for index segment, match by name (ignoring spaces)
+                match = df[(df['segment'] == 'INDICES') & (df['name'].str.replace(' ', '').str.upper() == sanitized_symbol.replace(' ', '').upper())]
+            # For equity
+            elif instrument_type == 'EQ':
+                match = df[(df['segment'] == 'NSE') & (df['name'].str.upper() == sanitized_symbol.upper())]
+            # For options (NFO-OPT)
+            elif instrument_type == 'NFO':
+                match = df[(df['segment'] == 'NFO-OPT') & (df['tradingsymbol'].str.upper() == sanitized_symbol.upper())]
+            # Fallback: just match tradingsymbol
+            else:
+                match = df[df['tradingsymbol'].str.upper() == sanitized_symbol.upper()]
+            
+            if match is not None and not match.empty:
+                row = match.iloc[0]
+                return row['instrument_token']
+            
             raise Exception(f"Token not found for {symbol}")
         loop = asyncio.get_event_loop()
         try:
-            token = await loop.run_in_executor(None, get_token, self.kite, symbol)
+            # Use cached instruments if available, else fetch and cache
+            if self._instruments_cache is None:
+                logger.debug("Zerodha: Fetching and caching instruments data")
+                instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(self.kite.instruments()))
+                self._instruments_cache = instruments
+            else:
+                logger.debug("Zerodha: Using cached instruments data")
+            
+            token = await loop.run_in_executor(None, get_token, self.kite, symbol, self._instruments_cache)
             # Calculate interval in minutes for to_date adjustment
             interval_minutes_map = {
                 "minute": 1, "3minute": 3, "5minute": 5, "10minute": 10, "15minute": 15, "30minute": 30, "60minute": 60, "day": 1440
@@ -327,7 +376,13 @@ class ZerodhaWrapper(BrokerInterface):
         except kite_exceptions.PermissionException:
             logger.warning("Zerodha: PermissionException in get_history, attempting reauth...")
             if await self.login(force_reauth=True):
-                token = await loop.run_in_executor(None, get_token, self.kite, symbol)
+                # Clear cache after reauth and refetch instruments
+                logger.debug("Zerodha: Clearing instruments cache after reauth")
+                self._instruments_cache = None
+                instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(self.kite.instruments()))
+                self._instruments_cache = instruments
+                
+                token = await loop.run_in_executor(None, get_token, self.kite, symbol, self._instruments_cache)
                 candles = await loop.run_in_executor(None, self.kite.historical_data, token, from_date_fmt, to_date_fmt, interval)
             else:
                 logger.error("Zerodha: Reauth failed in get_history.")

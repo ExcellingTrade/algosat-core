@@ -616,6 +616,7 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
 
                         # Launch/stop tasks for symbols based on time (unified schedule for both product types)
                         for row in active_symbols:
+                            logger.debug(f"Processing active symbol: {row.symbol} (ID: {row.symbol_id}, Strategy: {row.strategy_name})")
                             symbol_id = row.symbol_id
                             config_id = row.config_id
                             product_type = row.product_type  # Now comes from strategy table

@@ -462,6 +462,11 @@ def sanitize_symbol_for_db(symbol):
     if symbol.endswith("-INDEX"):
         symbol = symbol[:-6]
     
+    # Fix: Remove space from NIFTY symbols (NIFTY 50 -> NIFTY50) for database lookup
+    # This handles Zerodha's instrument names that have spaces
+    if "NIFTY " in symbol:
+        symbol = symbol.replace("NIFTY ", "NIFTY")
+    
     return symbol
 
 

@@ -561,7 +561,7 @@ class BrokerManager:
                 if not broker or not broker.kite:
                     raise Exception("Zerodha broker not initialized or not logged in.")
                 loop = asyncio.get_event_loop()
-                instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(broker.kite.instruments("NFO")))
+                instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(broker.kite.instruments()))
                 self._instrument_cache['zerodha'] = instruments
             else:
                 instruments = self._instrument_cache['zerodha']
@@ -662,13 +662,14 @@ class BrokerManager:
             extra['trigger_price_diff'] = trigger_price_diff if 'trigger_price_diff' in config.trade else 0.0
         if 'target_price' in extra:
             try:
-                # Debug the actual values being used in takeProfit calculation
-                takeProfit_calc = round(abs(extra['entry_price'] - extra['target_price']),2)
-                logger.debug(f"takeProfit calculation: entry_price={extra['entry_price']}, target_price={extra['target_price']}, takeProfit={takeProfit_calc}")
-                extra['takeProfit'] = takeProfit_calc
+                # For Fyers BO orders, pass the actual target_price, not the difference
+                # The to_fyers_dict() method will calculate the takeProfit difference correctly
+                logger.debug(f"target_price processing: entry_price={extra['entry_price']}, target_price={extra['target_price']}")
+                # Round target_price to nearest 0.05
                 extra['target_price'] = round(extra['target_price'] / 0.05) * 0.05
+                # Don't pre-calculate takeProfit here - let to_fyers_dict() handle it based on target_price
             except Exception as e:
-                logger.warning(f"Could not compute takeProfit/target_price: {e}")
+                logger.warning(f"Could not process target_price: {e}")
         # Only compute entry_price and stopPrice if signal.price is not None and product_type is not DELIVERY
         if getattr(signal, 'price', None) is not None and product_type != 'DELIVERY':
             entry_price = round(round(signal.price / 0.05) * 0.05, 2)
