@@ -1511,6 +1511,18 @@ class SwingHighLowSellStrategy(StrategyBase):
             )
             logger.debug(f"Main SELL order result for {option_symbol}: {main_order_result}")
             
+            # IMPORTANT: Set parent_order_id relationship immediately after main order is placed
+            # This ensures hedge order gets proper parent_order_id regardless of main order success/failure
+            main_order_id = main_order_result.get('order_id') or main_order_result.get('id')
+            
+            if hedge_order_id and main_order_id:
+                try:
+                    logger.info(f"🔗 Setting parent_order_id relationship: hedge {hedge_order_id} -> main {main_order_id}")
+                    await self.order_manager.set_parent_order_id(hedge_order_id, main_order_id)
+                    logger.debug(f"✅ Parent-child relationship established: hedge {hedge_order_id} is child of main {main_order_id}")
+                except Exception as e:
+                    logger.error(f"⚠️ Failed to set parent_order_id relationship for hedge {hedge_order_id} -> main {main_order_id}: {e}")
+            
             # Check if ALL main orders failed (consistent with hedge logic)
             main_broker_responses = main_order_result.get('broker_responses') if main_order_result else None
             main_all_failed = False
@@ -1554,33 +1566,20 @@ class SwingHighLowSellStrategy(StrategyBase):
                     else:
                         logger.error(f"💥   Broker {broker_id}: No response data available")
                 
-                # Update main order status to FAILED before raising exception
+                # Update main order status to EXIT_ENTRY_FAILED before raising exception
                 main_order_id = main_order_result.get('order_id') or main_order_result.get('id')
                 if main_order_id:
                     try:
-                        logger.info(f"🔄 Updating main order {main_order_id} status to FAILED")
-                        await self.order_manager.update_order_status_in_db(main_order_id, "FAILED")
-                        logger.info(f"✅ Main order {main_order_id} status updated to FAILED")
+                        logger.info(f"🔄 Updating main order {main_order_id} status to EXIT_ENTRY_FAILED")
+                        await self.order_manager.update_order_status_in_db(main_order_id, "EXIT_ENTRY_FAILED")
+                        logger.info(f"✅ Main order {main_order_id} status updated to EXIT_ENTRY_FAILED")
                     except Exception as status_e:
-                        logger.error(f"⚠️ Failed to update main order {main_order_id} status to FAILED: {status_e}")
+                        logger.error(f"⚠️ Failed to update main order {main_order_id} status to EXIT_ENTRY_FAILED: {status_e}")
                 
                 raise Exception(f"ALL main SELL orders failed/cancelled/rejected for {option_symbol}. Failed brokers: {failed_main_brokers}. Details: {main_order_result}")
 
             logger.info(f"✅ Main SELL order placed successfully for {option_symbol}. Order ID: {main_order_result.get('order_id') or main_order_result.get('id')}")
             
-            # Set parent_order_id relationship: hedge order is child of main order
-            hedge_order_id = hedge_order_result.get("order_id") or hedge_order_result.get("id")
-            main_order_id = main_order_result.get('order_id') or main_order_result.get('id')
-            
-            if hedge_order_id and main_order_id:
-                try:
-                    logger.info(f"🔗 Setting parent_order_id relationship: hedge {hedge_order_id} -> main {main_order_id}")
-                    await self.order_manager.set_parent_order_id(hedge_order_id, main_order_id)
-                    logger.debug(f"✅ Parent-child relationship established: hedge {hedge_order_id} is child of main {main_order_id}")
-                except Exception as e:
-                    logger.error(f"⚠️ Failed to set parent_order_id relationship for hedge {hedge_order_id} -> main {main_order_id}: {e}")
-            
-            # Return merged order_request + main_order_result format like swing_highlow_buy
             # Convert OrderRequest to dict for merging
             if hasattr(order_request, 'dict'):
                 order_request_dict = order_request.dict()
@@ -1630,14 +1629,33 @@ class SwingHighLowSellStrategy(StrategyBase):
                     if hedge_broker_responses:
                         logger.info(f"📊 Hedge order cleanup initiated for brokers: {list(hedge_broker_responses.keys())}")
                     
-                    # Update hedge order status to CLOSED after successful exit
+                    # Update hedge order status to EXIT_CLOSED_PENDING after successful exit
                     # Note: exit_order doesn't return a meaningful value, but if we reach here, it completed successfully
                     try:
-                        logger.info(f"🔄 Updating hedge order {hedge_order_id} status to CLOSED after exit")
-                        await self.order_manager.update_order_status_in_db(hedge_order_id, "CLOSED")
-                        logger.info(f"✅ Hedge order {hedge_order_id} status updated to CLOSED")
+                        logger.info(f"🔄 Updating hedge order {hedge_order_id} status to EXIT_CLOSED_PENDING after exit")
+                        await self.order_manager.update_order_status_in_db(hedge_order_id, "EXIT_CLOSED_PENDING")
+                        logger.info(f"✅ Hedge order {hedge_order_id} status updated to EXIT_CLOSED_PENDING")
+                        
+                        # CRITICAL: Return hedge order info for monitoring the cleanup process
+                        logger.info(f"🎯 Returning hedge order {hedge_order_id} info for EXIT_CLOSED_PENDING monitoring")
+                        
+                        # Convert OrderRequest to dict for merging
+                        if hasattr(order_request, 'dict'):
+                            order_request_dict = order_request.dict()
+                        else:
+                            order_request_dict = dict(order_request)
+                        
+                        # Return hedge order result but exclude conflicting order_id to avoid confusion
+                        hedge_result_clean = {k: v for k, v in hedge_order_result.items() if k != 'order_id'}
+                        result = {**order_request_dict, **hedge_result_clean}
+                        result["hedge_order_id"] = hedge_order_id  # Mark this as hedge order, not main order
+                        result["is_hedge_cleanup"] = True  # Flag to indicate this is hedge cleanup monitoring
+                        
+                        logger.debug(f"🎯 Marked result as hedge cleanup with hedge_order_id {hedge_order_id}")
+                        return result
+                        
                     except Exception as status_e:
-                        logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to CLOSED: {status_e}")
+                        logger.error(f"⚠️ Failed to update hedge order {hedge_order_id} status to EXIT_CLOSED_PENDING: {status_e}")
                         
                 except Exception as exit_e:
                     logger.error(f"💥 FATAL: Failed to exit orphaned hedge order {hedge_order_id} for {option_symbol}. "
@@ -1655,6 +1673,24 @@ class SwingHighLowSellStrategy(StrategyBase):
                                 logger.error(f"💥   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}, Error: {error_msg}")
                             else:
                                 logger.error(f"💥   Broker {broker_id}: No response data available")
+                    
+                    # CRITICAL: Even if exit failed, return hedge order info for continued monitoring
+                    logger.warning(f"🎯 Returning hedge order {hedge_order_id} info despite exit failure for continued monitoring")
+                    
+                    # Convert OrderRequest to dict for merging
+                    if hasattr(order_request, 'dict'):
+                        order_request_dict = order_request.dict()
+                    else:
+                        order_request_dict = dict(order_request)
+                    
+                    # Return hedge order result but exclude conflicting order_id to avoid confusion
+                    hedge_result_clean = {k: v for k, v in hedge_order_result.items() if k != 'order_id'}
+                    result = {**order_request_dict, **hedge_result_clean}
+                    result["hedge_order_id"] = hedge_order_id  # Mark this as hedge order, not main order
+                    result["is_hedge_cleanup"] = True  # Flag to indicate this is hedge cleanup monitoring
+                    
+                    logger.debug(f"🎯 Marked result as hedge cleanup with hedge_order_id {hedge_order_id} (exit failed case)")
+                    return result
             else:
                 logger.error(f"💥 FATAL: Could not find order_id for orphaned hedge order for {option_symbol}. "
                            f"Manual intervention required immediately!")
@@ -1671,9 +1707,35 @@ class SwingHighLowSellStrategy(StrategyBase):
                             logger.error(f"💥   Broker {broker_id}: Order ID {broker_order_id}, Status: {status}, Error: {error_msg}")
                         else:
                             logger.error(f"💥   Broker {broker_id}: No response data available")
+                
+                # CRITICAL: Even without hedge_order_id, return hedge result for potential manual monitoring
+                if hedge_order_result:
+                    logger.warning(f"🎯 Returning hedge order result despite missing order_id for potential monitoring")
+                    
+                    # Convert OrderRequest to dict for merging
+                    if hasattr(order_request, 'dict'):
+                        order_request_dict = order_request.dict()
+                    else:
+                        order_request_dict = dict(order_request)
+                    
+                    # Return hedge order result but exclude conflicting order_id to avoid confusion
+                    hedge_result_clean = {k: v for k, v in hedge_order_result.items() if k != 'order_id'}
+                    result = {**order_request_dict, **hedge_result_clean}
+                    
+                    # Try to extract hedge_order_id from hedge_order_result if available
+                    extracted_hedge_id = hedge_order_result.get('order_id') or hedge_order_result.get('id')
+                    if extracted_hedge_id:
+                        result["hedge_order_id"] = extracted_hedge_id
+                        logger.debug(f"🎯 Extracted and marked hedge_order_id {extracted_hedge_id} from hedge_order_result")
+                    else:
+                        logger.warning(f"🎯 No hedge_order_id found in hedge_order_result, marked as hedge cleanup anyway")
+                    
+                    result["is_hedge_cleanup"] = True  # Flag to indicate this is hedge cleanup monitoring
+                    
+                    return result
             
-            # Note: Return None since both hedge cleanup was attempted and main order failed
-            # The hedge order should be marked as CLOSED by the cleanup above
+            # If no hedge_order_result available, return None as last resort
+            logger.error(f"💥 CRITICAL: No hedge order information available to return for monitoring")
             return None
         
     async def evaluate_exit(self, order_row):

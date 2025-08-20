@@ -728,7 +728,7 @@ def detect_regime(
             # CE BUY in uptrend
             if entry_price > ph and entry_price > fh:
                 return "Uptrend"
-            elif entry_price < fh:
+            elif entry_price < fh or entry_price < ph:
                 return "Sideways"
             else:
                 return "NoTrade"
@@ -736,7 +736,7 @@ def detect_regime(
             # PE BUY in downtrend
             if entry_price < pl and entry_price < fl:
                 return "Downtrend"
-            elif entry_price > fl:
+            elif entry_price > fl or entry_price > pl:
                 return "Sideways"
             else:
                 return "NoTrade"
@@ -747,7 +747,7 @@ def detect_regime(
             # PE SELL in uptrend
             if entry_price > ph and entry_price > fh:
                 return "Uptrend"
-            elif entry_price < fh:
+            elif entry_price < fh or entry_price < ph:
                 return "Sideways"
             else:
                 return "NoTrade"
@@ -755,7 +755,7 @@ def detect_regime(
             # CE SELL in downtrend
             if entry_price < pl and entry_price < fl:
                 return "Downtrend"
-            elif entry_price > fl:
+            elif entry_price > fl or entry_price > pl:
                 return "Sideways"
             else:
                 return "NoTrade"

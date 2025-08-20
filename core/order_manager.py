@@ -481,6 +481,7 @@ class OrderManager:
                 "target_spot_level": order_payload.extra.get("target_spot_level"),
                 "entry_rsi": order_payload.extra.get("entry_rsi"),
                 "expiry_date": ensure_utc_aware(order_payload.extra.get("expiry_date")),
+                "orig_target": order_payload.extra.get("orig_target"),
             }
             inserted = await insert_order(sess, order_data)
             return inserted["id"] if inserted else None
@@ -1185,19 +1186,21 @@ class OrderManager:
                         except (ValueError, TypeError):
                             execution_time = None
                     
+                    # Extract parent_id for BO orders from the order ID
                     normalized_orders.append({
                         "broker_name": broker_name,
                         "broker_id": broker_id,
-                        "order_id": o.get("id"),
+                        "order_id": o.get("id"),  # Fyers uses 'id' field in raw data
                         "status": status,
                         "symbol": o.get("symbol"),
                         "qty": o.get("qty", 0),
-                        "executed_quantity": o.get("filledQty", 0),
-                        "exec_price": o.get("tradedPrice", 0),
-                        "product_type": o.get("productType"),
+                        "executed_quantity": o.get("filledQty", 0),  # Fyers uses 'filledQty' in raw data
+                        "exec_price": o.get("tradedPrice", 0),  # Fyers uses 'tradedPrice' in raw data
+                        "product_type": o.get("productType"),  # Fyers uses 'productType' in raw data
                         "order_type": order_type,
                         "execution_time": execution_time,
                         "side": "BUY" if o.get("side") ==1 else "SELL",
+                        "parent_id": o.get("parentId"),  # Add parentId for BO order tracking
                         # "raw": o
                     })
                 # Zerodha normalization

@@ -750,15 +750,24 @@ class OptionBuyStrategy(StrategyBase):
                 orig_target = trade_dict.get(constants.TRADE_KEY_TARGET_PRICE)
 
                 # Trailing stoploss logic: update target if enabled
-                if config.get("trailing_stoploss", False):
+                trailing_enabled = config.get("trailing_stoploss_enabled", False)
+                logger.debug(f"Trailing stoploss check for {strike}: trailing_stoploss_enabled={trailing_enabled}")
+                
+                if trailing_enabled:
                     try:
                         atr_value = data['atr'].iloc[-1].round(2)
                         atr_mult = config.get('atr_target_multiplier', 1)
+                        original_target = orig_target
+                        new_target = orig_target + 1 * (atr_value * (atr_mult * 5))
+                        
                         trade_dict[constants.TRADE_KEY_ACTUAL_TARGET] = orig_target  # Save the original target
-                        trade_dict[constants.TRADE_KEY_TARGET_PRICE] = orig_target + 1 * (atr_value * (atr_mult * 5))
-                        logger.debug(f"updating new target for {strike} to {trade_dict[constants.TRADE_KEY_TARGET_PRICE]}")
+                        trade_dict[constants.TRADE_KEY_TARGET_PRICE] = new_target
+                        
+                        logger.info(f"🎯 Trailing stoploss enabled for {strike}: Original target={original_target}, ATR={atr_value}, ATR multiplier={atr_mult}, New target={new_target}")
                     except Exception as e:
                         logger.error(f"Error updating trailing target for {strike}: {e}")
+                else:
+                    logger.debug(f"Trailing stoploss disabled for {strike}, using original target={orig_target}")
                 self._positions[strike] = [{
                     'strike': strike,
                     'entry_price': trade_dict.get(constants.TRADE_KEY_ENTRY_PRICE),
@@ -817,51 +826,100 @@ class OptionBuyStrategy(StrategyBase):
     async def update_trailing_stoploss(self, order_row, history_df, trade_config):
         """
         Trailing stop loss logic supporting ATR or supertrend type, based on trailing_stoploss_type in config.
+        IMPORTANT: Trailing only activates AFTER price has closed above the original target (orig_target).
+        Until then, regular stoploss is used.
+        
         Args:
             order_row: The order dict (from DB).
             history_df: DataFrame of historical candles for the strike.
             trade_config: The trade config dict.
         """
+        order_id = order_row.get('id')
+        strike_symbol = order_row.get('strike_symbol', 'Unknown')
+        
         try:
-            if not trade_config.get("trailing_stoploss_enabled", False):
+            trailing_enabled = trade_config.get("trailing_stoploss_enabled", False)
+            logger.debug(f"🛡️ Trailing stoploss update check for order_id={order_id}, strike={strike_symbol}: enabled={trailing_enabled}")
+            
+            if not trailing_enabled:
+                logger.debug(f"🛡️ Trailing stoploss disabled for order_id={order_id}, skipping update")
                 return
+                
             if history_df is None or len(history_df) < 2:
+                logger.warning(f"🛡️ Insufficient history data for trailing stoploss update: order_id={order_id}, history_length={len(history_df) if history_df is not None else 0}")
                 return
+
+            # CRITICAL: Check if price has crossed original target first
+            orig_target = order_row.get('orig_target')
+            current_price = history_df.iloc[-1].get('close')
+            
+            logger.debug(f"🛡️ Trailing activation check for order_id={order_id}: orig_target={orig_target}, current_price={current_price}")
+            
+            if orig_target is None:
+                logger.warning(f"🛡️ ❌ No orig_target found for order_id={order_id}, cannot determine trailing activation")
+                return
+                
+            # For BUY trades: only activate trailing stoploss if current price is above original target
+            if current_price < orig_target:
+                logger.debug(f"🛡️ Price has not yet crossed original target for order_id={order_id} (current_price={current_price} < orig_target={orig_target}). Trailing not activated.")
+                return
+            
+            logger.info(f"🛡️ ✅ Trailing stoploss ACTIVATED for order_id={order_id}: Current price crossed original target (current_price={current_price} >= orig_target={orig_target})")
+            
+            # Now proceed with trailing stoploss calculation since target was crossed
             stoploss_type = str(trade_config.get("trailing_stoploss_type", "ATR")).strip().lower()
             stoploss_conf = self.indicators.get('stoploss', {})
             last_candle = history_df.iloc[-1]
-            order_id = order_row.get('id')
             current_sl = order_row.get('stop_loss')
             ltp = last_candle.get('close')
+            
+            logger.debug(f"🛡️ Trailing stoploss details for order_id={order_id}: type={stoploss_type}, current_sl={current_sl}, ltp={ltp}")
 
             if stoploss_type == "atr":
                 # Use ATR trailing stoploss
                 atr_trailing_stop_multiplier = stoploss_conf.get('atr_trailing_stop_multiplier', 3)
                 atr_trailing_stop_period = stoploss_conf.get('atr_trailing_stop_period', 10)
                 atr_trailing_stop_buffer = stoploss_conf.get('atr_trailing_stop_buffer', 0.0)
+                
+                logger.debug(f"🛡️ ATR trailing params for order_id={order_id}: multiplier={atr_trailing_stop_multiplier}, period={atr_trailing_stop_period}, buffer={atr_trailing_stop_buffer}")
+                
                 history_df = calculate_atr_trial_stops(history_df, atr_trailing_stop_multiplier, atr_trailing_stop_period)
                 new_trail_sl = history_df.iloc[-1]['buy_stop'] - atr_trailing_stop_buffer
                 new_trail_sl = round(round(new_trail_sl / 0.05) * 0.05, 2)
+                
+                logger.debug(f"🛡️ ATR trailing calculation for order_id={order_id}: raw_buy_stop={history_df.iloc[-1]['buy_stop']}, new_trail_sl={new_trail_sl}")
+                
                 # Only update if new stop is higher (for long position) and ltp > new_trail_sl
                 if current_sl is not None and new_trail_sl > current_sl and ltp > new_trail_sl:
                     await self.order_manager.update_order_stop_loss_in_db(order_id, new_trail_sl)
-                    logger.debug(f"Trailing stop-loss (ATR) updated in DB for order {order_id}. New SL: {new_trail_sl}")
+                    logger.info(f"🛡️ ✅ Trailing stop-loss (ATR) updated in DB for order_id={order_id}, strike={strike_symbol}: {current_sl} → {new_trail_sl}")
+                else:
+                    logger.debug(f"🛡️ No ATR trailing update for order_id={order_id}: current_sl={current_sl}, new_trail_sl={new_trail_sl}, ltp={ltp}, conditions_met={current_sl is not None and new_trail_sl > current_sl and ltp > new_trail_sl}")
+                    
             elif stoploss_type == "supertrend":
                 # Use supertrend as trailing stoploss
                 supertrend_trailing_period = stoploss_conf.get('supertrend_trailing_period', 10)
                 supertrend_trailing_multiplier = stoploss_conf.get('supertrend_trailing_multiplier', 3)
+                
+                logger.debug(f"🛡️ Supertrend trailing params for order_id={order_id}: period={supertrend_trailing_period}, multiplier={supertrend_trailing_multiplier}")
+                
                 # Calculate supertrend
                 st_df = calculate_supertrend(history_df.copy(), supertrend_trailing_period, supertrend_trailing_multiplier)
                 new_trail_sl = st_df.iloc[-1]['supertrend']
                 new_trail_sl = round(round(new_trail_sl / 0.05) * 0.05, 2)
+                
+                logger.debug(f"🛡️ Supertrend trailing calculation for order_id={order_id}: raw_supertrend={st_df.iloc[-1]['supertrend']}, new_trail_sl={new_trail_sl}")
+                
                 # Only update if new stop is higher (for long position) and ltp > new_trail_sl
                 if current_sl is not None and new_trail_sl > current_sl and ltp > new_trail_sl:
                     await self.order_manager.update_order_stop_loss_in_db(order_id, new_trail_sl)
-                    logger.debug(f"Trailing stop-loss (Supertrend) updated in DB for order {order_id}. New SL: {new_trail_sl}")
+                    logger.info(f"🛡️ ✅ Trailing stop-loss (Supertrend) updated in DB for order_id={order_id}, strike={strike_symbol}: {current_sl} → {new_trail_sl}")
+                else:
+                    logger.debug(f"🛡️ No Supertrend trailing update for order_id={order_id}: current_sl={current_sl}, new_trail_sl={new_trail_sl}, ltp={ltp}, conditions_met={current_sl is not None and new_trail_sl > current_sl and ltp > new_trail_sl}")
             else:
-                logger.warning(f"Unknown trailing_stoploss_type '{stoploss_type}' for order {order_id}. Supported: ATR, supertrend.")
+                logger.warning(f"🛡️ ❌ Unknown trailing_stoploss_type '{stoploss_type}' for order_id={order_id}. Supported: ATR, supertrend.")
         except Exception as e:
-            logger.error(f"Error in update_trailing_stoploss for order_id={order_row.get('id')}: {e}")
+            logger.error(f"🛡️ ❌ Error in update_trailing_stoploss for order_id={order_id}, strike={strike_symbol}: {e}", exc_info=True)
 
     async def evaluate_exit(self, order_row):
         """
@@ -871,44 +929,71 @@ class OptionBuyStrategy(StrategyBase):
         Returns:
             True if exit signal is detected and order should be exited, else False.
         """
+        order_id = order_row.get('id')
+        strike_symbol = order_row.get('strike_symbol')
+        
         try:
-            strike_symbol = order_row.get('strike_symbol')
-            order_id = order_row.get('id')
             if not strike_symbol:
-                logger.error("evaluate_exit: Missing strike_symbol in order_row.")
+                logger.error(f"evaluate_exit: Missing strike_symbol in order_row for order_id={order_id}")
                 return False
+                
+            logger.debug(f"🔍 evaluate_exit: Starting exit evaluation for order_id={order_id}, strike={strike_symbol}")
+            
             trade_config = self.trade
-            trade_day = get_trade_day(get_ist_datetime())#  - timedelta(days=1)
+            trade_day = get_trade_day(get_ist_datetime())
+            
+            # Fetch history data
             history_dict = await self.fetch_history_data(
-            self.dp, [strike_symbol], trade_day, trade_config
-             )
+                self.dp, [strike_symbol], trade_day, trade_config
+            )
             history_df = history_dict.get(str(strike_symbol))
+            
             if history_df is None or getattr(history_df, 'empty', False):
-                logger.warning(f"evaluate_exit: No history data for {strike_symbol}.")
+                logger.warning(f"evaluate_exit: No history data for order_id={order_id}, strike={strike_symbol}")
                 return False
+                
+            logger.debug(f"🔍 evaluate_exit: Fetched {len(history_df)} candles for order_id={order_id}, strike={strike_symbol}")
+            
+            # Calculate supertrend for exit signal
             entry_conf = self.indicators.get('entry', {})
             supertrend_period = entry_conf.get('supertrend_period', 10)
             supertrend_multiplier = entry_conf.get('supertrend_multiplier', 2)
+            
+            logger.debug(f"🔍 evaluate_exit: Calculating supertrend for order_id={order_id} with period={supertrend_period}, multiplier={supertrend_multiplier}")
+            
             history_df = calculate_supertrend(history_df, supertrend_period, supertrend_multiplier)
+            
             if history_df is None or len(history_df) < 2:
-                logger.warning(f"evaluate_exit: Not enough history for {strike_symbol}.")
+                logger.warning(f"evaluate_exit: Not enough history after supertrend calculation for order_id={order_id}, strike={strike_symbol}")
                 return False
-            # Trailing stoploss logic
-            if trade_config.get("trailing_stoploss_enabled", False):
+            
+            # Update trailing stoploss first
+            trailing_enabled = trade_config.get("trailing_stoploss_enabled", False)
+            logger.debug(f"🔍 evaluate_exit: Trailing stoploss check for order_id={order_id}: enabled={trailing_enabled}")
+            
+            if trailing_enabled:
                 await self.update_trailing_stoploss(order_row, history_df, trade_config)
+            else:
+                logger.debug(f"🔍 evaluate_exit: Trailing stoploss disabled for order_id={order_id}")
+            
             # Check for supertrend reversal exit
             last_candle = history_df.iloc[-1]
-            if last_candle.get('supertrend_signal') == constants.TRADE_DIRECTION_SELL:
+            supertrend_signal = last_candle.get('supertrend_signal')
+            
+            logger.debug(f"🔍 evaluate_exit: Supertrend signal for order_id={order_id}: {supertrend_signal}")
+            
+            if supertrend_signal == constants.TRADE_DIRECTION_SELL:
                 # Update status to SUPERTREND_REVERSAL instead of exiting
                 await self.order_manager.update_order_status_in_db(
                     order_id=order_id,
                     status=constants.TRADE_STATUS_EXIT_REVERSAL
                 )
-                logger.info(f"evaluate_exit: Supertrend reversal detected for {strike_symbol}. Status updated to SUPERTREND_REVERSAL for order_id={order_id}.")
+                logger.info(f"🔍 ✅ Supertrend reversal detected for order_id={order_id}, strike={strike_symbol}. Status updated to EXIT_REVERSAL.")
                 return True
                     
-            logger.debug(f"evaluate_exit: No exit signal detected for {strike_symbol}, order_id={order_id}")
+            logger.debug(f"🔍 evaluate_exit: No exit signal detected for order_id={order_id}, strike={strike_symbol}")
             return False
+            
         except Exception as e:
-            logger.error(f"Error in evaluate_exit for order_id={order_row.get('id')}: {e}")
+            logger.error(f"🔍 ❌ Error in evaluate_exit for order_id={order_id}, strike={strike_symbol}: {e}", exc_info=True)
             return False

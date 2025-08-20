@@ -186,7 +186,7 @@ class BrokerManager:
                     import pandas as pd
                     loop = asyncio.get_event_loop()
                     # Fetch instruments as DataFrame asynchronously
-                    instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(broker.kite.instruments("NFO")))
+                    instruments = await loop.run_in_executor(None, lambda: pd.DataFrame(broker.kite.instruments()))
                     self._instrument_cache['zerodha'] = instruments
                     logger.info("Zerodha instruments cached as DataFrame after auth.")
                 except Exception as e:
@@ -643,7 +643,7 @@ class BrokerManager:
             'candle_range', 'entry_price', 'stop_loss', 'target_price', 'profit', 'signal_time', 'exit_time', 'trigger_price_diff',
             'exit_price', 'status', 'reason', 'atr', 'supertrend_signal', 'lot_qty', 'entry_time', 'order_ids', 'order_messages',
             'entry_spot_price', 'entry_spot_swing_high', 'entry_spot_swing_low', 'stoploss_spot_level', 'target_spot_level',
-            'signal_direction', 'entry_rsi', 'expiry_date'
+            'signal_direction', 'entry_rsi', 'expiry_date', 'orig_target'
         ]:
             val = getattr(signal, field, None)
             if val is not None:

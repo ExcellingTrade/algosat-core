@@ -2312,7 +2312,8 @@ async def get_all_open_orders(session):
         select(orders).where(orders.c.status.in_(["OPEN", "PENDING", "PLACED", "AWAITING_ENTRY", 
                                                   "EXIT_TARGET_PENDING", "EXIT_STOPLOSS_PENDING", 
                                                   "EXIT_REVERSAL_PENDING", "EXIT_EOD_PENDING", 
-                                                  "EXIT_EXPIRY_PENDING", "EXIT_ATOMIC_FAILED_PENDING"]))
+                                                  "EXIT_EXPIRY_PENDING", "EXIT_ATOMIC_FAILED_PENDING",
+                                                  "EXIT_MANUAL_PENDING", "EXIT_CLOSED_PENDING"]))
     )
     return [dict(row._mapping) for row in result.fetchall()]
 

@@ -99,18 +99,30 @@ async def run_strategy_config(strategy_instance, order_queue):
             try:
                 order_result = await strategy.process_cycle()
                 logger.info(f"Processed cycle for strategy '{strategy_name}' with order result: {order_result}")
-                # Only push to queue if order was placed successfully
-                if order_result and isinstance(order_result, dict) and order_result.get("order_id"):
-                    # Queue the main order for monitoring
-                    await order_queue.put({
-                        "order_id": order_result["order_id"],
-                        "strategy": strategy
-                    })
+                
+                # Handle different order result scenarios
+                if order_result and isinstance(order_result, dict):
+                    # Scenario 1: Normal main order with optional hedge order
+                    if order_result.get("order_id"):
+                        # Queue the main order for monitoring
+                        await order_queue.put({
+                            "order_id": order_result["order_id"],
+                            "strategy": strategy
+                        })
+                        
+                        # Also queue hedge order if present
+                        hedge_order_id = order_result.get("hedge_order_id")
+                        if hedge_order_id:
+                            logger.info(f"Queueing hedge order {hedge_order_id} for monitoring")
+                            await order_queue.put({
+                                "order_id": hedge_order_id,
+                                "strategy": strategy
+                            })
                     
-                    # Also queue hedge order if present
-                    hedge_order_id = order_result.get("hedge_order_id")
-                    if hedge_order_id:
-                        logger.info(f"Queueing hedge order {hedge_order_id} for monitoring")
+                    # Scenario 2: Hedge cleanup order (no main order_id, only hedge_order_id)
+                    elif order_result.get("hedge_order_id") and order_result.get("is_hedge_cleanup"):
+                        hedge_order_id = order_result["hedge_order_id"]
+                        logger.info(f"Queueing hedge cleanup order {hedge_order_id} for monitoring")
                         await order_queue.put({
                             "order_id": hedge_order_id,
                             "strategy": strategy

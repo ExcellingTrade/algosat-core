@@ -101,6 +101,12 @@ class OrderMonitor:
         if self.order_id in self._order_strategy_cache:
             del self._order_strategy_cache[self.order_id]
             logger.debug(f"OrderMonitor: Cleared order cache for order_id={self.order_id}. Reason: {reason}")
+            
+        # Reset hedge detection so it can be re-evaluated with fresh data
+        if hasattr(self, '_hedge_detection_done'):
+            delattr(self, '_hedge_detection_done')
+            self.is_hedge = False  # Reset to default, will be re-detected
+            logger.debug(f"OrderMonitor: Reset hedge detection for order_id={self.order_id} due to cache clear")
 
     async def _get_strategy_name(self, strategy=None):
         """
@@ -238,8 +244,17 @@ class OrderMonitor:
                             logger.info(f"OrderMonitor: {hedge_indicator} 🚨 PENDING status detected immediately: {quick_status} " +
                                        f"for order_id={self.order_id}, symbol={order_symbol}" + 
                                        (f", parent_id={parent_id}" if parent_id else ""))
-                            # Process PENDING exit with minimal data
-                            await self._check_and_complete_pending_exits(quick_order_check, quick_status)
+                            
+                            # Fetch current LTP for better fallback exit_price calculation
+                            current_ltp = None
+                            try:
+                                current_ltp = await self._update_current_price_for_open_order(quick_order_check)
+                                logger.debug(f"OrderMonitor: {hedge_indicator} Fetched LTP={current_ltp} for PENDING exit processing")
+                            except Exception as e:
+                                logger.warning(f"OrderMonitor: {hedge_indicator} Failed to fetch LTP for PENDING processing: {e}")
+                            
+                            # Process PENDING exit with LTP for better fallback
+                            await self._check_and_complete_pending_exits(quick_order_check, quick_status, current_ltp)
                             # If monitor stopped during PENDING processing, exit loop
                             if not self._running:
                                 logger.info(f"OrderMonitor: {hedge_indicator} Monitor stopped after immediate PENDING processing for order_id={self.order_id}")
@@ -635,7 +650,7 @@ class OrderMonitor:
             if current_db_status and (
                 current_db_status.startswith('EXIT_') or 
                 current_db_status.endswith('_PENDING') or
-                current_db_status in ('CLOSED', 'CANCELLED', 'REJECTED', 'FAILED')
+                current_db_status in ('CLOSED', 'CANCELLED', 'REJECTED', 'FAILED', 'EXIT_ENTRY_FAILED')
             ):
                 # Preserve the exit/terminal status, don't override with broker status
                 main_status = current_db_status
@@ -681,7 +696,7 @@ class OrderMonitor:
                     await self.order_manager.update_order_status_in_db(self.order_id, main_status)
                     await self._clear_order_cache(f"Order status updated to {main_status}")
                 last_main_status = main_status
-                if main_status in (OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.FAILED):
+                if main_status in (OrderStatus.CANCELLED, OrderStatus.REJECTED, OrderStatus.FAILED, "EXIT_ENTRY_FAILED"):
                     logger.info(f"OrderMonitor: {hedge_indicator} Order {self.order_id} reached terminal status {main_status}. Checking for child orders to close.")
                     
                     # CRITICAL FIX: Close child orders when main order fails
@@ -1057,7 +1072,7 @@ class OrderMonitor:
         except Exception as e:
             logger.error(f"OrderMonitor: ❌ Error in price-based exit check for order_id={self.order_id}: {e}", exc_info=True)
 
-    async def _check_and_complete_pending_exits(self, order_row, current_order_status):
+    async def _check_and_complete_pending_exits(self, order_row, current_order_status, current_ltp=None):
         """
         Check for PENDING exit statuses set by signal monitor or price-based exits and complete the exit process.
         This method calculates exit_price, exit_time, PnL and updates the final exit status.
@@ -1119,8 +1134,8 @@ class OrderMonitor:
             broker_exit_data = []  # Store individual broker exit details for broker_executions updates
             
             for i, bro in enumerate(entry_broker_db_orders):
-                logger.info(f"OrderMonitor: 📋 Processing ENTRY execution {i+1}/{len(entry_broker_db_orders)} for order_id={self.order_id}")
-                
+                logger.debug(f"OrderMonitor: 📋 Processing ENTRY execution {i+1}/{len(entry_broker_db_orders)} for order_id={self.order_id}")
+                logger.debug(f"OrderMonitor: ENTRY execution details: {bro}")
                 broker_status = bro.get('status', '').upper()
                 symbol_val = bro.get('symbol', None) or bro.get('tradingsymbol', None)
                 entry_qty = bro.get('executed_quantity', None) or bro.get('quantity', None)
@@ -1173,11 +1188,11 @@ class OrderMonitor:
                         entry_order_time = order_row.get('created_at')
                         for order in zerodha_orders:
                             order_status = order.get('status', '').upper()
-                            order_symbol = order.get('tradingsymbol', '')
-                            order_side = order.get('transaction_type', '').upper()
-                            order_product = order.get('product', '')
-                            order_id = order.get('order_id', '')
-                            # Use execution_time from broker order info (IST, naive)
+                            order_symbol = order.get('symbol', '')  # Normalized field
+                            order_side = order.get('side', '').upper()  # Normalized field  
+                            order_product = order.get('product_type', '')  # Normalized field
+                            order_id = order.get('order_id', '')  # Normalized field
+                            # Use execution_time from normalized order data
                             order_time = order.get('execution_time')
                             # Look for exit orders (opposite side) with matching symbol and product
                             entry_side = bro.get('action', '').upper()
@@ -1217,57 +1232,84 @@ class OrderMonitor:
                     fyers_orders = all_broker_orders.get('fyers', [])
                     product_type = bro.get('product_type', '') or bro.get('product', '')
                     if str(product_type).upper() == 'BO' and entry_broker_order_id and '-BO-1' in entry_broker_order_id:
-                        # Extract base order id (trim -BO-1)
-                        base_order_id = entry_broker_order_id.replace('-BO-1', '')
-                        # Find BO-2 and BO-3 legs
-                        bo_legs = [o for o in fyers_orders if o.get('id', '').startswith(base_order_id) and o.get('id', '') != entry_broker_order_id and '-BO-' in o.get('id', '')]
-                        logger.info(f"OrderMonitor: Fyers BO detected. Base order id: {base_order_id}. Found {len(bo_legs)} BO legs.")
-                        # Of the two legs, pick the one with status FILLED (status==2)
+                        # For Fyers BO orders, find exit legs using parentId field
+                        # Look for BO-2 (stoploss) and BO-3 (target) orders with parentId matching this BO-1 order
+                        logger.info(f"OrderMonitor: Fyers BO detected. Looking for BO legs with parentId={entry_broker_order_id}")
+                        
+                        # Check if we need to access raw order data for parentId field
+                        bo_legs = []
+                        for o in fyers_orders:
+                            order_id = o.get('order_id', '')
+                            # Check if this order has parent_id matching our entry order
+                            parent_id = o.get('parent_id')  # Now using normalized field
+                            
+                            # If we have parent_id, use it for precise matching
+                            if parent_id == entry_broker_order_id:
+                                bo_legs.append(o)
+                                logger.debug(f"OrderMonitor: Found BO leg via parent_id: {order_id}, parent_id={parent_id}")
+                            elif '-BO-' in order_id and order_id != entry_broker_order_id and not parent_id:
+                                # Fallback: if no parent_id available, log for debugging
+                                logger.debug(f"OrderMonitor: BO leg without parent_id (possibly older normalization): {order_id}")
+                        
+                        logger.info(f"OrderMonitor: Found {len(bo_legs)} BO legs with parent_id matching {entry_broker_order_id}")
+                        
+                        # If no legs found via parent_id, we have a problem with the normalization
+                        # Log this for debugging
+                        if len(bo_legs) == 0:
+                            logger.warning(f"OrderMonitor: No BO legs found with parent_id. This suggests parent_id field is not being normalized.")
+                            logger.debug(f"OrderMonitor: Sample Fyers order structure: {fyers_orders[0] if fyers_orders else 'No orders'}")
+                        
+                        # Of the BO legs, pick the one with status FILLED
                         filled_leg = None
                         for leg in bo_legs:
-                            if leg.get('status') == 2:
+                            leg_status = leg.get('status')
+                            # Handle both enum and string status
+                            status_str = leg_status.value if hasattr(leg_status, 'value') else str(leg_status).upper()
+                            if status_str == 'FILLED':
                                 filled_leg = leg
                                 break
+                        
                         if filled_leg:
-                            exit_broker_order_id = filled_leg.get('id')
-                            logger.info(f"OrderMonitor: ✅ Optimized Fyers BO exit order: id={exit_broker_order_id}, status=FILLED")
+                            exit_broker_order_id = filled_leg.get('order_id')
+                            logger.info(f"OrderMonitor: ✅ Found Fyers BO exit order via parent_id: id={exit_broker_order_id}, status=FILLED")
                         else:
-                            logger.warning(f"OrderMonitor: ⚠️ No FILLED BO leg found for base_order_id={base_order_id}")
+                            logger.warning(f"OrderMonitor: ⚠️ No FILLED BO leg found for entry_order_id={entry_broker_order_id}")
                     else:
                         # Fallback to generic logic for non-BO
                         # Use order_row['created_at'] (UTC) for entry time
                         entry_order_time = order_row.get('created_at')
                         for order in fyers_orders:
-                            order_status_code = order.get('status')
-                            order_symbol = order.get('symbol', '')
-                            order_side = order.get('side')
-                            order_product = order.get('productType', '')
-                            order_id = order.get('id', '')
-                            # Use execution_time from broker order info (IST, naive)
+                            order_status = order.get('status')
+                            order_symbol = order.get('symbol', '')  # Normalized field
+                            order_side = order.get('side')  # Normalized field (numeric: 1=BUY, -1=SELL)
+                            order_product = order.get('product_type', '')  # Normalized field
+                            order_id = order.get('order_id', '')  # Normalized field
+                            # Use execution_time from normalized order data
                             order_time = order.get('execution_time')
-                            if order_status_code == 2:
-                                order_status = 'FILLED'
-                            elif order_status_code == 1:
-                                order_status = 'CANCELLED'
+                            
+                            # Handle both enum and string status
+                            if hasattr(order_status, 'value'):
+                                order_status_str = order_status.value
                             else:
-                                order_status = f'STATUS_{order_status_code}'
+                                order_status_str = str(order_status).upper()
+                                
                             entry_side = bro.get('action', '').upper()
                             if entry_side == 'BUY':
-                                expected_exit_side_code = -1
+                                expected_exit_side = 'SELL'  # String value in normalized data
                             elif entry_side == 'SELL':
-                                expected_exit_side_code = 1
+                                expected_exit_side = 'BUY'   # String value in normalized data
                             else:
                                 logger.warning(f"OrderMonitor: Unknown entry side '{entry_side}' for Fyers exit matching")
                                 continue
                             symbol_match = order_symbol == symbol_val
-                            side_match = order_side == expected_exit_side_code
+                            side_match = order_side == expected_exit_side  # Now comparing strings
                             product_match = order_product == product
-                            status_valid = order_status in ['FILLED', 'COMPLETE']
+                            status_valid = order_status_str in ['FILLED', 'COMPLETE']
                             different_order = order_id != entry_broker_order_id
                             is_bo_order = '-BO-' in order_id
                             bo_status_valid = True
                             if is_bo_order:
-                                bo_status_valid = order_status_code == 2
+                                bo_status_valid = order_status_str == 'FILLED'
                             time_valid = True
                             if entry_order_time and order_time:
                                 try:
@@ -1285,13 +1327,13 @@ class OrderMonitor:
                                     time_valid = order_dt_utc >= entry_dt
                                 except Exception as e:
                                     logger.warning(f"OrderMonitor: Could not parse/convert order times for time check: {e}")
-                            logger.debug(f"OrderMonitor: Fyers exit order check - id={order_id}, symbol_match={symbol_match}, side_match={side_match}({order_side}=={expected_exit_side_code}), product_match={product_match}, status_valid={status_valid}({order_status}), different_order={different_order}, bo_status_valid={bo_status_valid}, time_valid={time_valid}")
+                            logger.debug(f"OrderMonitor: Fyers exit order check - id={order_id}, symbol_match={symbol_match}, side_match={side_match}({order_side}=={expected_exit_side}), product_match={product_match}, status_valid={status_valid}({order_status_str}), different_order={different_order}, bo_status_valid={bo_status_valid}, time_valid={time_valid}")
                             if (symbol_match and side_match and product_match and status_valid and different_order and bo_status_valid and time_valid):
                                 exit_broker_order_id = order_id
-                                logger.info(f"OrderMonitor: ✅ Found Fyers exit order: id={exit_broker_order_id}, symbol={order_symbol}, side_code={order_side}, status={order_status}, status_code={order_status_code}")
+                                logger.info(f"OrderMonitor: ✅ Found Fyers exit order: id={exit_broker_order_id}, symbol={order_symbol}, side={order_side}, status={order_status_str}")
                                 break
                         if not exit_broker_order_id:
-                            logger.warning(f"OrderMonitor: ⚠️ No matching Fyers exit order found for entry_order_id={entry_broker_order_id}, symbol={symbol_val}, expected_exit_side_code={expected_exit_side_code if 'expected_exit_side_code' in locals() else 'N/A'}")
+                            logger.warning(f"OrderMonitor: ⚠️ No matching Fyers exit order found for entry_order_id={entry_broker_order_id}, symbol={symbol_val}, expected_exit_side={expected_exit_side if 'expected_exit_side' in locals() else 'N/A'}")
                 
                 else:
                     logger.warning(f"OrderMonitor: Unsupported broker for exit order ID detection: '{broker_name}'")
@@ -1306,7 +1348,9 @@ class OrderMonitor:
                     broker_orders = all_broker_orders.get(broker_name.lower(), [])
                     
                     for order in broker_orders:
-                        if order.get('id') == exit_broker_order_id or order.get('order_id') == exit_broker_order_id:
+                        # Use proper field for order ID - 'order_id' for both Zerodha and Fyers
+                        order_id_field = order.get('order_id')
+                        if order_id_field == exit_broker_order_id:
                             exit_order_details = order
                             logger.info(f"OrderMonitor: ✅ Found exit order details: {exit_order_details}")
                             break
@@ -1316,16 +1360,20 @@ class OrderMonitor:
                         
                         # Extract execution data based on broker type
                         if broker_name.lower() == "zerodha":
-                            # Zerodha fields: average_price, filled_quantity
-                            exit_price = exit_order_details.get('average_price', 0) or exit_order_details.get('price', 0)
-                            exit_qty = exit_order_details.get('filled_quantity', 0) or exit_order_details.get('quantity', 0)
+                            # Zerodha normalized fields: exec_price, executed_quantity, quantity
+                            exit_price = exit_order_details.get('exec_price', 0) or exit_order_details.get('price', 0)
+                            exit_qty = exit_order_details.get('executed_quantity', 0) or exit_order_details.get('quantity', 0)
                             exit_status = exit_order_details.get('status', 'UNKNOWN')
                             
                         elif broker_name.lower() == "fyers":
-                            # Fyers fields: tradedPrice, filledQty  
-                            exit_price = exit_order_details.get('tradedPrice', 0) or exit_order_details.get('limitPrice', 0)
-                            exit_qty = exit_order_details.get('filledQty', 0) or exit_order_details.get('qty', 0)
+                            # Fyers normalized fields: exec_price, executed_quantity, qty
+                            # Note: exec_price maps to tradedPrice from raw data
+                            exit_price = exit_order_details.get('exec_price', 0)
+                            exit_qty = exit_order_details.get('executed_quantity', 0) or exit_order_details.get('qty', 0)
                             exit_status = exit_order_details.get('status', 'UNKNOWN')
+                            # Handle both enum and string status for Fyers (though normalization should handle this)
+                            if hasattr(exit_status, 'value'):
+                                exit_status = exit_status.value
                             
                         else:
                             logger.warning(f"OrderMonitor: Unknown broker type for execution data extraction: {broker_name}")
@@ -1337,19 +1385,22 @@ class OrderMonitor:
                             continue
                         
                         # Calculate PnL: (exit_price - entry_price) * quantity
+                        # Use entry_qty from our database (not exit_qty from broker) for accurate PnL calculation
                         # For SELL positions, PnL is (entry_price - exit_price) * quantity
                         entry_side = bro.get('action', '').upper()
+                        pnl_quantity = int(entry_qty)  # Use database entry quantity, not broker exit quantity
+                        
                         if entry_side == 'BUY':
                             # Long position: profit when exit_price > entry_price
-                            broker_pnl = (float(exit_price) - float(entry_price)) * int(exit_qty)
+                            broker_pnl = (float(exit_price) - float(entry_price)) * pnl_quantity
                         elif entry_side == 'SELL':
                             # Short position: profit when exit_price < entry_price  
-                            broker_pnl = (float(entry_price) - float(exit_price)) * int(exit_qty)
+                            broker_pnl = (float(entry_price) - float(exit_price)) * pnl_quantity
                         else:
                             logger.warning(f"OrderMonitor: Unknown entry side '{entry_side}' for PnL calculation")
                             broker_pnl = 0
                         
-                        logger.info(f"OrderMonitor: 💰 PnL calculation - entry_side={entry_side}, entry_price={entry_price}, exit_price={exit_price}, exit_qty={exit_qty}, broker_pnl={broker_pnl}")
+                        logger.info(f"OrderMonitor: 💰 PnL calculation - entry_side={entry_side}, entry_price={entry_price}, exit_price={exit_price}, entry_qty={entry_qty} (DB), exit_qty={exit_qty} (broker), pnl_quantity={pnl_quantity}, broker_pnl={broker_pnl}")
                         
                         # Calculate proper exit action based on entry side
                         if entry_side == 'BUY':
@@ -1360,25 +1411,28 @@ class OrderMonitor:
                             exit_action = 'EXIT'  # Fallback for unknown entry side
                         
                         # Store individual broker exit data for broker_executions table
+                        # Note: exit_qty represents broker's actual exit execution quantity
+                        # while PnL was calculated using entry_qty for accuracy
                         exit_data = {
                             'broker_id': broker_id,
                             'broker_order_id': entry_broker_order_id,
                             'exit_broker_order_id': exit_broker_order_id,
                             'exit_price': float(exit_price),
-                            'executed_quantity': int(exit_qty),
+                            'executed_quantity': int(exit_qty),  # Broker's actual exit quantity
                             'product_type': product,
                             'symbol': symbol_val,
-                            'broker_pnl': broker_pnl,
+                            'broker_pnl': broker_pnl,  # Calculated using entry_qty for accuracy
                             'exit_status': exit_status,
                             'exit_action': exit_action  # Add proper exit action
                         }
                         broker_exit_data.append(exit_data)
                         logger.info(f"OrderMonitor: Added exit data: {exit_data}")
                         
-                        # Accumulate for VWAP calculation
+                        # Accumulate for VWAP calculation using broker's exit quantities
+                        # VWAP uses actual exit execution quantities from broker
                         total_exit_value += float(exit_price) * int(exit_qty)
                         total_exit_qty += int(exit_qty)
-                        total_pnl += broker_pnl
+                        total_pnl += broker_pnl  # PnL already calculated using correct entry_qty
                         
                         logger.info(f"OrderMonitor: Exit details for {broker_name}: exit_order_id={exit_broker_order_id}, exit_price={exit_price}, exit_qty={exit_qty}, pnl={broker_pnl}")
                         logger.info(f"OrderMonitor: Running totals - exit_value={total_exit_value}, exit_qty={total_exit_qty}, pnl={total_pnl}")
@@ -1539,7 +1593,24 @@ class OrderMonitor:
                 fallback_pnl = total_pnl if total_pnl != 0 else existing_pnl  # Use calculated PnL if available, otherwise preserve existing
                 fallback_exit_price = final_exit_price  # May be None, that's okay
                 
+                # ENHANCED FALLBACK: Use LTP as more realistic fallback exit_price if available
+                if fallback_exit_price is None:
+                    if current_ltp is not None and current_ltp > 0:
+                        fallback_exit_price = float(current_ltp)
+                        logger.warning(f"OrderMonitor: Using current LTP {current_ltp} as fallback exit_price for order_id={self.order_id}")
+                    elif order_row:
+                        # Secondary fallback: Use entry_price only if LTP is not available
+                        entry_price = order_row.get('entry_price')
+                        if entry_price is not None:
+                            fallback_exit_price = float(entry_price)
+                            logger.warning(f"OrderMonitor: Using entry_price {entry_price} as secondary fallback exit_price for order_id={self.order_id} (LTP not available)")
+                        else:
+                            logger.warning(f"OrderMonitor: No entry_price or LTP available for fallback exit_price calculation for order_id={self.order_id}")
+                    else:
+                        logger.warning(f"OrderMonitor: No order data, LTP, or entry_price available for fallback exit_price calculation for order_id={self.order_id}")
+                
                 logger.info(f"OrderMonitor: Fallback PnL handling - calculated_pnl={total_pnl}, existing_pnl={existing_pnl}, fallback_pnl={fallback_pnl}")
+                logger.info(f"OrderMonitor: Fallback exit_price handling - final_exit_price={final_exit_price}, current_ltp={current_ltp}, fallback_exit_price={fallback_exit_price}")
                 
                 # Update orders table with fallback exit details
                 logger.info(f"OrderMonitor: Updating order status to {final_exit_status} for order_id={self.order_id} (FALLBACK)")
