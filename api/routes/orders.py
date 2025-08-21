@@ -89,9 +89,11 @@ async def list_orders(
         if rows:
             print(f"DEBUG: first row: {rows[0]}")
         
-        # Add order_id field (alias for id) to each row
+        # Add order_id field (alias for id) and compute is_hedge field for each row
         for row in rows:
             row['order_id'] = row['id']
+            # Set is_hedge to True if parent_order_id is present, False otherwise
+            row['is_hedge'] = bool(row.get('parent_order_id'))
         
         orders = [OrderListResponse(**row) for row in rows]
         print(f"DEBUG: orders after schema conversion: {len(orders)}")

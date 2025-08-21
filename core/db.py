@@ -807,6 +807,7 @@ async def get_all_orders(session: AsyncSession):
             orders.c.signal_direction,
             orders.c.qty,
             orders.c.executed_quantity,  # Add this line to select executed_quantity
+            orders.c.parent_order_id,  # Add parent_order_id for hedge detection
             # Spot and swing/level tracking fields - CRITICAL for exit evaluation
             orders.c.entry_spot_price,
             orders.c.entry_spot_swing_high,
@@ -984,6 +985,7 @@ async def get_orders_by_broker(session: AsyncSession, broker_name: str):
             orders.c.created_at,
             orders.c.updated_at,
             orders.c.executed_quantity,  # Add this field
+            orders.c.parent_order_id,  # Add parent_order_id field for hedge detection
             strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
             strategies.c.name.label('strategy_name'),  # Join to get the strategy name
             strategy_symbols.c.enable_smart_levels.label('smart_level_enabled'),  # Add smart level enabled flag
@@ -1083,6 +1085,7 @@ async def get_orders_by_broker_and_strategy(session: AsyncSession, broker_name: 
             orders.c.created_at,
             orders.c.updated_at,
             orders.c.executed_quantity,  # Add this field
+            orders.c.parent_order_id,  # Add parent_order_id field for hedge detection
             strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
             strategies.c.name.label('strategy_name'),  # Join to get the strategy name
             strategy_symbols.c.enable_smart_levels.label('smart_level_enabled'),  # Add smart level enabled flag
@@ -1813,6 +1816,7 @@ async def get_orders_by_strategy_symbol_id(session: AsyncSession, strategy_symbo
             orders.c.created_at,
             orders.c.updated_at,
             orders.c.executed_quantity,  # Add this line to select executed_quantity
+            orders.c.parent_order_id,  # Add parent_order_id field for hedge detection
             strategy_symbols.c.symbol.label('symbol'),  # Join to get the symbol name
             strategies.c.name.label('strategy_name'),  # Join to get the strategy name
             strategy_symbols.c.enable_smart_levels.label('smart_level_enabled'),  # Add smart level enabled flag
