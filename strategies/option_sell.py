@@ -46,6 +46,7 @@ from algosat.models.strategy_config import StrategyConfig
 from algosat.core.db import AsyncSessionLocal, get_open_orders_for_symbol_and_tradeday
 from algosat.core.strategy_symbol_utils import get_strategy_symbol_id
 from algosat.core.db import get_open_orders_for_strategy_symbol_and_tradeday
+from algosat.utils.telegram_notify import send_telegram_async
 
 logger = get_logger(__name__)
 
@@ -504,6 +505,7 @@ class OptionSellStrategy(StrategyBase):
         )
         if not history_data or all(h is None or getattr(h, 'empty', False) for h in history_data.values()):
             logger.warning("No history data received for strikes. Skipping signal evaluation.")
+            send_telegram_async("❌🔐 <b>OptionSell: Evaluate Signal skipped</b>\nNo history data received")
             return None
         # 2. Compute entry indicators for each strike
         indicator_data = {
