@@ -860,15 +860,21 @@ class OrderMonitor:
                         # HEDGE ORDER PROTECTION: Hedge orders should NOT trigger loss limit exits
                         if not self.is_hedge:
                             try:
+                                logger.debug(f"OrderMonitor: {hedge_indicator} Starting per-trade loss validation for order_id={self.order_id} with current P&L: {total_pnl}")
+                                
                                 # 1. Get trade enabled brokers count from risk summary and current order data
                                 from algosat.core.db import get_broker_risk_summary
                                 async with AsyncSessionLocal() as session:
                                     risk_data = await get_broker_risk_summary(session)
                                     trade_enabled_brokers = risk_data.get('summary', {}).get('trade_enabled_brokers', 0)
                                     
-                                    # 2. Get lot_qty from current order (within same session)
-                                    current_order = await get_order_by_id(session, self.order_id)
-                                    lot_qty = current_order.get('lot_qty', 0) if current_order else 0
+                                # 2. Get lot_qty from current order (within same session)
+                                current_order = await get_order_by_id(session, self.order_id)
+                                lot_qty = current_order.get('lot_qty', 0) if current_order else 0
+                                executed_lot_qty = current_order.get('executed_quantity', 0) if current_order else 0
+                                
+                                logger.debug(f"OrderMonitor: {hedge_indicator} Per-trade loss validation data for order_id={self.order_id}: "
+                                           f"lot_qty={lot_qty}, executed_lot_qty={executed_lot_qty}, trade_enabled_brokers={trade_enabled_brokers}")
                                 
                                 # 3. Get max_loss_per_lot from strategy config
                                 max_loss_per_lot = 0
@@ -877,19 +883,23 @@ class OrderMonitor:
                                     try:
                                         trade_config = json.loads(strategy_config['trade']) if isinstance(strategy_config['trade'], str) else strategy_config['trade']
                                         max_loss_per_lot = trade_config.get('max_loss_per_lot', 0)
+                                        logger.debug(f"OrderMonitor: {hedge_indicator} Strategy config max_loss_per_lot for order_id={self.order_id}: {max_loss_per_lot}")
                                     except Exception as e:
                                         logger.error(f"OrderMonitor: {hedge_indicator} Error parsing trade config for max_loss_per_lot: {e}")
+                                else:
+                                    logger.debug(f"OrderMonitor: {hedge_indicator} No strategy config or trade config found for order_id={self.order_id}")
                                 
-                                # 4. Calculate total risk exposure
-                                total_risk_exposure = lot_qty * trade_enabled_brokers * max_loss_per_lot
+                                # 4. Calculate total risk exposure using EXECUTED quantity (not lot_qty)
+                                total_risk_exposure = executed_lot_qty * trade_enabled_brokers * max_loss_per_lot
+                                logger.debug(f"OrderMonitor: {hedge_indicator} Risk calculation for order_id={self.order_id}: "
+                                           f"executed_lot_qty={executed_lot_qty} × trade_enabled_brokers={trade_enabled_brokers} × max_loss_per_lot={max_loss_per_lot} = {total_risk_exposure}")
                                 
                                 # 5. Check if loss exceeds limit
-                                if total_risk_exposure > 0 and total_pnl < -abs(total_risk_exposure):
+                                if total_risk_exposure > 0 and total_pnl < -abs(total_risk_exposure) and executed_lot_qty > 0:
                                     logger.critical(f"🚨 {hedge_indicator} PER-TRADE LOSS LIMIT EXCEEDED for order_id={self.order_id}! "
-                                                  f"Current P&L: {total_pnl}, Max Loss: {total_risk_exposure} "
-                                                  f"(lot_qty: {lot_qty} × brokers: {trade_enabled_brokers} × max_loss_per_lot: {max_loss_per_lot})")
-                                    
-                                    # 6. Exit the order immediately
+                                              f"Current P&L: {total_pnl}, Max Loss Limit: {total_risk_exposure} "
+                                              f"(executed_lot_qty: {executed_lot_qty} × brokers: {trade_enabled_brokers} × max_loss_per_lot: {max_loss_per_lot}) "
+                                              f"[Original lot_qty: {lot_qty}]")                                    # 6. Exit the order immediately
                                     await self.order_manager.exit_order(self.order_id, exit_reason="Per-trade loss limit exceeded")
                                     # Update status to max loss exit PENDING - let check_and_complete_pending_exits handle completion
                                     from algosat.common import constants
@@ -899,15 +909,14 @@ class OrderMonitor:
                                     # Continue monitoring loop - PENDING check at beginning will handle completion
                                     continue
                                 else:
-                                    logger.debug(f"OrderMonitor: {hedge_indicator} Per-trade risk check passed for order_id={self.order_id}. "
-                                               f"P&L: {total_pnl}, Risk exposure: {total_risk_exposure}")
+                                    logger.debug(f"OrderMonitor: {hedge_indicator} Per-trade risk check PASSED for order_id={self.order_id}. "
+                                               f"Current P&L: {total_pnl}, Max Loss Limit: {total_risk_exposure}, executed_lot_qty: {executed_lot_qty}. "
+                                               f"Loss check: {total_pnl} >= -{abs(total_risk_exposure)} ? {total_pnl >= -abs(total_risk_exposure)}")
                                     
                             except Exception as e:
                                 logger.error(f"OrderMonitor: {hedge_indicator} Error in per-trade loss validation for order_id={self.order_id}: {e}")
                         else:
-                            logger.debug(f"OrderMonitor: {hedge_indicator} Skipping per-trade loss validation for hedge order {self.order_id}")
-                    
-                    # Note: Position closure detection has been removed since we now rely on 
+                            logger.debug(f"OrderMonitor: {hedge_indicator} Skipping per-trade loss validation for hedge order {self.order_id}")                    # Note: Position closure detection has been removed since we now rely on 
                     # exit order status tracking instead of broker position matching
                     
                 except Exception as e:

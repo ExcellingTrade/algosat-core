@@ -147,78 +147,106 @@ class RiskManager:
     
     async def _calculate_broker_pnl(self, session, broker_name: str) -> float:
         """
-        Calculate current P&L for a specific broker using database P&L values.
-        This uses P&L values updated by OrderMonitor instead of fetching broker positions.
-        Much faster and more reliable than the previous approach.
+        Calculate current P&L for a specific broker using live broker positions.
+        This fetches real-time P&L data directly from the broker instead of database calculations.
+        More accurate and reflects real-time market conditions.
+        
+        Field mappings based on actual broker responses:
+        - Fyers: uses 'overall.pl_realized' + 'overall.pl_unrealized' for total P&L
+        - Zerodha: sums 'pnl' field from individual positions  
+        - Angel: uses various P&L field names
         """
         try:
-            from algosat.core.dbschema import broker_executions
-            from sqlalchemy import select, func
-            from datetime import date
+            # Get broker manager instance to fetch positions
+            from algosat.core.broker_manager import BrokerManager
             
-            # Get broker_id using cached method (same as OrderMonitor)
-            broker_id = await self._get_broker_id_from_name(broker_name)
-            if not broker_id:
-                logger.debug(f"No broker found with name {broker_name}")
+            # Create broker manager if not available
+            if not hasattr(self, '_broker_manager'):
+                self._broker_manager = BrokerManager()
+            
+            # Get the specific broker instance to fetch raw positions
+            enabled_brokers = await self._broker_manager.get_all_trade_enabled_brokers()
+            
+            if broker_name not in enabled_brokers:
+                logger.debug(f"Broker {broker_name} not found in enabled brokers")
                 return 0.0
             
-            # Get today's ENTRY executions P&L for this broker
-            today = date.today()
-            pnl_query = select(func.coalesce(func.sum(broker_executions.c.pnl), 0.0)).where(
-                and_(
-                    broker_executions.c.broker_id == broker_id,
-                    broker_executions.c.side == 'ENTRY',
-                    func.date(broker_executions.c.execution_time) == today
-                )
-            )
+            broker = enabled_brokers[broker_name]
+            if broker is None or not hasattr(broker, "get_positions"):
+                logger.debug(f"Broker {broker_name} does not support get_positions")
+                return 0.0
             
-            result = await session.execute(pnl_query)
-            total_pnl = float(result.scalar() or 0.0)
+            # Fetch raw positions directly from broker (before processing)
+            raw_positions = await broker.get_positions()
             
-            logger.debug(f"Database P&L for broker {broker_name} (broker_id={broker_id}): {total_pnl}")
+            # Calculate P&L based on broker-specific format
+            total_pnl = 0.0
+            
+            if broker_name.lower() == 'fyers':
+                # For Fyers: use overall P&L from raw response
+                # Structure: {'netPositions': [...], 'overall': {'pl_realized': -2576.25, 'pl_unrealized': 0}}
+                if isinstance(raw_positions, dict) and 'overall' in raw_positions:
+                    overall = raw_positions.get('overall', {})
+                    pl_realized = float(overall.get('pl_realized', 0.0))
+                    pl_unrealized = float(overall.get('pl_unrealized', 0.0))
+                    total_pnl = pl_realized + pl_unrealized
+                    logger.debug(f"Fyers overall P&L for {broker_name}: realized={pl_realized}, unrealized={pl_unrealized}, total={total_pnl}")
+                elif isinstance(raw_positions, dict) and 'netPositions' in raw_positions:
+                    # Fallback: sum individual position 'pl' fields (which equal 'realized_profit')
+                    net_positions = raw_positions.get('netPositions', [])
+                    for position in net_positions:
+                        position_pnl = float(position.get('pl', position.get('realized_profit', 0.0)))
+                        total_pnl += position_pnl
+                    logger.debug(f"Fyers individual P&L sum for {broker_name}: {total_pnl}")
+                elif isinstance(raw_positions, list):
+                    # Already processed netPositions list - sum 'pl' fields
+                    for position in raw_positions:
+                        position_pnl = float(position.get('pl', position.get('realized_profit', 0.0)))
+                        total_pnl += position_pnl
+                    logger.debug(f"Fyers netPositions P&L for {broker_name}: {total_pnl}")
+            
+            elif broker_name.lower() == 'zerodha':
+                # For Zerodha: sum 'pnl' field from individual positions
+                # Structure: [{'pnl': -15, ...}, {'pnl': 22.5, ...}, ...]
+                positions_list = raw_positions if isinstance(raw_positions, list) else raw_positions.get('net', [])
+                for position in positions_list:
+                    # Zerodha uses 'pnl' field for total P&L per position
+                    position_pnl = float(position.get('pnl', 0.0))
+                    total_pnl += position_pnl
+                logger.debug(f"Zerodha P&L for {broker_name}: {total_pnl} (from {len(positions_list)} positions)")
+            
+            elif broker_name.lower() == 'angel':
+                # For Angel: positions structure may vary
+                positions_list = raw_positions.get('data', raw_positions) if isinstance(raw_positions, dict) else raw_positions
+                if isinstance(positions_list, list):
+                    for position in positions_list:
+                        # Angel may use different field names - check common ones
+                        position_pnl = float(position.get('pnl', 
+                                           position.get('unrealizedprofitandloss', 
+                                           position.get('realizedprofitandloss', 
+                                           position.get('totalprofitandloss', 0.0)))))
+                        total_pnl += position_pnl
+                logger.debug(f"Angel P&L for {broker_name}: {total_pnl}")
+            
+            else:
+                # Generic approach for other brokers
+                positions_list = raw_positions if isinstance(raw_positions, list) else raw_positions.get('positions', raw_positions.get('data', []))
+                if isinstance(positions_list, list):
+                    for position in positions_list:
+                        # Try common P&L field names
+                        position_pnl = float(position.get('pnl', 
+                                           position.get('pl', 
+                                           position.get('profit_loss', 
+                                           position.get('realized_profit', 0.0)))))
+                        total_pnl += position_pnl
+                logger.debug(f"Generic P&L for {broker_name}: {total_pnl}")
+            
+            logger.info(f"Live P&L for broker {broker_name}: {total_pnl}")
             return total_pnl
             
         except Exception as e:
-            logger.error(f"Error calculating P&L for broker {broker_name}: {e}")
+            logger.error(f"Error calculating live P&L for broker {broker_name}: {e}")
             return 0.0
-    
-    async def _get_broker_id_from_name(self, broker_name: str) -> int:
-        """
-        Get broker_id from broker_name using cached lookup (same approach as OrderMonitor).
-        This avoids repeated database queries for broker mapping.
-        """
-        try:
-            # Use the same caching approach as OrderMonitor
-            if not hasattr(self, '_broker_cache'):
-                self._broker_cache = {}
-            
-            if broker_name in self._broker_cache:
-                return self._broker_cache[broker_name]
-            
-            from algosat.core.dbschema import broker_credentials
-            from sqlalchemy import select
-            
-            # Create a fresh session for broker lookup
-            from algosat.core.db import AsyncSessionLocal
-            async with AsyncSessionLocal() as broker_session:
-                broker_query = select(broker_credentials.c.id).where(
-                    broker_credentials.c.broker_name == broker_name
-                )
-                broker_result = await broker_session.execute(broker_query)
-                broker_row = broker_result.fetchone()
-                
-                if broker_row:
-                    broker_id = broker_row.id
-                    self._broker_cache[broker_name] = broker_id
-                    logger.debug(f"Cached broker mapping: {broker_name} -> broker_id={broker_id}")
-                    return broker_id
-                else:
-                    logger.warning(f"Broker not found in credentials table: {broker_name}")
-                    return None
-                    
-        except Exception as e:
-            logger.error(f"Error getting broker_id for {broker_name}: {e}")
-            return None
     
     async def emergency_stop_all_strategies(self):
         """
