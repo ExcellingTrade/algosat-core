@@ -545,7 +545,8 @@ class OptionSellStrategy(StrategyBase):
             # Make start_date and end_date IST-aware
             start_date = localize_to_ist(datetime.combine(trade_day, time(9, 15)))
             current_end_date = localize_to_ist(datetime.combine(current_date, get_ist_datetime().time()))
-            end_date = calculate_end_date(current_end_date, trade_config['interval_minutes'])
+            broker_name = self.dp.get_current_broker_name()
+            end_date = calculate_end_date(current_end_date, trade_config['interval_minutes'], broker_name)
             # end_date = end_date.replace(hour=9, minute=45, second=0, microsecond=0)
             logger.debug(f"Fetching history for strike symbols {', '.join(str(strike) for strike in strike_symbols)}...")
             logger.debug(f"Start date: {start_date}, End date: {end_date}, Interval: {trade_config['interval_minutes']} minutes")

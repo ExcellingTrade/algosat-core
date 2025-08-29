@@ -873,10 +873,53 @@ class OrderMonitor:
                                 lot_qty = current_order.get('lot_qty', 0) if current_order else 0
                                 executed_lot_qty = current_order.get('executed_quantity', 0) if current_order else 0
                                 
-                                logger.debug(f"OrderMonitor: {hedge_indicator} Per-trade loss validation data for order_id={self.order_id}: "
-                                           f"lot_qty={lot_qty}, executed_lot_qty={executed_lot_qty}, trade_enabled_brokers={trade_enabled_brokers}")
+                                # 3. Get lot_size from strategy config and calculate actual executed lots
+                                lot_size = None  # Will be fetched from strategy config
+                                actual_executed_lots = executed_lot_qty  # Default to executed_lot_qty
+                                calculation_method = "direct"  # Track how actual_executed_lots was calculated
                                 
-                                # 3. Get max_loss_per_lot from strategy config
+                                if strategy_config and strategy_config.get('trade'):
+                                    import json
+                                    try:
+                                        trade_config = json.loads(strategy_config['trade']) if isinstance(strategy_config['trade'], str) else strategy_config['trade']
+                                        lot_size = trade_config.get('lot_size')
+                                        if lot_size and lot_size > 0:
+                                            actual_executed_lots = executed_lot_qty / lot_size
+                                            calculation_method = "lot_size_division"
+                                            logger.debug(f"OrderMonitor: {hedge_indicator} Using lot_size from strategy config for order_id={self.order_id}: "
+                                                       f"executed_lot_qty={executed_lot_qty} ÷ lot_size={lot_size} = {actual_executed_lots}")
+                                        else:
+                                            # Fallback: use executed_lot_qty / lot_qty when lot_size not available
+                                            if lot_qty > 0:
+                                                actual_executed_lots = executed_lot_qty / lot_qty
+                                                calculation_method = "lot_qty_division"
+                                                logger.debug(f"OrderMonitor: {hedge_indicator} lot_size not available, using lot_qty fallback for order_id={self.order_id}: "
+                                                           f"executed_lot_qty={executed_lot_qty} ÷ lot_qty={lot_qty} = {actual_executed_lots}")
+                                            else:
+                                                logger.warning(f"OrderMonitor: {hedge_indicator} Both lot_size and lot_qty are invalid, using executed_lot_qty as-is: {executed_lot_qty}")
+                                    except Exception as e:
+                                        logger.error(f"OrderMonitor: {hedge_indicator} Error parsing trade config for lot_size: {e}")
+                                        # Fallback to lot_qty division if strategy config parsing fails
+                                        if lot_qty > 0:
+                                            actual_executed_lots = executed_lot_qty / lot_qty
+                                            calculation_method = "lot_qty_division_fallback"
+                                            logger.debug(f"OrderMonitor: {hedge_indicator} Config parsing failed, using lot_qty fallback for order_id={self.order_id}: "
+                                                       f"executed_lot_qty={executed_lot_qty} ÷ lot_qty={lot_qty} = {actual_executed_lots}")
+                                else:
+                                    # No strategy config available, use lot_qty division
+                                    if lot_qty > 0:
+                                        actual_executed_lots = executed_lot_qty / lot_qty
+                                        calculation_method = "lot_qty_division_no_config"
+                                        logger.debug(f"OrderMonitor: {hedge_indicator} No strategy config found, using lot_qty for order_id={self.order_id}: "
+                                                   f"executed_lot_qty={executed_lot_qty} ÷ lot_qty={lot_qty} = {actual_executed_lots}")
+                                    else:
+                                        logger.warning(f"OrderMonitor: {hedge_indicator} No strategy config and invalid lot_qty, using executed_lot_qty as-is: {executed_lot_qty}")
+                                
+                                logger.debug(f"OrderMonitor: {hedge_indicator} Per-trade loss validation data for order_id={self.order_id}: "
+                                           f"lot_qty={lot_qty}, executed_lot_qty={executed_lot_qty}, actual_executed_lots={actual_executed_lots}, "
+                                           f"calculation_method={calculation_method}, trade_enabled_brokers={trade_enabled_brokers}")
+                                
+                                # 4. Get max_loss_per_lot from strategy config
                                 max_loss_per_lot = 0
                                 if strategy_config and strategy_config.get('trade'):
                                     import json
@@ -889,17 +932,24 @@ class OrderMonitor:
                                 else:
                                     logger.debug(f"OrderMonitor: {hedge_indicator} No strategy config or trade config found for order_id={self.order_id}")
                                 
-                                # 4. Calculate total risk exposure using EXECUTED quantity (not lot_qty)
-                                total_risk_exposure = executed_lot_qty * trade_enabled_brokers * max_loss_per_lot
+                                # 5. Calculate total risk exposure using ACTUAL EXECUTED LOTS (executed_lot_qty / lot_size or lot_qty)
+                                # total_risk_exposure = actual_executed_lots * trade_enabled_brokers * max_loss_per_lot
+                                total_risk_exposure = actual_executed_lots * max_loss_per_lot
                                 logger.debug(f"OrderMonitor: {hedge_indicator} Risk calculation for order_id={self.order_id}: "
-                                           f"executed_lot_qty={executed_lot_qty} × trade_enabled_brokers={trade_enabled_brokers} × max_loss_per_lot={max_loss_per_lot} = {total_risk_exposure}")
+                                           f"actual_executed_lots={actual_executed_lots} (via {calculation_method}) × max_loss_per_lot={max_loss_per_lot} = {total_risk_exposure}")
                                 
-                                # 5. Check if loss exceeds limit
-                                if total_risk_exposure > 0 and total_pnl < -abs(total_risk_exposure) and executed_lot_qty > 0:
+                                # logger.debug(f"OrderMonitor: {hedge_indicator} Risk calculation for order_id={self.order_id}: "
+                                #            f"actual_executed_lots={actual_executed_lots} (via {calculation_method}) × trade_enabled_brokers={trade_enabled_brokers} × max_loss_per_lot={max_loss_per_lot} = {total_risk_exposure}")
+                                
+                                # 6. Check if loss exceeds limit
+                                if total_risk_exposure > 0 and total_pnl < -abs(total_risk_exposure) and actual_executed_lots > 0:
                                     logger.critical(f"🚨 {hedge_indicator} PER-TRADE LOSS LIMIT EXCEEDED for order_id={self.order_id}! "
-                                              f"Current P&L: {total_pnl}, Max Loss Limit: {total_risk_exposure} "
-                                              f"(executed_lot_qty: {executed_lot_qty} × brokers: {trade_enabled_brokers} × max_loss_per_lot: {max_loss_per_lot}) "
-                                              f"[Original lot_qty: {lot_qty}]")                                    # 6. Exit the order immediately
+                                                  f"Current P&L: {total_pnl}, Max Loss Limit: {total_risk_exposure} "
+                                                  f"(actual_executed_lots: {actual_executed_lots} × brokers: {trade_enabled_brokers} × max_loss_per_lot: {max_loss_per_lot}) "
+                                                  f"[executed_lot_qty: {executed_lot_qty}, calculation_method: {calculation_method}, "
+                                                  f"lot_size: {lot_size}, lot_qty: {lot_qty}]")
+                                    
+                                    # 7. Exit the order immediately
                                     await self.order_manager.exit_order(self.order_id, exit_reason="Per-trade loss limit exceeded")
                                     # Update status to max loss exit PENDING - let check_and_complete_pending_exits handle completion
                                     from algosat.common import constants
@@ -910,7 +960,7 @@ class OrderMonitor:
                                     continue
                                 else:
                                     logger.debug(f"OrderMonitor: {hedge_indicator} Per-trade risk check PASSED for order_id={self.order_id}. "
-                                               f"Current P&L: {total_pnl}, Max Loss Limit: {total_risk_exposure}, executed_lot_qty: {executed_lot_qty}. "
+                                               f"Current P&L: {total_pnl}, Max Loss Limit: {total_risk_exposure}, actual_executed_lots: {actual_executed_lots} (via {calculation_method}). "
                                                f"Loss check: {total_pnl} >= -{abs(total_risk_exposure)} ? {total_pnl >= -abs(total_risk_exposure)}")
                                     
                             except Exception as e:

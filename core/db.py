@@ -30,9 +30,15 @@ from algosat.core.dbschema import metadata, orders, broker_credentials, strategi
 engine = create_async_engine(
     str(settings.database_url),  # Use the unified config object
     echo=False,        # Set True during dev to see SQL queries
-    pool_size=5,       
-    max_overflow=10,   # extra connections beyond pool_size
+    pool_size=10,      # Increased from 5 to 10 
+    max_overflow=20,   # Increased from 10 to 20 (extra connections beyond pool_size)
+    pool_timeout=60,   # Increased timeout from default 30 to 60 seconds
+    pool_recycle=3600, # Recycle connections every hour to prevent stale connections
 )
+
+# Log pool configuration for monitoring
+logger.info(f"🔌 Database connection pool configured: "
+           f"pool_size=10, max_overflow=20, total_max=30, timeout=60s")
 
 # 2) Create a session factory
 AsyncSessionLocal = sessionmaker(

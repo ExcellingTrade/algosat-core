@@ -116,7 +116,6 @@ class SwingHighLowSellStrategy(StrategyBase):
         # Config fields modularized
         self._entry_cfg = self.trade.get("entry", {})
         self._stoploss_cfg = self.trade.get("stoploss", {})
-        self._confirm_cfg = self.trade.get("confirmation", {})
         self.entry_timeframe = self._entry_cfg.get("timeframe", "5m")
         self.entry_minutes = int(self.entry_timeframe.replace("m", "")) if self.entry_timeframe.endswith("m") else 5
         self.stoploss_timeframe = self._stoploss_cfg.get("timeframe", "5m")
@@ -124,10 +123,11 @@ class SwingHighLowSellStrategy(StrategyBase):
         self.entry_swing_left_bars = self._entry_cfg.get("swing_left_bars", 3)
         self.entry_swing_right_bars = self._entry_cfg.get("swing_right_bars", 3)
         self.entry_buffer = self._entry_cfg.get("entry_buffer", 0)
+        self.sl_buffer = self._stoploss_cfg.get("sl_buffer", 0)
         self.stop_percentage = self._stoploss_cfg.get("percentage", 0.05)
-        self.confirm_timeframe = self._confirm_cfg.get("timeframe", "1m")
+        self.confirm_timeframe = self._entry_cfg.get("confirmation_candle_timeframe", "1m")
+        self.confirm_atomic = self._entry_cfg.get("atomic_check", True)
         self.confirm_minutes = int(self.confirm_timeframe.replace("m", "")) if self.confirm_timeframe.endswith("m") else 1
-        self.confirm_candles = self._confirm_cfg.get("candles", 1)
         self.ce_lot_qty = self.trade.get("ce_lot_qty", 2)  # Add CE lot qty for sell strategy
         self.pe_lot_qty = self.trade.get("pe_lot_qty", 2)
         self.lot_size = self.trade.get("lot_size", 75)
@@ -168,7 +168,8 @@ class SwingHighLowSellStrategy(StrategyBase):
                 f"entry_timeframe={self.entry_timeframe}, stop_timeframe={self.stoploss_timeframe}, "
                 f"entry_swing_left_bars={self.entry_swing_left_bars}, entry_swing_right_bars={self.entry_swing_right_bars}, "
                 f"entry_buffer={self.entry_buffer}, confirm_timeframe={self.confirm_timeframe}, "
-                f"confirm_candles={self.confirm_candles}, pe_lot_qty={self.pe_lot_qty}, lot_size={self.lot_size}, "
+                f"atomic_check={self.confirm_atomic}, "
+                f"pe_lot_qty={self.pe_lot_qty}, lot_size={self.lot_size}, "
                 f"rsi_ignore_above={self.rsi_ignore_above}, rsi_period={self.rsi_period}, stop_percentage={self.stop_percentage}"
             )
             
@@ -794,54 +795,97 @@ class SwingHighLowSellStrategy(StrategyBase):
 
             # 4. Place order if signal
             order_info = await self.process_order(signal, confirm_df_sorted, signal.symbol)
-            if order_info:
-                # Check if all broker_responses are terminal (FAILED, CANCELLED, REJECTED)
-                broker_responses = order_info.get('broker_responses') if order_info else None
-                failed_statuses = {"FAILED", "CANCELLED", "REJECTED"}
-                all_failed = False
-                if broker_responses and isinstance(broker_responses, dict):
-                    statuses = [str(resp.get('status')) if resp else None for resp in broker_responses.values()]
-                    statuses = [s.split('.')[-1].replace("'", "").replace(">", "").upper() if s else None for s in statuses]
-                    if statuses and all(s in failed_statuses for s in statuses if s):
-                        all_failed = True
-                if all_failed:
-                    logger.error(f"Order placement failed for all brokers, skipping atomic confirmation: {order_info}")
-                    return order_info
-                logger.info(f"Order placed: {order_info}. Awaiting atomic confirmation on next entry candle close.")
-                # Wait for next entry candle to confirm breakout
-                await strategy_utils.wait_for_next_candle(self.entry_minutes)
-                # Fetch fresh entry_df for confirmation
-                entry_history_dict2 = await self.fetch_history_data(
-                    self.dp, [self.symbol], self.entry_minutes
-                )
-                entry_df2 = entry_history_dict2.get(self.symbol)
-                if entry_df2 is not None and not isinstance(entry_df2, pd.DataFrame):
-                    entry_df2 = pd.DataFrame(entry_df2)
-                if entry_df2 is None or len(entry_df2) < 2:
-                    logger.warning("Not enough entry_df data for atomic confirmation after order.")
-                    # Unable to confirm, exit order for safety
-                    # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
-                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed", check_live_status=True)
-                    
-                    # Update status to EXIT_ATOMIC_FAILED_PENDING
-                    from algosat.common import constants
-                    logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
-                    await self.order_manager.update_order_status_in_db(
-                        order_id=order_info.get("order_id") or order_info.get("id"),
-                        status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+            
+            # Log atomic check configuration for transparency
+            logger.info(f"🔍 Atomic confirmation setting: enabled={self.confirm_atomic}")
+            
+            if self.confirm_atomic:
+                logger.info("🕐 Atomic confirmation ENABLED - verifying entry on next candle close.")
+                if order_info:
+                    # Check if all broker_responses are terminal (FAILED, CANCELLED, REJECTED)
+                    broker_responses = order_info.get('broker_responses') if order_info else None
+                    failed_statuses = {"FAILED", "CANCELLED", "REJECTED"}
+                    all_failed = False
+                    if broker_responses and isinstance(broker_responses, dict):
+                        statuses = [str(resp.get('status')) if resp else None for resp in broker_responses.values()]
+                        statuses = [s.split('.')[-1].replace("'", "").replace(">", "").upper() if s else None for s in statuses]
+                        if statuses and all(s in failed_statuses for s in statuses if s):
+                            all_failed = True
+                    if all_failed:
+                        logger.error(f"❌ Order placement failed for all brokers, skipping atomic confirmation: {order_info}")
+                        return order_info
+                    logger.info(f"✅ Order placed successfully: {order_info}")
+                    logger.info(f"⏳ Awaiting atomic confirmation on next entry candle close (entry_minutes={self.entry_minutes})")
+                    # Wait for next entry candle to confirm breakout
+                    await strategy_utils.wait_for_next_candle(self.entry_minutes)
+                    # Fetch fresh entry_df for confirmation
+                    entry_history_dict2 = await self.fetch_history_data(
+                        self.dp, [self.symbol], self.entry_minutes
                     )
-                    
-                    logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}")
-                    return order_info
-                entry_df2_sorted = entry_df2.sort_values("timestamp")
-                latest_entry = entry_df2_sorted.iloc[-1]
-                # Confirm based on the breakout direction
-                confirm_last_close = confirm_df.iloc[-1]["close"] if "close" in confirm_df.columns else None
-                if (signal.signal_direction == "UP" and latest_entry["close"] > confirm_last_close) or \
-                   (signal.signal_direction == "DOWN" and latest_entry["close"] < confirm_last_close):
-                    logger.info("Breakout confirmed after atomic check, holding position.")
-                    
-                    # Calculate and store pullback level for re-entry logic - ONLY if smart levels enabled
+                    entry_df2 = entry_history_dict2.get(self.symbol)
+                    if entry_df2 is not None and not isinstance(entry_df2, pd.DataFrame):
+                        entry_df2 = pd.DataFrame(entry_df2)
+                    if entry_df2 is None or len(entry_df2) < 2:
+                        logger.warning("Not enough entry_df data for atomic confirmation after order.")
+                        # Unable to confirm, exit order for safety
+                        # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
+                        await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed", check_live_status=True)
+                        
+                        # Update status to EXIT_ATOMIC_FAILED_PENDING
+                        from algosat.common import constants
+                        logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
+                        await self.order_manager.update_order_status_in_db(
+                            order_id=order_info.get("order_id") or order_info.get("id"),
+                            status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                        )
+                        
+                        logger.info(f"Entry confirmation failed due to missing data. Order exited: {order_info}")
+                        return order_info
+                    entry_df2_sorted = entry_df2.sort_values("timestamp")
+                    latest_entry = entry_df2_sorted.iloc[-1]
+                    # Confirm based on the breakout direction
+                    confirm_last_close = confirm_df.iloc[-1]["close"] if "close" in confirm_df.columns else None
+                    if (signal.signal_direction == "UP" and latest_entry["close"] > confirm_last_close) or \
+                    (signal.signal_direction == "DOWN" and latest_entry["close"] < confirm_last_close):
+                        logger.info(f"✅ Breakout CONFIRMED after atomic check: {signal.signal_direction} breakout validated")
+                        logger.info(f"📊 Confirmation details: latest_close={latest_entry['close']}, confirm_close={confirm_last_close}, direction={signal.signal_direction}")
+                        
+                        # Calculate and store pullback level for re-entry logic - ONLY if smart levels enabled
+                        if self.is_smart_levels_enabled():
+                            pullback_success = await self.calculate_and_store_pullback_level(order_info, signal)
+                            if pullback_success:
+                                logger.info(f"✅ Pullback level stored successfully for order_id={order_info.get('order_id')}")
+                            else:
+                                logger.warning(f"⚠️ Failed to store pullback level for order_id={order_info.get('order_id')}")
+                        else:
+                            logger.debug("🔄 Pullback calculation skipped - smart levels not enabled")
+                            
+                        return order_info
+                    else:
+                        logger.warning(f"❌ Breakout FAILED atomic confirmation: {signal.signal_direction} breakout not validated")
+                        logger.warning(f"📊 Failure details: latest_close={latest_entry['close']}, confirm_close={confirm_last_close}, direction={signal.signal_direction}")
+                        logger.info("🔄 Exiting order due to failed atomic confirmation")
+                        # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
+                        await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed", check_live_status=True)
+                        
+                        # Update status to EXIT_ATOMIC_FAILED_PENDING
+                        from algosat.common import constants
+                        logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
+                        await self.order_manager.update_order_status_in_db(
+                            order_id=order_info.get("order_id") or order_info.get("id"),
+                            status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
+                        )
+                        
+                        logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}")
+                        return order_info
+                else:
+                    logger.error("Order placement failed in dual timeframe breakout.")
+                    return None
+            else:
+                logger.info("🚀 Atomic confirmation DISABLED - proceeding without verification.")
+                if order_info:
+                    logger.info(f"✅ Order placement completed: {order_info}")
+                    # Calculate and store pullback level for re-entry logic - ONLY if smart levels enabled (even without atomic check)
                     if self.is_smart_levels_enabled():
                         pullback_success = await self.calculate_and_store_pullback_level(order_info, signal)
                         if pullback_success:
@@ -849,27 +893,12 @@ class SwingHighLowSellStrategy(StrategyBase):
                         else:
                             logger.warning(f"⚠️ Failed to store pullback level for order_id={order_info.get('order_id')}")
                     else:
-                        logger.debug("🔄 Pullback calculation skipped - smart levels not enabled")
+                        logger.debug("🔄 Pullback calculation skipped - smart levels not enabled or order_info unavailable")
                         
                     return order_info
                 else:
-                    logger.info("Breakout failed atomic confirmation, exiting order.")
-                    # await self.exit_order(order_info.get("order_id") or order_info.get("id"))
-                    await self.order_manager.exit_order(order_info.get("order_id") or order_info.get("id"), exit_reason="Atomic confirmation failed", check_live_status=True)
-                    
-                    # Update status to EXIT_ATOMIC_FAILED_PENDING
-                    from algosat.common import constants
-                    logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}. Updating status to EXIT_ATOMIC_FAILED_PENDING")
-                    await self.order_manager.update_order_status_in_db(
-                        order_id=order_info.get("order_id") or order_info.get("id"),
-                        status=constants.TRADE_STATUS_EXIT_ATOMIC_FAILED_PENDING
-                    )
-                    
-                    logger.info(f"Entry confirmation failed (candle close {latest_entry['close']} not confirming breakout). Order exited: {order_info}")
-                    return order_info
-            else:
-                logger.error("Order placement failed in dual timeframe breakout.")
-                return None
+                    logger.error("❌ Order placement failed in dual timeframe breakout.")
+                    return None
         except Exception as e:
             logger.error(f"Error in process_cycle: {e}", exc_info=True)
             return None
@@ -1352,7 +1381,8 @@ class SwingHighLowSellStrategy(StrategyBase):
             # elif interval_minutes == 5:
             #     current_end_date = current_end_date.replace(hour=10, minute=20)
             # current_end_date = current_end_date.replace(day=18)
-            end_date = calculate_end_date(current_end_date, interval_minutes)
+            broker_name = self.dp.get_current_broker_name()
+            end_date = calculate_end_date(current_end_date, interval_minutes, broker_name)
             # end_date = end_date.replace(day=15,hour=10, minute=48, second=0, microsecond=0)  # Market close time
             logger.info(f"Fetching history for {symbols} from {start_date} to {end_date} interval {interval_minutes}m")
             # history_dict = await strategy_utils.fetch_instrument_history(
@@ -1889,16 +1919,30 @@ class SwingHighLowSellStrategy(StrategyBase):
             
             # PRIORITY 2: TWO-CANDLE STOPLOSS CONFIRMATION CHECK
             if stoploss_spot_level is not None and len(history_df) >= 2:
+                logger.debug(f"evaluate_exit: Starting TWO-CANDLE STOPLOSS check for order_id={order_id}, "
+                           f"stoploss_level={stoploss_spot_level}, sl_buffer={self.sl_buffer}, signal_direction={signal_direction}")
+                
                 # Get last two candles for confirmation
                 last_two_candles = history_df.tail(2)
                 prev_candle = last_two_candles.iloc[0]
                 current_candle = last_two_candles.iloc[1]
                 
-                # Two-candle confirmation logic for SELL strategy (flip logic vs buy)
+                # Two-candle confirmation logic for SELL strategy with sl_buffer (flip logic vs buy)
+                stoploss_level = float(stoploss_spot_level)
+                sl_buffer_value = self.sl_buffer
+                
                 if signal_direction == "DOWN":  # CE sell trade (sell call on DOWN breakout)
-                    # Exit if price > stoploss (stoploss hit upwards)
-                    if (prev_candle.get("close", 0) > float(stoploss_spot_level) and 
-                        current_candle.get("close", 0) > prev_candle.get("close", 0)):
+                    # For DOWN/CE SELL trades: exit when price goes above (stoploss + buffer)
+                    buffered_stoploss_level = stoploss_level + sl_buffer_value
+                    prev_close = prev_candle.get("close", 0)
+                    current_close = current_candle.get("close", 0)
+                    
+                    logger.debug(f"evaluate_exit: DOWN/CE SELL trade stoploss check - prev_close={prev_close}, "
+                               f"buffered_stoploss={buffered_stoploss_level} (original={stoploss_level} + buffer={sl_buffer_value}), "
+                               f"current_close={current_close}")
+                    
+                    # Check: prev_candle above buffered stoploss AND current_candle above prev_candle
+                    if (prev_close > buffered_stoploss_level and current_close > prev_close):
                         
                         # Update order status to EXIT_STOPLOSS
                         await self.order_manager.update_order_status_in_db(
@@ -1906,14 +1950,24 @@ class SwingHighLowSellStrategy(StrategyBase):
                             status=constants.TRADE_STATUS_EXIT_STOPLOSS
                         )
                         
-                        logger.info(f"evaluate_exit: TWO-CANDLE STOPLOSS confirmed for CE SELL trade. order_id={order_id}, "
-                                    f"prev_candle={prev_candle.get('close')} > stoploss={stoploss_spot_level}, "
-                                    f"current_candle={current_candle.get('close')} > prev_candle={prev_candle.get('close')} - Status updated to EXIT_STOPLOSS")
+                        logger.info(f"evaluate_exit: ✅ TWO-CANDLE STOPLOSS confirmed for DOWN/CE SELL trade. order_id={order_id}, "
+                                  f"prev_candle_close={prev_close} > buffered_stoploss={buffered_stoploss_level} "
+                                  f"(stoploss={stoploss_level} + sl_buffer={sl_buffer_value}), "
+                                  f"current_candle_close={current_close} > prev_candle_close={prev_close} - Status updated to EXIT_STOPLOSS")
                         return True
+                        
                 elif signal_direction == "UP":  # PE sell trade (sell put on UP breakout)
-                    # Exit if price < stoploss (stoploss hit downwards)
-                    if (prev_candle.get("close", 0) < float(stoploss_spot_level) and 
-                        current_candle.get("close", 0) < prev_candle.get("close", 0)):
+                    # For UP/PE SELL trades: exit when price goes below (stoploss - buffer)
+                    buffered_stoploss_level = stoploss_level - sl_buffer_value
+                    prev_close = prev_candle.get("close", 0)
+                    current_close = current_candle.get("close", 0)
+                    
+                    logger.debug(f"evaluate_exit: UP/PE SELL trade stoploss check - prev_close={prev_close}, "
+                               f"buffered_stoploss={buffered_stoploss_level} (original={stoploss_level} - buffer={sl_buffer_value}), "
+                               f"current_close={current_close}")
+                    
+                    # Check: prev_candle below buffered stoploss AND current_candle below prev_candle
+                    if (prev_close < buffered_stoploss_level and current_close < prev_close):
                         
                         # Update order status to EXIT_STOPLOSS
                         await self.order_manager.update_order_status_in_db(
@@ -1921,10 +1975,22 @@ class SwingHighLowSellStrategy(StrategyBase):
                             status=constants.TRADE_STATUS_EXIT_STOPLOSS
                         )
                         
-                        logger.info(f"evaluate_exit: TWO-CANDLE STOPLOSS confirmed for PE SELL trade. order_id={order_id}, "
-                                    f"prev_candle={prev_candle.get('close')} < stoploss={stoploss_spot_level}, "
-                                    f"current_candle={current_candle.get('close')} < prev_candle={prev_candle.get('close')} - Status updated to EXIT_STOPLOSS")
+                        logger.info(f"evaluate_exit: ✅ TWO-CANDLE STOPLOSS confirmed for UP/PE SELL trade. order_id={order_id}, "
+                                  f"prev_candle_close={prev_close} < buffered_stoploss={buffered_stoploss_level} "
+                                  f"(stoploss={stoploss_level} - sl_buffer={sl_buffer_value}), "
+                                  f"current_candle_close={current_close} < prev_candle_close={prev_close} - Status updated to EXIT_STOPLOSS")
                         return True
+                        
+                # If no stoploss exit triggered, log the current status
+                logger.debug(f"evaluate_exit: TWO-CANDLE STOPLOSS not triggered for order_id={order_id}. "
+                           f"Conditions not met for {signal_direction} trade")
+            else:
+                if stoploss_spot_level is None:
+                    logger.debug(f"evaluate_exit: Skipping TWO-CANDLE STOPLOSS check - no stoploss_spot_level for order_id={order_id}")
+                elif len(history_df) < 2:
+                    logger.debug(f"evaluate_exit: Skipping TWO-CANDLE STOPLOSS check - insufficient history data "
+                               f"({len(history_df)} candles) for order_id={order_id}")
+            
             
             # PRIORITY 3: TARGET ACHIEVEMENT CHECK (SELL strategy: reverse logic)
             if target_spot_level is not None:
@@ -2311,41 +2377,43 @@ class SwingHighLowSellStrategy(StrategyBase):
         except Exception as e:
             logger.error(f"Error updating target in DB for order_id={order_id}: {e}")
     
-    def update_swing_levels_in_db(self, order_id, swing_high=None, swing_low=None):
+    async def update_swing_levels_in_db(self, order_id, swing_high=None, swing_low=None):
         """Update swing high/low levels in database"""
         try:
             from algosat.core.db import AsyncSessionLocal
-            with AsyncSessionLocal as session:
+            from sqlalchemy import text
+            async with AsyncSessionLocal() as session:
                 # Build dynamic query based on provided parameters
                 update_fields = []
-                params = []
+                params = {}
                 
                 if swing_high is not None:
-                    update_fields.append("entry_spot_swing_high = %s")
-                    params.append(float(swing_high))
+                    update_fields.append("entry_spot_swing_high = :swing_high")
+                    params["swing_high"] = float(swing_high)
                 
                 if swing_low is not None:
-                    update_fields.append("entry_spot_swing_low = %s")
-                    params.append(float(swing_low))
+                    update_fields.append("entry_spot_swing_low = :swing_low")
+                    params["swing_low"] = float(swing_low)
                 
                 if update_fields:
-                    query = f"UPDATE orders SET {', '.join(update_fields)} WHERE id = %s"
-                    params.append(order_id)
-                    session.execute(query, params)
-                    session.commit()
+                    query = f"UPDATE orders SET {', '.join(update_fields)} WHERE id = :order_id"
+                    params["order_id"] = order_id
+                    await session.execute(text(query), params)
+                    await session.commit()
                     logger.info(f"Updated swing levels in DB: order_id={order_id}, swing_high={swing_high}, swing_low={swing_low}")
         except Exception as e:
             logger.error(f"Error updating swing levels in DB for order_id={order_id}: {e}")
     
-    def update_entry_rsi_in_db(self, order_id, entry_rsi):
+    async def update_entry_rsi_in_db(self, order_id, entry_rsi):
         """Update entry RSI level in database"""
         try:
             from algosat.core.db import AsyncSessionLocal
-            with AsyncSessionLocal as session:
+            from sqlalchemy import text
+            async with AsyncSessionLocal() as session:
                 # Update orders table with entry RSI
-                query = "UPDATE orders SET entry_rsi = %s WHERE id = %s"
-                session.execute(query, (float(entry_rsi), order_id))
-                session.commit()
+                query = "UPDATE orders SET entry_rsi = :entry_rsi WHERE id = :order_id"
+                await session.execute(text(query), {"entry_rsi": float(entry_rsi), "order_id": order_id})
+                await session.commit()
                 logger.info(f"Updated entry_rsi in DB: order_id={order_id}, entry_rsi={entry_rsi}")
         except Exception as e:
             logger.error(f"Error updating entry_rsi in DB for order_id={order_id}: {e}")

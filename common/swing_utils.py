@@ -532,9 +532,9 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
     expiry_date = None
 
     if is_weekly:
-        # Find next Thursday as expiry, then subtract days_before_expiry, roll over if past
-        thursday = 3  # Monday=0
-        days_ahead = (thursday - today.weekday() + 7) % 7
+        # Find next Tuesday as expiry, then subtract days_before_expiry, roll over if past
+        tuesday = 1  # Monday=0, Tuesday=1
+        days_ahead = (tuesday - today.weekday() + 7) % 7
         if days_ahead == 0 and today.hour >= 15:
             days_ahead = 7
         expiry_date = today + timedelta(days=days_ahead)
@@ -559,12 +559,12 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
                 pass
                 
     else:
-        # Monthly expiry (last Thursday of the month), then subtract days_before_expiry, roll over if past
+        # Monthly expiry (last Tuesday of the month), then subtract days_before_expiry, roll over if past
         month = today.month
         year = today.year
         last_day = calendar.monthrange(year, month)[1]
         last_date = datetime(year, month, last_day)
-        while last_date.weekday() != 3:
+        while last_date.weekday() != 1:  # Tuesday = 1
             last_date -= timedelta(days=1)
         expiry_date = last_date - timedelta(days=days_before_expiry)
         
@@ -574,7 +574,7 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
             next_year = year if month < 12 else year + 1
             last_day = calendar.monthrange(next_year, next_month)[1]
             last_date = datetime(next_year, next_month, last_day)
-            while last_date.weekday() != 3:
+            while last_date.weekday() != 1:  # Tuesday = 1
                 last_date -= timedelta(days=1)
             expiry_date = last_date - timedelta(days=days_before_expiry)
         
@@ -591,7 +591,7 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
                     next_year = year if month < 12 else year + 1
                     last_day = calendar.monthrange(next_year, next_month)[1]
                     last_date = datetime(next_year, next_month, last_day)
-                    while last_date.weekday() != 3:
+                    while last_date.weekday() != 1:  # Tuesday = 1
                         last_date -= timedelta(days=1)
                     expiry_date = last_date - timedelta(days=days_before_expiry)
             except Exception as e:
@@ -611,19 +611,19 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
     yy = expiry_date.strftime("%y")
     month_num = expiry_date.month
     
-    # Check if this is the last Thursday of the month (monthly expiry)
-    is_last_thursday_of_month = False
+    # Check if this is the last Tuesday of the month (monthly expiry)
+    is_last_tuesday_of_month = False
     if is_weekly:
-        # Find the last Thursday of the current month
+        # Find the last Tuesday of the current month
         last_day = calendar.monthrange(expiry_date.year, expiry_date.month)[1]
         last_date_of_month = datetime(expiry_date.year, expiry_date.month, last_day)
-        while last_date_of_month.weekday() != 3:  # Thursday = 3
+        while last_date_of_month.weekday() != 1:  # Tuesday = 1
             last_date_of_month -= timedelta(days=1)
         
-        # If the expiry_date is the same as the last Thursday of the month, treat it as monthly
-        is_last_thursday_of_month = expiry_date.date() == last_date_of_month.date()
+        # If the expiry_date is the same as the last Tuesday of the month, treat it as monthly
+        is_last_tuesday_of_month = expiry_date.date() == last_date_of_month.date()
     
-    if is_weekly and not is_last_thursday_of_month:
+    if is_weekly and not is_last_tuesday_of_month:
         # Weekly expiry: NSE:{SYMBOL}{YY}{M}{DD}{STRIKE}{OPT_TYPE}
         nse_weekly_map = {
             1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
@@ -634,7 +634,7 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
         symbol_str = f"NSE:{symbol}{yy}{m_char}{dd}{atm_strike}{option_type.upper()}"
     else:
         # Monthly expiry: NSE:{SYMBOL}{YY}{MMM}{STRIKE}{OPT_TYPE}
-        # This applies to both originally monthly symbols AND weekly symbols on last Thursday
+        # This applies to both originally monthly symbols AND weekly symbols on last Tuesday
         mmm = monthly_map[month_num]
         symbol_str = f"NSE:{symbol}{yy}{mmm}{atm_strike}{option_type.upper()}"
 

@@ -115,7 +115,8 @@ def seconds_until_next_scheduled_time(now_ist):
     scheduled_times = [
         dt_time(0, 5),   # 12:05 AM IST
         dt_time(6, 10),  # 6:10 AM IST
-        dt_time(8, 5)    # 8:00 AM IST
+        dt_time(8, 5),    # 8:00 AM IST
+        dt_time(9, 5)   # 9:05 AM IST
     ]
     now_time = now_ist.time()
     today = now_ist.date()
@@ -155,7 +156,7 @@ async def main():
         cleanup_logs_and_cache()
         clean_broker_monitor_logs()
         broker_manager = BrokerManager()
-        await broker_manager.setup()
+        await broker_manager.setup(force_auth=True)
         logger.info(f"Brokers to monitor: {list(broker_manager.brokers.keys())}")
         tasks = []
         # Create monitoring tasks for each broker

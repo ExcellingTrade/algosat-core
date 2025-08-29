@@ -308,10 +308,14 @@ def calculate_backdate_days(interval_minutes):
         return 10  # Fetch 3 days for smaller intervals    
 
 # Calculate end_date for fetching historical data
-def calculate_end_date(current_date, interval_minutes):
+def calculate_end_date(current_date, interval_minutes, broker_name=None):
     """
     Returns the timestamp for the last **completed** candle of the given interval.
-    If now is 10:43 and interval is 5, returns 10:35 (because 10:40 candle is forming).
+    
+    Behavior depends on broker:
+    - Fyers: If now is 10:43 and interval is 5, returns 10:35 (floor to 10:40, then subtract interval)
+    - Zerodha: If now is 10:43 and interval is 5, returns 10:40 (floor to 10:40, return floored time)
+    - Default (no broker_name): Uses Fyers behavior for backward compatibility
     """
     # Strip seconds/microseconds
     current_time = current_date.replace(second=0, microsecond=0)
@@ -319,11 +323,18 @@ def calculate_end_date(current_date, interval_minutes):
     total_minutes = current_time.hour * 60 + current_time.minute
     # Floor to nearest interval (could be current incomplete candle)
     floored_minutes = (total_minutes // interval_minutes) * interval_minutes
-    # Subtract one interval to get the *previous* completed candle
-    completed_minutes = floored_minutes - interval_minutes
-    if completed_minutes < 0:
-        # Handle edge case at midnight
-        completed_minutes = 0
+    
+    # Broker-specific behavior
+    if broker_name and broker_name.lower() == 'zerodha':
+        # Zerodha: Return floored time itself
+        completed_minutes = floored_minutes
+    else:
+        # Fyers and default: Subtract one interval to get the *previous* completed candle
+        completed_minutes = floored_minutes - interval_minutes
+        if completed_minutes < 0:
+            # Handle edge case at midnight
+            completed_minutes = 0
+    
     end_date = current_time.replace(hour=0, minute=0) + timedelta(minutes=completed_minutes)
     return end_date
 

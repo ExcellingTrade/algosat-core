@@ -116,7 +116,20 @@ def get_nse_holiday_list():
     # Check if the cached holiday file exists and is recent
     if os.path.exists(HOLIDAY_FILE):
         file_modified_time = localize_to_ist(datetime.fromtimestamp(os.path.getmtime(HOLIDAY_FILE)))
-        if get_ist_now() - file_modified_time < timedelta(days=30):
+        current_time = get_ist_now()
+        
+        # Ensure both times are timezone-aware for comparison
+        # localize_to_ist should already return timezone-aware datetime, but let's make sure
+        if file_modified_time.tzinfo is None:
+            import pytz
+            ist_tz = pytz.timezone('Asia/Kolkata')
+            file_modified_time = ist_tz.localize(file_modified_time)
+        if current_time.tzinfo is None:
+            import pytz
+            ist_tz = pytz.timezone('Asia/Kolkata')
+            current_time = ist_tz.localize(current_time)
+        
+        if current_time - file_modified_time < timedelta(days=30):
             try:
                 with open(HOLIDAY_FILE, 'r') as f:
                     logger.debug("Loaded NSE holiday list from cache.")
