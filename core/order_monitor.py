@@ -972,7 +972,7 @@ class OrderMonitor:
                 except Exception as e:
                     logger.error(f"OrderMonitor: {hedge_indicator} Error in P&L monitoring: {e}", exc_info=True)
             logger.debug(f"OrderMonitor: {hedge_indicator} Broker position monitoring completed for order_id={self.order_id}")
-            logger.debug("Next check in {self.price_order_monitor_seconds} seconds...")
+            logger.debug(f"Next check in {self.price_order_monitor_seconds} seconds...")
             await asyncio.sleep(self.price_order_monitor_seconds)
         logger.info(f"OrderMonitor: {hedge_indicator} Stopping price monitor for order_id={self.order_id} (last status: {last_main_status})")
     

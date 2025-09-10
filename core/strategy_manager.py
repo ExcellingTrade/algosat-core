@@ -380,18 +380,36 @@ async def create_lightweight_strategy_instance(symbol_id: int, config: StrategyC
     """
     global strategy_cache
     
+    # Use strategy_symbol_id (config.symbol_id) as cache key to support multiple configs per symbol
+    cache_key = config.symbol_id if config.symbol_id else symbol_id
+    
+    logger.debug(f"🔧 Cache check for cache_key={cache_key}: cache_size={len(strategy_cache)}, keys={list(strategy_cache.keys())}")
+    
     # Check if strategy instance already exists in cache
-    if symbol_id in strategy_cache:
-        logger.debug(f"Retrieved strategy instance from cache for symbol_id={symbol_id}")
-        return strategy_cache[symbol_id]
+    if cache_key in strategy_cache:
+        cached_instance = strategy_cache[cache_key]
+        # Check if the cached instance has the correct configuration
+        if hasattr(cached_instance, 'cfg') and hasattr(cached_instance.cfg, 'enable_smart_levels'):
+            cached_smart_levels = cached_instance.cfg.enable_smart_levels
+            new_smart_levels = config.enable_smart_levels
+            if cached_smart_levels != new_smart_levels:
+                logger.warning(f"🔧 Cache config mismatch for cache_key={cache_key}: cached={cached_smart_levels}, new={new_smart_levels}. Recreating instance.")
+                # Remove the old cached instance and create a new one
+                del strategy_cache[cache_key]
+            else:
+                logger.debug(f"Retrieved strategy instance from cache for cache_key={cache_key} (symbol_id={symbol_id}) - config matches")
+                return cached_instance
+        else:
+            logger.debug(f"Retrieved strategy instance from cache for cache_key={cache_key} (symbol_id={symbol_id}) - no config check possible")
+            return cached_instance
     
     # Create lightweight strategy instance (no setup)
     strategy_instance = await create_strategy_instance_only(config, data_manager, order_manager)
     
     # Store in cache if successfully created
     if strategy_instance:
-        strategy_cache[symbol_id] = strategy_instance
-        logger.debug(f"Cached new lightweight strategy instance for symbol_id={symbol_id}")
+        strategy_cache[cache_key] = strategy_instance
+        logger.debug(f"Cached new lightweight strategy instance for cache_key={cache_key} (symbol_id={symbol_id})")
     
     return strategy_instance
 
@@ -446,16 +464,21 @@ async def get_strategy_for_order(order_id: str, data_manager: DataManager, order
         logger.error(f"Error getting strategy for order_id={order_id}: {e}")
         return None
 
-def remove_strategy_from_cache(symbol_id: int):
+def remove_strategy_from_cache(strategy_symbol_id: int):
     """
     Remove strategy instance from cache when no longer needed.
     Called when strategies are stopped or cancelled.
+    
+    Args:
+        strategy_symbol_id: The strategy_symbols.id (used as cache key)
     """
     global strategy_cache
     
-    if symbol_id in strategy_cache:
-        del strategy_cache[symbol_id]
-        logger.debug(f"Removed strategy instance from cache for symbol_id={symbol_id}")
+    if strategy_symbol_id in strategy_cache:
+        del strategy_cache[strategy_symbol_id]
+        logger.debug(f"Removed strategy instance from cache for strategy_symbol_id={strategy_symbol_id}")
+    else:
+        logger.debug(f"No cache entry found for strategy_symbol_id={strategy_symbol_id}")
 
 async def create_strategy_instance_only(config: StrategyConfig, data_manager: DataManager, order_manager: OrderManager):
     """
@@ -529,7 +552,11 @@ async def order_monitor_loop(order_queue, data_manager, order_manager):
     logger.info("Order monitor loop has exited")
 
 async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
-    global order_cache, risk_manager, config_timestamps
+    global order_cache, risk_manager, config_timestamps, strategy_cache
+    
+    # Clear strategy cache on startup to ensure fresh instances
+    logger.info("🧹 Clearing strategy cache on startup")
+    strategy_cache.clear()
     
     # Initialize OrderCache and RiskManager (only during market hours)
     if order_cache is None:
@@ -723,7 +750,9 @@ async def run_poll_loop(data_manager: DataManager, order_manager: OrderManager):
                                         'product_type': row.product_type,
                                         'enable_smart_levels': row.enable_smart_levels
                                     }
+                                    logger.debug(f"🔧 DEBUG: Building config for symbol_id {symbol_id} - enable_smart_levels from DB: {row.enable_smart_levels}, config_dict value: {config_dict['enable_smart_levels']}")
                                     config = StrategyConfig(**config_dict)
+                                    logger.debug(f"🔧 DEBUG: Created StrategyConfig for symbol_id {symbol_id} - enable_smart_levels: {config.enable_smart_levels}")
                                     # Create lightweight strategy instance (no blocking setup)
                                     strategy_instance = await create_lightweight_strategy_instance(symbol_id, config, data_manager, order_manager)
                                     if strategy_instance:

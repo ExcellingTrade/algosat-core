@@ -2,6 +2,12 @@ import numpy as np
 import pandas as pd
 import calendar
 from datetime import datetime, timedelta
+import pytz
+
+from algosat.common.logger import get_logger
+from algosat.core.time_utils import get_ist_now
+
+logger = get_logger(__name__)
 
 # ──────────────── Helper: find the previous non-NaN in a 1D numpy array ────────────────
 def previous_non_nan(arr: np.ndarray, idx: int):
@@ -516,87 +522,127 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
     symbol = sanitize_symbol_for_options(symbol)
 
     if today is None:
-        today = datetime.now()
+        today = get_ist_now()
+    else:
+        # If today is naive, make it timezone-aware for consistency
+        if today.tzinfo is None:
+            ist_timezone = pytz.timezone("Asia/Kolkata")
+            today = ist_timezone.localize(today)
+
+    logger.debug(f"Calculating ATM option symbol for {symbol} at spot {spot_price} on {today}")
 
     # --- Extract expiry config ---
     expiry_conf = config.get("expiry_exit", {"enabled": True, "days_before_expiry": 0})
     entry_conf = config.get("entry", {})
+    expiry_exit_enabled = expiry_conf.get("enabled", True)
     days_before_expiry = expiry_conf.get("days_before_expiry", 0)
     expiry_exit_time = expiry_conf.get("expiry_exit_time", "15:15")  # Default to 15:15 if not specified
+    logger.debug(f"Expiry exit config: enabled={expiry_exit_enabled}, days_before_expiry={days_before_expiry}, time={expiry_exit_time}")    
     monthly_map = {1: "JAN", 2: "FEB", 3: "MAR", 4: "APR", 5: "MAY", 6: "JUN", 7: "JUL",
                    8: "AUG", 9: "SEP", 10: "OCT", 11: "NOV", 12: "DEC"}
 
     # Determine expiry type
     weekly_symbols = ("NIFTY")
     is_weekly = any(symbol.startswith(sym) for sym in weekly_symbols)
-    expiry_date = None
 
-    if is_weekly:
-        # Find next Tuesday as expiry, then subtract days_before_expiry, roll over if past
+    def get_next_tuesday(base_date):
+        """Get the next Tuesday from base_date"""
         tuesday = 1  # Monday=0, Tuesday=1
-        days_ahead = (tuesday - today.weekday() + 7) % 7
-        if days_ahead == 0 and today.hour >= 15:
+        days_ahead = (tuesday - base_date.weekday() + 7) % 7
+        if days_ahead == 0:
             days_ahead = 7
-        expiry_date = today + timedelta(days=days_ahead)
-        expiry_date -= timedelta(days=days_before_expiry)
-        
-        # If already past expiry, pick next expiry
-        if expiry_date.date() < today.date():
-            expiry_date += timedelta(days=7)
-        
-        # Check if expiry_date is today and current time is past expiry_exit_time
-        if expiry_date.date() == today.date():
-            try:
-                # Parse expiry_exit_time (format: "HH:MM")
-                exit_hour, exit_minute = map(int, expiry_exit_time.split(":"))
-                exit_time = today.replace(hour=exit_hour, minute=exit_minute, second=0, microsecond=0)
-                
-                if today >= exit_time:
-                    # Move to next week's expiry
-                    expiry_date += timedelta(days=7)
-            except Exception as e:
-                # If parsing fails, use default behavior
-                pass
-                
-    else:
-        # Monthly expiry (last Tuesday of the month), then subtract days_before_expiry, roll over if past
-        month = today.month
-        year = today.year
+        return base_date + timedelta(days=days_ahead)
+
+    def get_last_tuesday_of_month(year, month):
+        """Get the last Tuesday of the given month"""
         last_day = calendar.monthrange(year, month)[1]
         last_date = datetime(year, month, last_day)
         while last_date.weekday() != 1:  # Tuesday = 1
             last_date -= timedelta(days=1)
-        expiry_date = last_date - timedelta(days=days_before_expiry)
+        # Preserve timezone info from today if it exists
+        if today.tzinfo is not None:
+            last_date = today.tzinfo.localize(last_date.replace(year=year, month=month, day=last_date.day))
+        return last_date
+
+    def parse_exit_time(time_str):
+        """Parse expiry_exit_time string to hour and minute"""
+        try:
+            hour, minute = time_str.split(":")
+            return int(hour), int(minute)
+        except:
+            return 15, 15  # Default fallback
+
+    if is_weekly:
+        # Check if today is Tuesday first
+        if today.weekday() == 1:  # Tuesday = 1
+            # Today is Tuesday, check if we should use it or advance
+            exit_hour, exit_minute = parse_exit_time(expiry_exit_time)
+            exit_time_today = today.replace(hour=exit_hour, minute=exit_minute, second=0, microsecond=0)
+            
+            if today < exit_time_today:
+                # Before exit time on expiry day, use today
+                base_expiry = today
+                logger.debug(f"Using current Tuesday as expiry (before exit time): {base_expiry}")
+            else:
+                # After exit time on expiry day, advance to next Tuesday
+                base_expiry = get_next_tuesday(today)
+                logger.debug(f"Using next Tuesday as expiry (after exit time): {base_expiry}")
+        else:
+            # Not Tuesday, get next Tuesday
+            base_expiry = get_next_tuesday(today)
+            logger.debug(f"Initial weekly expiry candidate: {base_expiry}")
         
-        if expiry_date.date() < today.date():
-            # Next month
-            next_month = month + 1 if month < 12 else 1
-            next_year = year if month < 12 else year + 1
-            last_day = calendar.monthrange(next_year, next_month)[1]
-            last_date = datetime(next_year, next_month, last_day)
-            while last_date.weekday() != 1:  # Tuesday = 1
-                last_date -= timedelta(days=1)
-            expiry_date = last_date - timedelta(days=days_before_expiry)
-        
-        # Check if expiry_date is today and current time is past expiry_exit_time
-        if expiry_date.date() == today.date():
-            try:
-                # Parse expiry_exit_time (format: "HH:MM")
-                exit_hour, exit_minute = map(int, expiry_exit_time.split(":"))
-                exit_time = today.replace(hour=exit_hour, minute=exit_minute, second=0, microsecond=0)
-                
-                if today >= exit_time:
-                    # Move to next month's expiry
-                    next_month = month + 1 if month < 12 else 1
-                    next_year = year if month < 12 else year + 1
-                    last_day = calendar.monthrange(next_year, next_month)[1]
-                    last_date = datetime(next_year, next_month, last_day)
-                    while last_date.weekday() != 1:  # Tuesday = 1
-                        last_date -= timedelta(days=1)
-                    expiry_date = last_date - timedelta(days=days_before_expiry)
-            except Exception as e:
-                # If parsing fails, use default behavior
-                pass
+        # Apply days_before_expiry logic only if configured
+        if expiry_exit_enabled and days_before_expiry > 0:
+            # Check threshold only if we're not yet on expiry day
+            if today.date() < base_expiry.date():
+                threshold_date = base_expiry - timedelta(days=days_before_expiry)
+                exit_hour, exit_minute = parse_exit_time(expiry_exit_time)
+                threshold_time = threshold_date.replace(hour=exit_hour, minute=exit_minute, second=0, microsecond=0)
+                if today >= threshold_time:
+                    base_expiry = get_next_tuesday(base_expiry)
+                    logger.debug(f"Weekly expiry moved to next Tuesday due to threshold: {base_expiry}")
+
+        expiry_date = base_expiry
+
+    else:
+        # Monthly expiry - start with current month's last Tuesday
+        base_expiry = get_last_tuesday_of_month(today.year, today.month)
+        logger.debug(f"Initial monthly expiry candidate: {base_expiry}")
+        # If base_expiry is in the past, use next month's
+        if base_expiry.date() < today.date():
+            next_month = today.month + 1 if today.month < 12 else 1
+            next_year = today.year if today.month < 12 else today.year + 1
+            base_expiry = get_last_tuesday_of_month(next_year, next_month)
+            logger.debug(f"Monthly expiry moved to next month as current month's last Tuesday is past: {base_expiry}")
+
+        if expiry_exit_enabled and days_before_expiry > 0:
+            # Check threshold only if we're not yet on expiry day
+            if today.date() < base_expiry.date():
+                threshold_date = base_expiry - timedelta(days=days_before_expiry)
+                exit_hour, exit_minute = parse_exit_time(expiry_exit_time)
+                threshold_time = threshold_date.replace(hour=exit_hour, minute=exit_minute, second=0, microsecond=0)
+
+                if today >= threshold_time:
+                    # Move to next month's last Tuesday
+                    next_month = base_expiry.month + 1 if base_expiry.month < 12 else 1
+                    next_year = base_expiry.year if base_expiry.month < 12 else base_expiry.year + 1
+                    base_expiry = get_last_tuesday_of_month(next_year, next_month)
+                    logger.debug(f"Monthly expiry moved to next month due to threshold: {base_expiry}")
+
+        # Additional check: if expiry is today and past exit time, advance to next month
+        if base_expiry.date() == today.date():
+            exit_hour, exit_minute = parse_exit_time(expiry_exit_time)
+            exit_time_today = today.replace(hour=exit_hour, minute=exit_minute, second=0, microsecond=0)
+
+            if today >= exit_time_today:
+                # Move to next month's last Tuesday
+                next_month = base_expiry.month + 1 if base_expiry.month < 12 else 1
+                next_year = base_expiry.year if base_expiry.month < 12 else base_expiry.year + 1
+                base_expiry = get_last_tuesday_of_month(next_year, next_month)
+                logger.debug(f"Monthly expiry moved to next month as today is expiry and past exit time: {base_expiry}")
+
+        expiry_date = base_expiry
 
     # --- Read offset and step from config as per strategy expectation ---
     if option_type.upper() == "CE":
@@ -611,19 +657,18 @@ def get_atm_strike_symbol(symbol, spot_price, option_type, config, today=None):
     yy = expiry_date.strftime("%y")
     month_num = expiry_date.month
     
-    # Check if this is the last Tuesday of the month (monthly expiry)
-    is_last_tuesday_of_month = False
+    # Determine if this should be formatted as monthly expiry
+    # For weekly symbols, use monthly format only if it's the last Tuesday of the month
+    is_monthly_format = False
     if is_weekly:
-        # Find the last Tuesday of the current month
-        last_day = calendar.monthrange(expiry_date.year, expiry_date.month)[1]
-        last_date_of_month = datetime(expiry_date.year, expiry_date.month, last_day)
-        while last_date_of_month.weekday() != 1:  # Tuesday = 1
-            last_date_of_month -= timedelta(days=1)
-        
-        # If the expiry_date is the same as the last Tuesday of the month, treat it as monthly
-        is_last_tuesday_of_month = expiry_date.date() == last_date_of_month.date()
+        # Check if expiry_date is the last Tuesday of its month
+        last_tuesday = get_last_tuesday_of_month(expiry_date.year, expiry_date.month)
+        is_monthly_format = expiry_date.date() == last_tuesday.date()
+    else:
+        # Non-weekly symbols always use monthly format
+        is_monthly_format = True
     
-    if is_weekly and not is_last_tuesday_of_month:
+    if is_weekly and not is_monthly_format:
         # Weekly expiry: NSE:{SYMBOL}{YY}{M}{DD}{STRIKE}{OPT_TYPE}
         nse_weekly_map = {
             1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",

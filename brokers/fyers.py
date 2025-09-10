@@ -1229,24 +1229,27 @@ class FyersWrapper(BrokerInterface):
         with SB(uc=True, test=True, save_screenshot=True) as sb:
             for attempt in range(MAX_RETRIES):
                 try:
-                    sb.uc_open_with_reconnect(url, 20)
+                
+                    sb.uc_open_with_reconnect(url)
                     sb.wait_for_ready_state_complete(20)
-                    sb.uc_gui_handle_captcha()
                     sb.save_screenshot("fyers_auth_before_captcha.png")
-                    sb.wait_for_text("Let's begin!", timeout=15)
-                    sb.uc_gui_handle_captcha()
-                    sb.save_screenshot("fyers_auth_after_captcha.png")
-                    sb.save_screenshot("fyers_auth_new.png")
-                    sb.sleep(2)
-                    # sb.sleep(20)
                     logger.info("Fyers authentication: Entering mobile number...")
+                    sb.wait_for_element_visible("#mobile-code", timeout=10)
+                    sb.type("#mobile-code", mobile_number)
+                    sb.sleep(3)
+                
+                    sb.save_screenshot("fyers_auth_after_mobileentry.png")
+                    sb.uc_gui_handle_captcha()
+                    sb.sleep(2)
+                    sb.save_screenshot("fyers_auth_after_captcha.png")
+                    sb.sleep(2)
                     if sb.is_element_enabled("#mobileNumberSubmit"):
-                        sb.wait_for_element_visible("#mobile-code", timeout=10)
-                        sb.type("#mobile-code", mobile_number)
                         sb.wait_for_element_visible("#mobileNumberSubmit", timeout=10)
                         sb.click("#mobileNumberSubmit")
                     else:
-                        raise Exception("Mobile submit button is disabled.")
+                        # raise Exception("Mobile submit button is disabled.")
+                        logger.error("Mobile submit button is disabled.")
+                        return None
 
                     sb.wait_for_ready_state_complete(20)
                     logger.info("Fyers authentication: Waiting for OTP input...")

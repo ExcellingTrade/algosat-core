@@ -135,7 +135,13 @@ class SwingHighLowBuyStrategy(StrategyBase):
         self.ce_lot_qty = self.trade.get("ce_lot_qty", 2)
         self.pe_lot_qty = self.trade.get("pe_lot_qty", 2)
         self.lot_size = self.trade.get("lot_size", 75)
-        self.rsi_ignore_above = self._entry_cfg.get("rsi_ignore_above", 80)
+        
+        # Read RSI ignore thresholds from target.rsi_exit config (not entry config)
+        target_cfg = self.trade.get("target", {})
+        rsi_exit_config = target_cfg.get("rsi_exit", {})
+        self.rsi_ignore_above = rsi_exit_config.get("ce_ignore_above", 80)
+        self.rsi_ignore_below = rsi_exit_config.get("pe_ignore_below", 20)
+        
         self.rsi_period = self.indicators.get("rsi_period", 14)
         self.rsi_timeframe_raw = self.indicators.get("rsi_timeframe", "5m") 
         self.rsi_timeframe_minutes = int(self.rsi_timeframe_raw.replace("min", "").replace("m", "")) if (self.rsi_timeframe_raw.endswith("m") or self.rsi_timeframe_raw.endswith("min")) else int(self.rsi_timeframe_raw) 
@@ -173,7 +179,7 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 f"entry_buffer={self.entry_buffer}, confirm_timeframe={self.confirm_timeframe}, "
                 f"atomic_check={self.confirm_atomic}, "
                 f"ce_lot_qty={self.ce_lot_qty}, lot_size={self.lot_size}, "
-                f"rsi_ignore_above={self.rsi_ignore_above}, rsi_period={self.rsi_period}, stop_percentage={self.stop_percentage}"
+                f"rsi_ignore_above={self.rsi_ignore_above}, rsi_ignore_below={self.rsi_ignore_below}, rsi_period={self.rsi_period}, stop_percentage={self.stop_percentage}"
             )
             
             # Setup regime reference for sideways detection
@@ -1531,10 +1537,17 @@ class SwingHighLowBuyStrategy(StrategyBase):
                             market_open_time = current_datetime.replace(hour=9, minute=15, second=0, microsecond=0)
                             first_candle_end_time = market_open_time + timedelta(minutes=self.stoploss_minutes)
                             
-                            logger.info(f"evaluate_exit: Next day detected - order_id={order_id}, entry_date={order_trade_date}, current_date={current_trade_date}, entry_day={order_trade_day}, current_day={current_trade_day}, first_candle_end_time={first_candle_end_time}, current_time={current_datetime}")
+                            # Calculate check threshold time: first_candle_end_time + one more candle period
+                            # This gives us a reasonable window to check for next day stoploss updates
+                            next_day_check_threshold_time = first_candle_end_time + timedelta(minutes=self.stoploss_minutes)
                             
-                            # Check if first candle of the day is completed
-                            if current_datetime >= first_candle_end_time:
+                            logger.info(f"evaluate_exit: Next day detected - order_id={order_id}, entry_date={order_trade_date}, current_date={current_trade_date}")
+                            logger.info(f"evaluate_exit: Time windows - market_open={market_open_time.strftime('%H:%M')}, first_candle_end={first_candle_end_time.strftime('%H:%M')}, check_threshold={next_day_check_threshold_time.strftime('%H:%M')}, current_time={current_datetime.strftime('%H:%M')}")
+                            
+                            # Check only within the specific window: after first candle completion and before threshold
+                            if current_datetime >= first_candle_end_time and current_datetime <= next_day_check_threshold_time:
+                                logger.info(f"evaluate_exit: Within next day check window, checking stoploss update for order_id={order_id}")
+                                
                                 # Get first candle data to update stoploss
                                 first_candle_history = await self.fetch_history_data(
                                     self.dp, [spot_symbol], self.stoploss_minutes
@@ -1560,9 +1573,9 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                     
                                     today_candles = first_candle_df[
                                         (first_candle_df['timestamp'] >= market_open_ts) & 
-                                        (first_candle_df['timestamp'] <= first_candle_end_ts)
+                                        (first_candle_df['timestamp'] < first_candle_end_ts)
                                     ]
-                                    
+                                    logger.debug(f"evaluate_exit: Today's candles for next day stoploss update: {today_candles}")
                                     if len(today_candles) > 0:
                                         first_candle = today_candles.iloc[0]  # First candle of the day
                                         first_candle_open = first_candle.get("open")
@@ -1595,7 +1608,11 @@ class SwingHighLowBuyStrategy(StrategyBase):
                                 else:
                                     logger.warning(f"evaluate_exit: Could not get first candle data for next day stoploss update")
                             else:
-                                logger.info(f"evaluate_exit: Waiting for first candle completion. Current: {current_datetime}, First candle ends: {first_candle_end_time}")
+                                # Outside the check window - either too early or too late
+                                if current_datetime < first_candle_end_time:
+                                    logger.debug(f"evaluate_exit: Too early for next day check - current_time={current_datetime.strftime('%H:%M')}, first_candle_ends={first_candle_end_time.strftime('%H:%M')}")
+                                else:
+                                    logger.debug(f"evaluate_exit: Past next day check window - current_time={current_datetime.strftime('%H:%M')}, threshold_time={next_day_check_threshold_time.strftime('%H:%M')}")
                                 
             except Exception as e:
                 logger.error(f"Error in next day stoploss update logic: {e}")
@@ -1616,12 +1633,12 @@ class SwingHighLowBuyStrategy(StrategyBase):
                 
                 if signal_direction == "UP":  # CE trade
                     # For UP trades: exit when price goes below (stoploss + buffer)
-                    buffered_stoploss_level = stoploss_level + sl_buffer_value
+                    buffered_stoploss_level = stoploss_level - sl_buffer_value
                     prev_close = prev_candle.get("close", 0)
                     current_close = current_candle.get("close", 0)
                     
                     logger.debug(f"evaluate_exit: UP trade stoploss check - prev_close={prev_close}, "
-                               f"buffered_stoploss={buffered_stoploss_level} (original={stoploss_level} + buffer={sl_buffer_value}), "
+                               f"buffered_stoploss={buffered_stoploss_level} (original={stoploss_level} - buffer={sl_buffer_value}), "
                                f"current_close={current_close}")
                     
                     # Check: prev_candle below buffered stoploss AND current_candle below prev_candle
@@ -1641,12 +1658,12 @@ class SwingHighLowBuyStrategy(StrategyBase):
                         
                 elif signal_direction == "DOWN":  # PE trade
                     # For DOWN trades: exit when price goes above (stoploss - buffer)
-                    buffered_stoploss_level = stoploss_level - sl_buffer_value
+                    buffered_stoploss_level = stoploss_level + sl_buffer_value
                     prev_close = prev_candle.get("close", 0)
                     current_close = current_candle.get("close", 0)
                     
                     logger.debug(f"evaluate_exit: DOWN trade stoploss check - prev_close={prev_close}, "
-                               f"buffered_stoploss={buffered_stoploss_level} (original={stoploss_level} - buffer={sl_buffer_value}), "
+                               f"buffered_stoploss={buffered_stoploss_level} (original={stoploss_level} + buffer={sl_buffer_value}), "
                                f"current_close={current_close}")
                     
                     # Check: prev_candle above buffered stoploss AND current_candle above prev_candle
