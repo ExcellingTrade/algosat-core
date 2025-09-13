@@ -204,6 +204,95 @@ class OrderRequest(BaseModel):
             "tag": self.tag,
         }
 
+    def to_angel_dict(self) -> dict:
+        """
+        Convert OrderRequest to Angel One broker format.
+        
+        Angel One specific mappings:
+        - variety: Always "NORMAL"
+        - ordertype: MARKET, LIMIT, SL, SL-M
+        - producttype: INTRADAY, DELIVERY, MARGIN, BO, CO
+        - transactiontype: BUY, SELL
+        - duration: DAY, IOC
+        """
+        # Map order types to Angel format
+        order_type = self.order_type
+        print(f"Mapping order type: {order_type}")
+        
+        if order_type == OrderType.MARKET:
+            angel_order_type = "MARKET"
+        elif order_type == OrderType.LIMIT:
+            angel_order_type = "LIMIT"
+        elif order_type == OrderType.SL:
+            angel_order_type = "SL-M"  # Stop Loss Market
+        elif order_type == OrderType.SL_LIMIT:
+            angel_order_type = "SL"    # Stop Loss Limit
+        elif order_type == OrderType.OPTION_STRATEGY:
+            angel_order_type = "STOPLOSS_LIMIT"    # OPTION_STRATEGY maps to Stop Loss Limit
+        else:
+            angel_order_type = "MARKET"  # Default fallback
+            
+        print(f"Angel order type: {angel_order_type}")
+        # Map product types to Angel format
+        product_type = self.product_type
+        if product_type == ProductType.INTRADAY_OPTION or product_type == ProductType.OPTION_STRATEGY:
+            angel_product_type = "INTRADAY"
+        elif product_type == ProductType.INTRADAY_SWING:
+            angel_product_type = "CARRYFORWARD"
+        elif product_type == ProductType.DELIVERY:
+            angel_product_type = "CARRYFORWARD"
+        else:
+            angel_product_type = "INTRADAY"  # Default fallback
+        
+        # Get instrument token from extra field
+        instrument_token = ""
+        if self.extra and self.extra.get('instrument_token'):
+            instrument_token = str(self.extra['instrument_token'])
+        
+        # Set variety based on order type
+        if angel_order_type in ["STOPLOSS_LIMIT", "STOPLOSS_MARKET", "SL", "SL-M"]:
+            angel_variety = "STOPLOSS"
+        else:
+            angel_variety = "NORMAL"
+        
+        angel_dict = {
+            "variety": angel_variety,  # Dynamic based on order type
+            "tradingsymbol": self.symbol,
+            "symboltoken": instrument_token,
+            "transactiontype": self.side.value.upper(),  # BUY or SELL
+            "exchange": self.exchange or "NFO",
+            "ordertype": angel_order_type,
+            "producttype": angel_product_type,
+            "duration": "DAY",  # Default to DAY
+            "price": str(self.price) if self.price else "0",
+            "triggerprice": str(self.trigger_price) if self.trigger_price else "0",
+            "squareoff": "0",  # Default to 0
+            "stoploss": "0",  # Default to 0 for non-SL orders
+            "quantity": str(self.quantity)
+        }
+        
+        # Special handling for SL orders - Angel uses triggerprice for activation
+        # and stoploss field is only for ROBO (Bracket Orders) according to docs
+        if angel_order_type in ["STOPLOSS_LIMIT","SL", "SL-M"]:
+            # For SL orders, triggerprice is the activation price
+            if self.trigger_price and self.trigger_price > 0:
+                angel_dict["triggerprice"] = str(self.trigger_price)
+            else:
+                # For SL orders without trigger_price, use price as trigger
+                # This is common for option strategies where price acts as trigger
+                if self.price and self.price > 0:
+                    angel_dict["triggerprice"] = str(self.price)
+                    # For SL-Market orders, price should be 0
+                    if angel_order_type == "SL-M":
+                        angel_dict["price"] = "0"
+                else:
+                    # If no valid trigger price available, fallback to MARKET order
+                    angel_dict["ordertype"] = "MARKET"
+                    angel_dict["price"] = "0"
+                    angel_dict["triggerprice"] = "0"
+        
+        return angel_dict
+
 ORDER_TYPE_MAP = {
     OrderType.LIMIT: 1,
     OrderType.MARKET: 2,

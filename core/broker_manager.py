@@ -352,10 +352,17 @@ class BrokerManager:
                 try:
                     # Resolve symbol for this broker
                     symbol_info = await self.get_symbol_info(broker_name, order_payload.symbol, instrument_type='NFO')
+                    
+                    # Prepare extra field with instrument_token if available
+                    extra_data = order_payload.extra.copy() if order_payload.extra else {}
+                    if symbol_info.get("instrument_token"):
+                        extra_data["instrument_token"] = symbol_info["instrument_token"]
+                    
                     # Ensure side is always the correct Enum, not a string
                     broker_order_payload = order_payload.copy(update={
                         "symbol": symbol_info["symbol"],
-                        "side": order_payload.side if isinstance(order_payload.side, Side) else Side(order_payload.side)
+                        "side": order_payload.side if isinstance(order_payload.side, Side) else Side(order_payload.side),
+                        "extra": extra_data
                     })
 
                     # Margin check logic
@@ -584,6 +591,9 @@ class BrokerManager:
                 row = match.iloc[0]
                 return {'symbol': row['tradingsymbol'], 'instrument_token': row['instrument_token']}
             raise Exception(f"Instrument token not found for {sanitized_symbol} {instrument_type}")
+        elif broker_name == 'angel':
+            # Angel One broker symbol conversion
+            return await self._get_angel_symbol_info(symbol, instrument_type)
         else:
             # Default: just return symbol
             return {'symbol': symbol}
@@ -762,6 +772,8 @@ class BrokerManager:
                     positions = positions.get('net', [])
                 if broker_name == 'fyers' and isinstance(positions, dict) and 'netPositions' in positions:
                     positions = positions.get('netPositions', [])
+                if broker_name == 'angel' and isinstance(positions, dict) and 'data' in positions:
+                    positions = positions.get('data', [])
                 if not isinstance(positions, list):
                     positions = []
                 
@@ -866,11 +878,155 @@ class BrokerManager:
         retry_config.initial_delay = delay
         
         async def _cancel_order():
-            # Only pass variety parameter for brokers that support it
+            # Handle broker-specific parameters
             if broker_name.lower() == "zerodha":
                 return await broker.cancel_order(broker_order_id, symbol=symbol, product_type=product_type, variety=variety, cancel_reason=cancel_reason, **kwargs)
+            elif broker_name.lower() == "angel":
+                # Angel uses "variety" parameter but defaults to "NORMAL"
+                angel_variety = variety or "NORMAL"
+                return await broker.cancel_order(broker_order_id, symbol=symbol, product_type=product_type, variety=angel_variety, cancel_reason=cancel_reason, **kwargs)
             else:
                 # For other brokers (like Fyers), don't pass variety parameter
                 return await broker.cancel_order(broker_order_id, symbol=symbol, product_type=product_type, cancel_reason=cancel_reason, **kwargs)
+        
+        return await async_retry_with_rate_limit(_cancel_order, config=retry_config)
+
+    async def _get_angel_symbol_info(self, symbol: str, instrument_type: str = None) -> dict:
+        """
+        Convert symbols to Angel One broker format and get instrument token.
+        
+        Symbol conversion patterns:
+        Input: NIFTY2591624950CE -> Output: NIFTY16SEP2524950CE
+        Input format: {underlying}{yy}{m}{dd}{strike}{CE/PE}
+        Angel format: {underlying}{dd}{MMM}{yy}{strike}{CE/PE}
+        
+        Input month format (from get_atm_strike_symbol):
+        - Jan-Sep: Numbers 1, 2, 3, 4, 5, 6, 7, 8, 9
+        - Oct: Letter O
+        - Nov: Letter N  
+        - Dec: Letter D
+        
+        Examples:
+        - NIFTY2591624950CE -> NIFTY16SEP2524950CE (16 Sep 2025, Strike 24950, Call)
+        - NIFTY25O2047500PE -> NIFTY20OCT2547500PE (20 Oct 2025, Strike 47500, Put)
+        - NIFTY25N1525000CE -> NIFTY15NOV2525000CE (15 Nov 2025, Strike 25000, Call)
+        - NIFTY25D3030000PE -> NIFTY30DEC2530000PE (30 Dec 2025, Strike 30000, Put)
+        """
+        import re
+        from datetime import datetime
+        
+        try:
+            # Get Angel broker instance for instruments lookup
+            angel_broker = self.brokers.get('angel')
+            if not angel_broker:
+                raise Exception("Angel broker not available for symbol conversion")
+            
+            # Handle simple cases (non-option symbols)
+            if instrument_type and instrument_type.upper() in ['EQ', 'INDEX']:
+                # For equity and index, try direct lookup first
+                token = await angel_broker.get_instrument_token(symbol)
+                return {'symbol': symbol, 'instrument_token': token} if token else {'symbol': symbol}
+            
+            # Parse option symbol format: {underlying}{yyMdd}{strike}{CE/PE}
+            # Example: NIFTY2591624950CE = NIFTY + 25916 + 24950 + CE 
+            # Where 25916 = 25(year) + 9(month) + 16(day) -> 16 Sep 2025
+            # For Oct/Nov/Dec: NIFTY25O20, NIFTY25N15, NIFTY25D30 (O=Oct, N=Nov, D=Dec)
+            
+            # Try to match pattern with letters for Oct/Nov/Dec
+            pattern_with_letters = r'^([A-Z]+)(\d{2})([OND])(\d{1,2})(\d+)(CE|PE)$'
+            match = re.match(pattern_with_letters, symbol.upper())
+            
+            if match:
+                underlying, year, month_letter, day, strike, option_type = match.groups()
+                
+                # Convert letter month to number
+                letter_to_month = {'O': '10', 'N': '11', 'D': '12'}
+                month = letter_to_month[month_letter]
+                
+            else:
+                # Try to match pattern with date encoding for Jan-Sep
+                pattern = r'^([A-Z]+)(\d{5})(\d+)(CE|PE)$'
+                match = re.match(pattern, symbol.upper())
+                
+                if match:
+                    underlying, date_part, strike, option_type = match.groups()
+                    
+                    # Parse 5-digit date: YYMDD format for Jan-Sep
+                    if len(date_part) == 5:
+                        # Format: YYMDD (25916 = 25 + 9 + 16)
+                        year = date_part[:2]  # 25
+                        month_day = date_part[2:]  # 916
+                        
+                        # Parse month and day from remaining digits
+                        if len(month_day) == 3:
+                            # Could be M + DD (9 + 16) for single digit month
+                            if month_day[0] in '123456789' and month_day[1:].isdigit():
+                                month = month_day[0]  # 9
+                                day = month_day[1:]   # 16
+                            else:
+                                # Invalid format, try direct lookup
+                                token = await angel_broker.get_instrument_token(symbol)
+                                return {'symbol': symbol, 'instrument_token': token} if token else {'symbol': symbol}
+                        else:
+                            # Invalid format, try direct lookup
+                            token = await angel_broker.get_instrument_token(symbol)
+                            return {'symbol': symbol, 'instrument_token': token} if token else {'symbol': symbol}
+                    else:
+                        # Different date format, try direct lookup
+                        token = await angel_broker.get_instrument_token(symbol)
+                        return {'symbol': symbol, 'instrument_token': token} if token else {'symbol': symbol}
+                else:
+                    # Try alternative pattern: {underlying}{yy}{m}{dd}{strike}{CE/PE}
+                    pattern = r'^([A-Z]+)(\d{2})(\d{1,2})(\d{1,2})(\d+)(CE|PE)$'
+                    match = re.match(pattern, symbol.upper())
+                    
+                    if not match:
+                        # If pattern doesn't match, try direct lookup
+                        token = await angel_broker.get_instrument_token(symbol)
+                        return {'symbol': symbol, 'instrument_token': token} if token else {'symbol': symbol}
+                    
+                    underlying, year, month, day, strike, option_type = match.groups()
+            
+            # Convert year (25 -> 2025)
+            full_year = 2000 + int(year)
+            
+            # Convert month number to month character (matching get_atm_strike_symbol format)
+            # Jan-Sep: numbers 1-9, Oct-Dec: letters O, N, D
+            nse_weekly_map = {
+                1: "1", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6",
+                7: "7", 8: "8", 9: "9", 10: "O", 11: "N", 12: "D"
+            }
+            
+            month_char = nse_weekly_map.get(int(month.lstrip('0')), '1')  # Remove leading zero and convert to int
+            
+            # Format day with leading zero if needed
+            day_formatted = day.zfill(2)
+            
+            # Convert to Angel format: {underlying}{dd}{MMM}{yy}{strike}{CE/PE}
+            # Angel uses full month abbreviations like JAN, FEB, SEP, OCT, NOV, DEC
+            month_names = {
+                1: 'JAN', 2: 'FEB', 3: 'MAR', 4: 'APR', 5: 'MAY', 6: 'JUN',
+                7: 'JUL', 8: 'AUG', 9: 'SEP', 10: 'OCT', 11: 'NOV', 12: 'DEC'
+            }
+            
+            month_abbr = month_names.get(int(month.lstrip('0')), 'JAN')  # Convert to int and get abbr
+            angel_symbol = f"{underlying}{day_formatted}{month_abbr}{year}{strike}{option_type}"
+            
+            logger.info(f"Angel: Converting {symbol} -> {angel_symbol}")
+            
+            # Get instrument token from Angel broker
+            token = await angel_broker.get_instrument_token(angel_symbol)
+            
+            if token:
+                logger.info(f"Angel: Found token for {angel_symbol} (token: {token})")
+                return {'symbol': angel_symbol, 'instrument_token': token}
+            else:
+                # If not found, return converted symbol without token (no additional warning needed)
+                return {'symbol': angel_symbol}
+                
+        except Exception as e:
+            logger.error(f"Error in Angel symbol conversion for {symbol}: {e}")
+            # Fallback: return original symbol
+            return {'symbol': symbol}
         
         return await async_retry_with_rate_limit(_cancel_order, config=retry_config)

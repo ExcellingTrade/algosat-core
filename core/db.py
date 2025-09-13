@@ -37,7 +37,7 @@ engine = create_async_engine(
 )
 
 # Log pool configuration for monitoring
-logger.info(f"🔌 Database connection pool configured: "
+logger.debug(f"🔌 Database connection pool configured: "
            f"pool_size=10, max_overflow=20, total_max=30, timeout=60s")
 
 # 2) Create a session factory
@@ -1284,6 +1284,46 @@ async def get_all_orders_for_strategy_symbol_and_tradeday(session, strategy_symb
         .where(func.date(orders.c.signal_time) == trade_day.date())
         .order_by(orders.c.signal_time.asc(), orders.c.id.asc())
     )
+    result = await session.execute(stmt)
+    return [dict(row._mapping) for row in result.fetchall()]
+
+async def get_open_orders_for_strategy_symbol_and_tradeday_by_id(session, strategy_symbol_id: int, trade_day):
+    """
+    Return all open orders for a given strategy_symbol_id on a specific trade day.
+    This is more efficient than the strategy_id version as it doesn't require joins.
+    """
+    from sqlalchemy import func, or_
+    
+    # Convert trade_day to date for comparison
+    if hasattr(trade_day, 'date'):
+        trade_date = trade_day.date()
+    else:
+        trade_date = trade_day
+    
+    # Define what we consider "open" statuses - include more statuses
+    open_statuses = ['AWAITING_ENTRY', 'OPEN', 'PARTIALLY_FILLED', 'PENDING', 'TRIGGER_PENDING']
+    
+    stmt = (
+        select(orders)
+        .where(
+            and_(
+                orders.c.strategy_symbol_id == strategy_symbol_id,
+                orders.c.status.in_(open_statuses),
+                or_(
+                    func.date(orders.c.signal_time) == trade_date,
+                    func.date(orders.c.entry_time) == trade_date,
+                    # If both are null, check created_at
+                    and_(
+                        orders.c.signal_time.is_(None),
+                        orders.c.entry_time.is_(None),
+                        func.date(orders.c.created_at) == trade_date
+                    )
+                )
+            )
+        )
+        .order_by(orders.c.signal_time.desc())
+    )
+    
     result = await session.execute(stmt)
     return [dict(row._mapping) for row in result.fetchall()]
 

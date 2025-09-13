@@ -16,6 +16,8 @@ from datetime import datetime
 from algosat.core.data_manager import DataManager
 from algosat.core.broker_manager import BrokerManager
 from algosat.core.order_manager import OrderManager
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, message="pkg_resources is deprecated")
 
 logger = get_logger(__name__)
 

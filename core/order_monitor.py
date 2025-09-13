@@ -9,7 +9,7 @@ from algosat.common.logger import get_logger, set_strategy_context
 from algosat.models.order_aggregate import OrderAggregate
 
 from algosat.core.data_manager import DataManager
-from algosat.core.order_manager import FYERS_STATUS_MAP, OrderManager
+from algosat.core.order_manager import FYERS_STATUS_MAP, ANGEL_STATUS_MAP, OrderManager
 from algosat.core.order_cache import OrderCache
 from algosat.core.order_request import OrderStatus
 from algosat.common.strategy_utils import wait_for_next_candle, fetch_instrument_history
@@ -469,6 +469,10 @@ class OrderMonitor:
                                 broker_status = getattr(bro, 'status', None)
                             if broker_status and isinstance(broker_status, int) and broker_name == "fyers":
                                 broker_status = FYERS_STATUS_MAP.get(broker_status, broker_status)
+                            # Normalize Angel status codes (e.g., "AB01", "AB02", etc.)
+                            elif broker_status and isinstance(broker_status, str) and broker_name == "angel":
+                                from algosat.core.order_manager import ANGEL_STATUS_MAP
+                                broker_status = ANGEL_STATUS_MAP.get(broker_status.lower(), broker_status)
                             # Normalize broker_status
                             if broker_status and isinstance(broker_status, str) and broker_status.startswith("OrderStatus."):
                                 broker_status = broker_status.split(".")[-1]

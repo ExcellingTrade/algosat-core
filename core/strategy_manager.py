@@ -216,16 +216,40 @@ class RiskManager:
                 logger.debug(f"Zerodha P&L for {broker_name}: {total_pnl} (from {len(positions_list)} positions)")
             
             elif broker_name.lower() == 'angel':
-                # For Angel: positions structure may vary
-                positions_list = raw_positions.get('data', raw_positions) if isinstance(raw_positions, dict) else raw_positions
-                if isinstance(positions_list, list):
-                    for position in positions_list:
-                        # Angel may use different field names - check common ones
-                        position_pnl = float(position.get('pnl', 
-                                           position.get('unrealizedprofitandloss', 
-                                           position.get('realizedprofitandloss', 
-                                           position.get('totalprofitandloss', 0.0)))))
-                        total_pnl += position_pnl
+                # For Angel: positions structure uses 'netvalue' for P&L calculation
+                try:
+                    positions_list = raw_positions.get('data', raw_positions) if isinstance(raw_positions, dict) else raw_positions
+                    if isinstance(positions_list, list):
+                        for position in positions_list:
+                            try:
+                                # Angel uses netvalue for P&L when position is active
+                                buyamount = float(position.get('buyamount', 0.0))
+                                sellamount = float(position.get('sellamount', 0.0))
+                                
+                                # Only calculate P&L for active positions (either buy or sell amount > 0)
+                                if buyamount != 0.0 or sellamount != 0.0:
+                                    # Use netvalue as P&L - Angel returns string format like "- 2235.80" for loss, "2235.80" for profit
+                                    netvalue_str = position.get('netvalue', '0')
+                                    if isinstance(netvalue_str, str):
+                                        # Handle Angel's format: "- 2235.80" (loss) or "2235.80" (profit)
+                                        netvalue_str = netvalue_str.strip()
+                                        if netvalue_str.startswith('- '):
+                                            # Loss: "- 2235.80" should be -2235.80
+                                            position_pnl = -float(netvalue_str[2:])
+                                        elif netvalue_str.startswith('+ '):
+                                            # Profit with explicit +: "+ 2235.80" should be +2235.80
+                                            position_pnl = float(netvalue_str[2:])
+                                        else:
+                                            # Direct value (could be positive or negative): "2235.80" or "-2235.80"
+                                            position_pnl = float(netvalue_str)
+                                    else:
+                                        position_pnl = float(netvalue_str)
+                                    total_pnl += position_pnl
+                            except (ValueError, TypeError, KeyError) as e:
+                                logger.error(f"Error parsing Angel position P&L for symbol {position.get('tradingsymbol', 'unknown')}: {e}")
+                                continue
+                except Exception as e:
+                    logger.error(f"Error processing Angel positions data: {e}")
                 logger.debug(f"Angel P&L for {broker_name}: {total_pnl}")
             
             else:

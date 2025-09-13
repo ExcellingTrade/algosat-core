@@ -75,26 +75,26 @@ class SwingHighLowBuyStrategy(StrategyBase):
 
     async def sync_open_positions(self):
         """
-        Synchronize self._positions with open orders in the database for this strategy for the current trade day.
-        Uses the strategy_id from config to find related open orders.
+        Synchronize self._positions with open orders in the database for this strategy symbol for the current trade day.
+        Uses the strategy_symbol_id (symbol_id) from config to find related open orders for this specific configuration.
         """
         self._positions = {}
-        from algosat.core.db import get_open_orders_for_strategy_and_tradeday
+        from algosat.core.db import get_open_orders_for_strategy_symbol_and_tradeday_by_id
         from algosat.core.db import AsyncSessionLocal
         trade_day = get_trade_day(get_ist_datetime())
-        strategy_id = getattr(self.cfg, 'strategy_id', None)
-        if not strategy_id:
-            logger.warning("No strategy_id found in config, cannot sync open positions")
+        strategy_symbol_id = getattr(self.cfg, 'symbol_id', None)
+        if not strategy_symbol_id:
+            logger.warning("No symbol_id found in config, cannot sync open positions")
             return
         async with AsyncSessionLocal() as session:
-            open_orders = await get_open_orders_for_strategy_and_tradeday(session, strategy_id, trade_day)
+            open_orders = await get_open_orders_for_strategy_symbol_and_tradeday_by_id(session, strategy_symbol_id, trade_day)
             for order in open_orders:
                 symbol = order.get("strike_symbol")
                 if symbol:
                     if symbol not in self._positions:
                         self._positions[symbol] = []
                     self._positions[symbol].append(order)
-            logger.debug(f"Synced positions for strategy {strategy_id}: {list(self._positions.keys())}")
+            logger.debug(f"Synced positions for strategy_symbol_id {strategy_symbol_id}: {list(self._positions.keys())}")
     """
     Concrete implementation of a Swing High/Low breakout buy strategy.
     Modularized and standardized to match option_buy.py structure.

@@ -60,6 +60,60 @@ ZERODHA_STATUS_MAP = {
     # Add more as needed
 }
 
+# Angel One status mapping
+ANGEL_STATUS_MAP = {
+    "cancelled": OrderStatus.CANCELLED,
+    "rejected": OrderStatus.REJECTED,
+    "complete": OrderStatus.FILLED,
+    "filled": OrderStatus.FILLED,
+    "open": OrderStatus.OPEN,
+    "pending": OrderStatus.PENDING,
+    "trigger pending": OrderStatus.TRIGGER_PENDING,
+    "modified": OrderStatus.OPEN,
+    # Add more as needed based on Angel API documentation
+}
+
+# Angel One order type mapping
+ANGEL_ORDER_TYPE_MAP = {
+    "MARKET": "Market",
+    "LIMIT": "Limit", 
+    "SL": "SL-L",           # Stop Loss Limit
+    "SL-M": "SL-M",         # Stop Loss Market
+    "STOPLOSS_LIMIT": "SL-L",
+    "STOPLOSS_MARKET": "SL-M",
+}
+
+# Angel One product type mapping
+ANGEL_PRODUCT_TYPE_MAP = {
+    "INTRADAY": "INTRADAY",
+    "DELIVERY": "DELIVERY", 
+    "CARRYFORWARD": "NRML",
+    "MARGIN": "MARGIN",
+    "BO": "BO",
+    "CO": "CO",
+}
+
+# Angel One transaction type mapping
+ANGEL_TRANSACTION_TYPE_MAP = {
+    "BUY": "BUY",
+    "SELL": "SELL", 
+}
+
+# Angel One status mapping (actual status text from Angel API response)
+ANGEL_STATUS_MAP = {
+    "open": OrderStatus.AWAITING_ENTRY,
+    "trigger pending": OrderStatus.AWAITING_ENTRY,
+    "modify pending": OrderStatus.AWAITING_ENTRY,
+    "completed": OrderStatus.OPEN,
+    "complete": OrderStatus.OPEN,
+    "cancelled": OrderStatus.CANCELLED,
+    "rejected": OrderStatus.REJECTED,
+    "failed": OrderStatus.FAILED,
+    "expired": OrderStatus.CANCELLED,
+    "partially filled": OrderStatus.PARTIALLY_FILLED,
+    "filled": OrderStatus.FILLED
+}
+
 class OrderManager:
     def __init__(self, broker_manager: BrokerManager):
         self.broker_manager: BrokerManager = broker_manager
@@ -1100,62 +1154,6 @@ class OrderManager:
         """
         # Mock data for testing (only on Aug 9, 2025) with comprehensive broker order data from logs
         from datetime import datetime, date
-        if date.today() == date(2025, 8, 10):
-            logger.info("Using comprehensive mock broker order data for testing (Aug 9, 2025) - all broker orders from logs")
-            mock_broker_orders = {
-                'zerodha': [
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600208680', 'status': 'FILLED', 'symbol': 'NIFTY2581424500PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 139.45, 'product_type': 'MIS', 'order_type': 'LIMIT', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600351563', 'status': 'FILLED', 'symbol': 'NIFTY2581424900CE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 18.4, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600356326', 'status': 'FILLED', 'symbol': 'NIFTY2581424400PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 111.75, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600356343', 'status': 'FILLED', 'symbol': 'NIFTY2581424450PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 134.2, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600358768', 'status': 'FILLED', 'symbol': 'NIFTY2581424400PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 111.65, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600353018', 'status': 'FILLED', 'symbol': 'NIFTY2581424900CE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 18.1, 'product_type': 'NRML', 'order_type': 'LIMIT', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600579485', 'status': 'FILLED', 'symbol': 'NIFTY2581424450PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 103.45, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600582884', 'status': 'FILLED', 'symbol': 'NIFTY2581424550CE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 115.9, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600582899', 'status': 'FILLED', 'symbol': 'NIFTY2581424500CE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 140.6, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600583778', 'status': 'FILLED', 'symbol': 'NIFTY2581424500PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 121.3, 'product_type': 'MIS', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600592290', 'status': 'FILLED', 'symbol': 'NIFTY2581424500CE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 127.05, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600592430', 'status': 'FILLED', 'symbol': 'NIFTY2581424550CE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 103.55, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600594402', 'status': 'FILLED', 'symbol': 'NIFTY2581424500CE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 125.55, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600602823', 'status': 'FILLED', 'symbol': 'NIFTY2581424500CE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 120.25, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600742217', 'status': 'FILLED', 'symbol': 'NIFTY2581424400PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 110.4, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600742226', 'status': 'FILLED', 'symbol': 'NIFTY2581424350PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 90.4, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600790593', 'status': 'FILLED', 'symbol': 'NIFTY2581424400PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 107.2, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600790790', 'status': 'FILLED', 'symbol': 'NIFTY2581424350PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 87.35, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600836393', 'status': 'FILLED', 'symbol': 'NIFTY2581424300PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 85.6, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'},
-                    {'broker_name': 'zerodha', 'broker_id': 3, 'order_id': '250808600850173', 'status': 'FILLED', 'symbol': 'NIFTY2581424300PE', 'quantity': 75, 'executed_quantity': 75, 'exec_price': 96.9, 'product_type': 'NRML', 'order_type': 'MARKET', 'exchange_timestamp': '2025-08-08 14:20:07'}
-                ],
-                'fyers': [
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800069210-BO-1', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424500PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 139.5, 'product_type': 'BO', 'order_type': 'Limit', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800103792', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424900CE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 20.85, 'product_type': 'INTRADAY', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800131213', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424400PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 111.95, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800131221', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424450PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 133.85, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800131232', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424150PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 41.15, 'product_type': 'INTRADAY', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800132094', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424400PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 111.6, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800133576', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424150PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 42.05, 'product_type': 'INTRADAY', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800133881', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424900CE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 17.6, 'product_type': 'INTRADAY', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800145627', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424200PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 49.55, 'product_type': 'INTRADAY', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800145636', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424200PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 49.2, 'product_type': 'INTRADAY', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800221447', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424750CE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 44.55, 'product_type': 'INTRADAY', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800221457', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424450PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 103.35, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800076776-BO-3', 'status': 'CANCELLED', 'symbol': 'NSE:NIFTY2581424500PE', 'qty': 75, 'executed_quantity': 0, 'exec_price': 0, 'product_type': 'BO', 'order_type': 'Limit', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800076775-BO-2', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424500PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 120.8, 'product_type': 'BO', 'order_type': 'Limit', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800223163', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424500CE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 140.4, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800223154', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424550CE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 115.5, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800227197', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424500CE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 126.75, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800227202', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424750CE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 41.35, 'product_type': 'INTRADAY', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800227203', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424550CE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 103.65, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800228141', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424500CE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 125.8, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800231750', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424500CE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 120.1, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800286743', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424400PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 110.35, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800286755', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424350PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 90.45, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800303134', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424400PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 107.05, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800303190', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424350PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 87.25, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800316916', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424300PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 86.2, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'},
-                    {'broker_name': 'fyers', 'broker_id': 1, 'order_id': '25080800321544', 'status': 'FILLED', 'symbol': 'NSE:NIFTY2581424300PE', 'qty': 75, 'executed_quantity': 75, 'exec_price': 96.85, 'product_type': 'MARGIN', 'order_type': 'Market', 'orderDateTime': '08-Aug-2025 14:20:07'}
-                ]
-            }
-            return mock_broker_orders
         broker_orders_raw = await self.broker_manager.get_all_broker_order_details()
         normalized_orders_by_broker = {}
         broker_name_to_id = {}
@@ -1237,6 +1235,46 @@ class OrderManager:
                         "order_type": o.get("order_type"),
                         "execution_time": execution_time,
                         "side": "BUY" if o.get("transaction_type") == "BUY" else "SELL",
+                        # "raw": o
+                    })
+                # Angel One normalization
+                elif broker_name.lower() == "angel":
+                    status = ANGEL_STATUS_MAP.get(o.get("status", "").lower(), o.get("status"))
+                    order_type = ANGEL_ORDER_TYPE_MAP.get(o.get("ordertype"), o.get("ordertype"))
+                    product_type = ANGEL_PRODUCT_TYPE_MAP.get(o.get("producttype"), o.get("producttype"))
+                    side = ANGEL_TRANSACTION_TYPE_MAP.get(o.get("transactiontype"), o.get("transactiontype"))
+                    
+                    # Extract execution time from Angel time fields
+                    execution_time = None
+                    if o.get("exchtime"):
+                        try:
+                            from datetime import datetime
+                            # Angel time format: "20-Oct-2020 13:10:59"
+                            execution_time = datetime.strptime(o.get("exchtime"), "%d-%b-%Y %H:%M:%S")
+                        except (ValueError, TypeError):
+                            execution_time = None
+                    elif o.get("updatetime"):
+                        try:
+                            from datetime import datetime
+                            execution_time = datetime.strptime(o.get("updatetime"), "%d-%b-%Y %H:%M:%S")
+                        except (ValueError, TypeError):
+                            execution_time = None
+                    
+                    normalized_orders.append({
+                        "broker_name": broker_name,
+                        "broker_id": broker_id,
+                        "order_id": o.get("orderid"),
+                        "status": status,
+                        "symbol": o.get("tradingsymbol"),
+                        "quantity": int(o.get("quantity", 0)),
+                        "executed_quantity": int(o.get("filledshares", 0)),
+                        "exec_price": float(o.get("averageprice", 0)),
+                        "product_type": product_type,
+                        "order_type": order_type,
+                        "execution_time": execution_time,
+                        "side": side,
+                        "exchange_order_id": o.get("exchangeorderid"),
+                        "unique_order_id": o.get("uniqueorderid"),
                         # "raw": o
                     })
                 # Fallback normalization for other brokers
