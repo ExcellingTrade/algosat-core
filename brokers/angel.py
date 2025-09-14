@@ -704,15 +704,86 @@ class AngelWrapper(BrokerInterface):
 
     async def get_balance_summary(self, *args, **kwargs) -> BalanceSummary:
         """
-        Return summary: total_balance, available, utilized for Angel. Not implemented, returns 0s.
+        Return summary: total_balance, available, utilized for Angel One from rmsLimit API.
+        
+        Calculation based on Angel API response:
+        - available = availablecash (available cash for trading)
+        - utilized = sum of all utilized amounts (debits, span, option premium, exposure, etc.)
+        - total = net balance from API (or available + utilized if net not available)
         """
-        return BalanceSummary()
+        try:
+            raw = await self.get_balance()
+            if not raw or not isinstance(raw, dict) or not raw.get("status"):
+                logger.error(f"Angel get_balance_summary: Invalid or failed response: {raw}")
+                return BalanceSummary()
+            
+            # Extract data from Angel API response
+            data = raw.get("data", {})
+            if not data:
+                logger.error(f"Angel get_balance_summary: No data found in response: {raw}")
+                return BalanceSummary()
+            
+            # Get available balance
+            available = float(data.get("availablecash", 0))
+            
+            # Calculate total utilized amount from all utilized fields
+            utilized_fields = [
+                "utiliseddebits",
+                # "utilisedspan", 
+                # "utilisedoptionpremium",
+                # "utilisedholdingsales",
+                # "utilisedexposure",
+                # "utilisedturnover",
+                # "utilisedpayout"
+            ]
+            
+            utilized = 0.0
+            for field in utilized_fields:
+                field_value = data.get(field, 0)
+                try:
+                    utilized += float(field_value) if field_value else 0.0
+                except (ValueError, TypeError):
+                    logger.debug(f"Angel: Could not convert {field} value '{field_value}' to float")
+                    continue
+            
+            # Use net balance as total if available, otherwise calculate as available + utilized
+            net_balance = data.get("net", 0)
+            try:
+                total = float(net_balance) if net_balance else (available + utilized)
+            except (ValueError, TypeError):
+                total = available + utilized
+                logger.debug(f"Angel: Could not convert net balance '{net_balance}' to float, using calculated total")
+            
+            logger.debug(f"Angel balance summary - Total: {total}, Available: {available}, Utilized: {utilized}")
+            
+            return BalanceSummary(
+                total_balance=total,
+                available=available,
+                utilized=utilized
+            )
+            
+        except Exception as e:
+            logger.error(f"Failed to summarize Angel balance: {e}")
+            return BalanceSummary()
 
     async def get_balance(self, *args, **kwargs) -> dict:
         """
-        Fetch account balance (raw API response). Not implemented for Angel, returns empty dict.
+        Fetch account balance using Angel One RMS Limit API (raw API response).
+        
+        :return: Raw API response from rmsLimit() containing balance and limit information
         """
-        return {}
+        try:
+            logger.debug("Fetching balance using Angel RMS Limit API")
+            
+            # Call Angel's rmsLimit API and return raw response
+            balance_response = self.smart_api.rmsLimit()
+            logger.debug(f"Angel balance response: {balance_response}")
+            
+            return balance_response if balance_response else {}
+                
+        except Exception as e:
+            logger.error(f"Error fetching balance from Angel: {e}")
+            return {}
     
     async def get_instruments(self) -> pd.DataFrame:
         """
