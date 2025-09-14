@@ -105,12 +105,19 @@ def get_nse_holiday_list():
         - Caches the fetched holidays in a JSON file for future use.
     """
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/56.0.2924.76 '
-                      'Safari/537.36',
-        "Upgrade-Insecure-Requests": "1", "DNT": "1",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate"}
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Referer': 'https://www.nseindia.com/',
+        'Sec-Fetch-Dest': 'empty',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'same-origin',
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache'
+    }
     nse_holiday_list_url = 'https://www.nseindia.com/api/holiday-master?type=trading'
 
     # Check if the cached holiday file exists and is recent
@@ -132,32 +139,111 @@ def get_nse_holiday_list():
         if current_time - file_modified_time < timedelta(days=30):
             try:
                 with open(HOLIDAY_FILE, 'r') as f:
+                    print("Loaded from cache")
                     logger.debug("Loaded NSE holiday list from cache.")
                     return json.load(f)  # Return holidays from the cached file
             except Exception as err:
                 logger.error(f"🔴 Error reading holiday file: {err}. Re-fetching holidays...")
 
+    # Create a session for better connection handling
+    session = requests.Session()
+    session.headers.update(headers)
+    
     # Fetch holidays from NSE API
     tries = 1
     max_retries = 3
     while tries <= max_retries:
         try:
-            response = requests.get(nse_holiday_list_url, headers=headers, timeout=25)
+            # First, make multiple requests to establish session like a real browser
+            base_url = 'https://www.nseindia.com'
+            
+            # Visit main page first
+            logger.debug(f"Making initial request to {base_url}")
+            main_response = session.get(base_url, timeout=15)
+            main_response.raise_for_status()
+            
+            # Add random delay to mimic human behavior
+            import time
+            import random
+            time.sleep(random.uniform(1, 3))
+            
+            # Visit market data page to establish more cookies
+            market_page = f"{base_url}/market-data"
+            logger.debug(f"Visiting market data page: {market_page}")
+            session.get(market_page, timeout=15)
+            time.sleep(random.uniform(0.5, 1.5))
+            
+            # Update headers for API request to look more like AJAX
+            api_headers = headers.copy()
+            api_headers.update({
+                'X-Requested-With': 'XMLHttpRequest',
+                'Accept': 'application/json, text/javascript, */*; q=0.01'
+            })
+            session.headers.update(api_headers)
+            
+            # Now make the API request
+            logger.debug("Making API request for holidays...")
+            response = session.get(nse_holiday_list_url, timeout=25)
             response.raise_for_status()  # Raise an exception for HTTP errors
+            
             data = response.json()
             holidays = [d['tradingDate'] for d in data['CM']]
+            
             # Cache the holidays in a local JSON file
             with open(HOLIDAY_FILE, 'w') as f:
                 json.dump(holidays, f, indent=2)
             logger.info("🟢 NSE holiday list updated from API.")
             return holidays
+            
         except Exception as err:
             logger.warning(f"🟡 Error fetching holidays from NSE API (Attempt {tries}/{max_retries}): {err}")
             tries += 1
+            # Add exponential backoff delay between retries
+            if tries <= max_retries:
+                delay = (2 ** tries) + random.uniform(0, 1)
+                time.sleep(delay)
 
-    # Return an empty list if all attempts fail
+    # If API fails, use cached holiday list or fallback
     logger.error("🔴 Failed to fetch NSE holiday list after multiple attempts.")
-    return []
+    logger.warning("🟡 This may be due to IP blocking by NSE/Akamai. Using cached/fallback holiday list")
+    
+    # Try to load holidays from existing cache file
+    if os.path.exists(HOLIDAY_FILE):
+        try:
+            with open(HOLIDAY_FILE, 'r') as f:
+                cached_holidays = json.load(f)
+                logger.info(f"🟠 Loaded {len(cached_holidays)} holidays from cache file: {HOLIDAY_FILE}")
+                return cached_holidays
+        except Exception as e:
+            logger.error(f"� Error reading cached holiday file: {e}")
+    
+    # Ultimate fallback - hardcoded 2025 holidays
+    logger.warning("🟡 No cached holidays found, using hardcoded fallback for 2025")
+    fallback_holidays = [
+        "2025-01-26",  # Republic Day
+        "2025-03-14",  # Holi
+        "2025-03-31",  # Ram Navami
+        "2025-04-14",  # Mahavir Jayanti
+        "2025-04-18",  # Good Friday
+        "2025-05-01",  # Maharashtra Day
+        "2025-08-15",  # Independence Day
+        "2025-10-02",  # Gandhi Jayanti
+        "2025-10-20",  # Dussehra
+        "2025-11-01",  # Diwali (Laxmi Pujan)
+        "2025-11-04",  # Diwali (Balipratipada)
+        "2025-11-05",  # Bhai Dooj
+        "2025-12-25"   # Christmas
+    ]
+    
+    # Cache the fallback holidays
+    try:
+        with open(HOLIDAY_FILE, 'w') as f:
+            json.dump(fallback_holidays, f, indent=2)
+        logger.info("🟠 Cached fallback holiday list")
+    except Exception as e:
+        logger.error(f"🔴 Failed to cache fallback holidays: {e}")
+    
+    return fallback_holidays
 
 
 async def pre_market_check():

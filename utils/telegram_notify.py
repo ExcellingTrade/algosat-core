@@ -22,16 +22,16 @@ telegram_bot = TelegramBot(bot_token=BOT_TOKEN, chat_id=CHAT_ID)
 import asyncio
 def send_telegram_async(message: str):
 	loop = None
-	# try:
-	# 	loop = asyncio.get_running_loop()
-	# except RuntimeError:
-	# 	loop = None
-	# if loop and loop.is_running():
-	# 	# If inside an event loop, use run_in_executor
-	# 	loop.run_in_executor(None, telegram_bot.send_message, message)
-	# else:
-	# 	# If not in an event loop, just call directly (blocking)
-	# 	telegram_bot.send_message(message)
+	try:
+		loop = asyncio.get_running_loop()
+	except RuntimeError:
+		loop = None
+	if loop and loop.is_running():
+		# If inside an event loop, use run_in_executor
+		loop.run_in_executor(None, telegram_bot.send_message, message)
+	else:
+		# If not in an event loop, just call directly (blocking)
+		telegram_bot.send_message(message)
 	print("Sending message to Telegram...")
 # Usage:
 # 1. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in your environment or in a .env file at project root.

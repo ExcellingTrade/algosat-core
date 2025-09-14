@@ -148,12 +148,12 @@ def get_allowed_origins():
         "http://localhost:8001",  # API port (for dev tools)
         "http://127.0.0.1:8001",
         # Production/VPS IP address - both HTTP and HTTPS with multiple ports
-        "http://82.25.109.188:3000",   # UI port
-        "https://82.25.109.188:3000",
-        "http://82.25.109.188:8001",   # API port
-        "https://82.25.109.188:8001",
-        "http://82.25.109.188",
-        "https://82.25.109.188",
+        "http://147.79.67.250:3000",   # UI port
+        "https://147.79.67.250:3000",
+        "http://147.79.67.250:8001",   # API port
+        "https://147.79.67.250:8001",
+        "http://147.79.67.250",
+        "https://147.79.67.250",
         # Add null origin for certain development scenarios
         "null"
     ]
