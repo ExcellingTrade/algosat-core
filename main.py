@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+import signal
 from algosat.core.strategy_manager import order_queue
 from algosat.core.db import init_db, engine
 from algosat.core.db import seed_default_strategies_and_configs
@@ -104,19 +105,43 @@ async def wait_for_trading_day():
         update_interval = 3600  # 1 hour
         elapsed = 0
         
-        while elapsed < wait_seconds:
-            sleep_time = min(update_interval, wait_seconds - elapsed)
-            await asyncio.sleep(sleep_time)
-            elapsed += sleep_time
+        try:
+            while elapsed < wait_seconds:
+                sleep_time = min(update_interval, wait_seconds - elapsed)
+                await asyncio.sleep(sleep_time)
+                elapsed += sleep_time
+                
+                if elapsed < wait_seconds:
+                    remaining = wait_seconds - elapsed
+                    remaining_str = str(timedelta(seconds=int(remaining)))
+                    logger.info(f"⏳ Still waiting... {remaining_str} remaining until markets reopen")
             
-            if elapsed < wait_seconds:
-                remaining = wait_seconds - elapsed
-                remaining_str = str(timedelta(seconds=int(remaining)))
-                logger.info(f"⏳ Still waiting... {remaining_str} remaining until markets reopen")
-        
-        logger.info("🟢 Market wait period completed. Starting AlgoSat operations...")
+            logger.info("🟢 Market wait period completed. Starting AlgoSat operations...")
+        except asyncio.CancelledError:
+            logger.info("🔴 Wait for trading day interrupted by user.")
+            raise  # Re-raise to allow proper shutdown
     else:
         logger.info("🟢 Next trading day is already here. Starting AlgoSat operations...")
+
+async def shutdown_gracefully():
+    """Perform graceful shutdown operations"""
+    logger.info("🔄 Performing graceful shutdown...")
+    
+    try:
+        # Signal order queue to stop (the order_monitor_loop checks for None as shutdown signal)
+        # This is safe even if the loop isn't started yet - it just adds None to the queue
+        await order_queue.put(None)
+        logger.debug("✓ Order queue shutdown signal sent")
+    except Exception as e:
+        logger.debug(f"Error signaling order queue shutdown: {e}")
+    
+    try:
+        # Close database connections
+        await engine.dispose()
+        logger.info("🟢 Database connection closed.")
+    except Exception as e:
+        logger.error(f"Error disposing SQLAlchemy engine during shutdown: {e}")
+
 
 async def main():
     try:
@@ -151,16 +176,43 @@ async def main():
         order_manager = OrderManager(broker_manager)
         # logger.info("🚦 All brokers authenticated. Starting strategy engine...")
         await run_poll_loop(data_manager, order_manager)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
         logger.warning("🔴 Program interrupted by user. Shutting down gracefully...")
-        await order_queue.put(None)
+        await shutdown_gracefully()
+    except Exception as e:
+        logger.error(f"Unexpected error in main: {e}", exc_info=True)
+        await shutdown_gracefully()
     finally:
-        # Always dispose engine, log any error during disposal
-        try:
-            await engine.dispose()
-            logger.info("🟢 Database connection closed.")
-        except Exception as e:
-            logger.error(f"Error disposing SQLAlchemy engine during shutdown: {e}", exc_info=True)
+        # Ensure cleanup even if shutdown_gracefully fails
+        logger.debug("🔄 Final cleanup completed.")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    async def main_with_signals():
+        """Main function with proper signal handling"""
+        loop = asyncio.get_running_loop()
+        
+        # Set up signal handlers that cancel the current task
+        def signal_handler():
+            logger.info("🔴 Shutdown signal received. Cancelling operations...")
+            # Cancel all tasks in the current loop
+            for task in asyncio.all_tasks(loop):
+                task.cancel()
+        
+        # Register signal handlers
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+        
+        try:
+            await main()
+        except asyncio.CancelledError:
+            logger.info("🔴 Main task cancelled due to signal. Exiting...")
+            await shutdown_gracefully()
+    
+    try:
+        asyncio.run(main_with_signals())
+    except KeyboardInterrupt:
+        logger.info("🔴 KeyboardInterrupt caught at top level. Exiting...")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        sys.exit(1)
