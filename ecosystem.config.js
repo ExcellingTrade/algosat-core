@@ -26,7 +26,7 @@ module.exports = {
     {
       name: "algosat-api",
       script: "/opt/algosat/.venv/bin/python",
-      args: ["-m", "uvicorn", "algosat.api.enhanced_app:app", "--port", "8001", "--host", "0.0.0.0"],
+      args: ["-m", "algosat.api.enhanced_app"],
       cwd: "/opt/algosat",
       interpreter: "none",
       instances: 1,

@@ -25,10 +25,10 @@ module.exports = {
     },
     {
       name: "algosat-api",
-      script: "/opt/algosat/.venv/bin/uvicorn",
-      args: ["algosat.api.enhanced_app:app", "--port", "8001", "--host", "0.0.0.0"],
+      script: "/opt/algosat/.venv/bin/python",
+      args: ["-m", "algosat.api.enhanced_app"],
       cwd: "/opt/algosat",
-      interpreter: "/opt/algosat/.venv/bin/python",
+      interpreter: "none",
       instances: 1,
       exec_mode: "fork",
       autorestart: true,
