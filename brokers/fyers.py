@@ -1220,7 +1220,7 @@ class FyersWrapper(BrokerInterface):
         Automate Fyers login using SeleniumBase, entering mobile, password, TOTP, and extracting auth code.
         """
         headless = True
-        MAX_RETRIES = 3
+        MAX_RETRIES = 1
         Display(visible=0, size=(1024, 768)).start()
         from selenium.webdriver.common.by import By
         import pyotp
@@ -1263,7 +1263,7 @@ class FyersWrapper(BrokerInterface):
                             pin_input = sb.find_element(By.ID, totp_ids[i])
                             pin_input.send_keys(digit)
                             sb.sleep(0.2)
-                        sb.click("#confirmOtpSubmit")
+                        #sb.click("#confirmOtpSubmit")
                         sb.sleep(2)
                         if sb.is_text_visible("Please enter the valid TOTP"):
                             continue
@@ -1278,7 +1278,7 @@ class FyersWrapper(BrokerInterface):
                         pin_input = sb.find_element(By.XPATH, pin_input_xpath)
                         pin_input.send_keys(digit)
                         sb.sleep(0.5)
-                    sb.click("#verifyPinSubmit")
+                    #sb.click("#verifyPinSubmit")
                     sb.sleep(1)
 
                     redirected_url = sb.get_current_url()

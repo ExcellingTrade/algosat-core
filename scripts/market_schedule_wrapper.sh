@@ -15,9 +15,9 @@ if [ "$DAY_OF_WEEK" -ge 1 ] && [ "$DAY_OF_WEEK" -le 5 ]; then
     echo "[$DATE] Weekday detected (day $DAY_OF_WEEK), proceeding with $ACTION..." >> "$LOG_FILE"
     
     if [ "$ACTION" = "start" ]; then
-        /opt/algosat/scripts/market_start.sh
+        /opt/algosat/algosat/scripts/market_start.sh
     elif [ "$ACTION" = "stop" ]; then
-        /opt/algosat/scripts/market_stop.sh
+        /opt/algosat/algosat/scripts/market_stop.sh
     else
         echo "[$DATE] ERROR: Invalid action '$ACTION'. Use 'start' or 'stop'" >> "$LOG_FILE"
         exit 1

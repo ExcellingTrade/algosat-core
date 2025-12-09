@@ -1306,103 +1306,87 @@ class SwingHighLowBuyStrategy(StrategyBase):
 
     async def calculate_and_store_pullback_level(self, order_info: dict, signal_payload: dict) -> bool:
         """
-        Calculate 50% pullback level and store in re_entry_tracking table.
-        Called immediately after successful order placement.
-        
-        Args:
-            order_info: Order information from successful placement
-            signal_payload: Signal information containing entry details
-            
-        Returns:
-            bool: True if pullback level calculated and stored successfully
+        Calculate pullback level and store in re_entry_tracking table (matches sell strategy logic).
         """
         try:
-            logger.info(f"🔄 Calculating pullback level for order_info={order_info}")
+            if not self.is_smart_levels_enabled():
+                logger.info("🔄 Pullback calculation skipped - smart levels not enabled")
+                return True  # Not an error, just not applicable
+
             order_id = order_info.get('order_id') or order_info.get('id')
             if not order_id:
                 logger.error("❌ Cannot calculate pullback level - missing order_id")
                 return False
-            
-            # Get pullback percentage from smart level - required for pullback calculation
-            pullback_percentage = None
-            
-            if self.is_smart_levels_enabled():
-                smart_level = self.get_active_smart_level()
-                if smart_level and smart_level.get('pullback_percentage'):
-                    pullback_percentage = smart_level.get('pullback_percentage')
-                    logger.info(f"📊 Using smart level pullback percentage: {pullback_percentage}%")
-                else:
-                    logger.error(f"❌ Smart levels enabled but no pullback_percentage found in smart level configuration")
-                    return False
-            else:
-                logger.error(f"❌ Smart levels disabled - pullback calculation requires smart level configuration")
+
+            # Get smart level for pullback configuration
+            smart_level = self.get_active_smart_level()
+            if not smart_level:
+                logger.error("❌ Cannot calculate pullback level - no active smart level")
                 return False
-            
+
+            # Get pullback percentage from smart level - required for pullback calculation
+            pullback_percentage = smart_level.get('pullback_percentage')
+            if not pullback_percentage or pullback_percentage <= 0:
+                logger.error(f"❌ Cannot calculate pullback level - invalid pullback_percentage={pullback_percentage} in smart level")
+                return False
+
             # Get signal direction from signal payload
-            signal_direction = signal_payload.signal_direction
-            breakout_type = signal_payload.breakout_type
-            
+            signal_direction = getattr(signal_payload, 'signal_direction', None)
             # Get current spot price from signal payload
-            current_spot_price = signal_payload.entry_spot_price
-            
+            current_spot_price = getattr(signal_payload, 'entry_spot_price', None)
+
             logger.info(f"🔄 Calculating pullback level for order_id={order_id}")
             logger.info(f"    Signal Direction: {signal_direction}")
-            logger.info(f"    Breakout Type: {breakout_type}")
             logger.info(f"    Current Spot Price: {current_spot_price}")
             logger.info(f"    Pullback Percentage: {pullback_percentage}%")
-            
-            # Calculate pullback level using smart level percentage
+
+            # Calculate pullback level using swing distance approach
             pullback_factor = pullback_percentage / 100.0
-            
-            # Get swing levels for proper pullback calculation
-            entry_spot_swing_high = signal_payload.entry_spot_swing_high
-            entry_spot_swing_low = signal_payload.entry_spot_swing_low
-            
+
+            # Get swing levels for consistent pullback calculation
+            entry_spot_swing_high = getattr(signal_payload, 'entry_spot_swing_high', None)
+            entry_spot_swing_low = getattr(signal_payload, 'entry_spot_swing_low', None)
+
             # Validate that we have both swing levels for distance calculation
             if not entry_spot_swing_high or not entry_spot_swing_low:
                 logger.error(f"❌ Cannot calculate pullback - missing swing levels. High: {entry_spot_swing_high}, Low: {entry_spot_swing_low}")
                 return False
-            
+
             swing_high = float(entry_spot_swing_high)
             swing_low = float(entry_spot_swing_low)
-            
+
             # Calculate swing distance (high - low)
             swing_distance = swing_high - swing_low
             pullback_distance = swing_distance * pullback_factor
-            
-            logger.info(f"� Swing Range Analysis:")
+
+            logger.info(f"📊 Swing Range Analysis:")
             logger.info(f"    Swing High: {swing_high}")
             logger.info(f"    Swing Low: {swing_low}")
             logger.info(f"    Swing Distance: {swing_distance}")
             logger.info(f"    Pullback Percentage: {pullback_percentage}%")
             logger.info(f"    Pullback Distance: {pullback_distance}")
-            
+
             if signal_direction == "UP":
-                # CE trade: Pullback is percentage down from swing high based on swing distance
+                # For UP trades: pullback is percentage down from swing high based on swing distance
                 pullback_level = swing_high - pullback_distance
-                
-                logger.info(f"📈 CE Trade Pullback Calculation:")
+                logger.info(f"📈 UP Trade Pullback Calculation:")
                 logger.info(f"    Pullback Level: {swing_high} - {pullback_distance} = {pullback_level}")
-                
             elif signal_direction == "DOWN":
-                # PE trade: Pullback is percentage up from swing low based on swing distance
+                # For DOWN trades: pullback is percentage up from swing low based on swing distance
                 pullback_level = swing_low + pullback_distance
-                
-                logger.info(f"📉 PE Trade Pullback Calculation:")
+                logger.info(f"📉 DOWN Trade Pullback Calculation:")
                 logger.info(f"    Pullback Level: {swing_low} + {pullback_distance} = {pullback_level}")
-                
             else:
                 logger.error(f"❌ Invalid signal direction for pullback calculation: {signal_direction}")
                 return False
-            
+
             # Round pullback level to 2 decimal places for cleaner logging
             pullback_level = round(pullback_level, 2)
-            
+
             # Store pullback level in database
             from algosat.core.re_entry_db_helpers import create_re_entry_tracking
-            
             success = await create_re_entry_tracking(order_id, pullback_level)
-            
+
             if success:
                 logger.info(f"✅ Pullback level calculated and stored successfully:")
                 logger.info(f"    Order ID: {order_id}")
@@ -1414,7 +1398,6 @@ class SwingHighLowBuyStrategy(StrategyBase):
             else:
                 logger.error(f"❌ Failed to store pullback level in database for order_id={order_id}")
                 return False
-                
         except Exception as e:
             logger.error(f"❌ Error calculating pullback level: {e}", exc_info=True)
             return False

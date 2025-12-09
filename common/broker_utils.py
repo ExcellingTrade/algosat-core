@@ -136,7 +136,7 @@ def get_nse_holiday_list():
             ist_tz = pytz.timezone('Asia/Kolkata')
             current_time = ist_tz.localize(current_time)
         
-        if current_time - file_modified_time < timedelta(days=30):
+        if current_time - file_modified_time < timedelta(days=365):
             try:
                 with open(HOLIDAY_FILE, 'r') as f:
                     print("Loaded from cache")

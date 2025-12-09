@@ -2219,7 +2219,7 @@ class SwingHighLowSellStrategy(StrategyBase):
                     
                     # Fetch fresh data using entry timeframe for RSI consistency
                     rsi_history_dict = await self.fetch_history_data(
-                        self.dp, [spot_symbol], self.entry_minutes
+                        self.dp, [spot_symbol], self.rsi_timeframe_minutes
                     )
                     rsi_history_df = rsi_history_dict.get(str(spot_symbol))
                     

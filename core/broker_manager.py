@@ -921,11 +921,75 @@ class BrokerManager:
             if not angel_broker:
                 raise Exception("Angel broker not available for symbol conversion")
             
-            # Handle simple cases (non-option symbols)
-            if instrument_type and instrument_type.upper() in ['EQ', 'INDEX']:
-                # For equity and index, try direct lookup first
-                token = await angel_broker.get_instrument_token(symbol)
-                return {'symbol': symbol, 'instrument_token': token} if token else {'symbol': symbol}
+            # Check if this is an options symbol first (ends with CE or PE)
+            if symbol.upper().endswith(('CE', 'PE')):
+                # Clean symbol (remove exchange prefix if present)
+                if ':' in symbol:
+                    symbol = symbol.split(':', 1)[1]
+                
+                # Try to match pattern with letters for Oct/Nov/Dec first
+                pattern_with_letters = r'^([A-Z]+)(\d{2})([OND])(\d{1,2})(\d+)(CE|PE)$'
+                match = re.match(pattern_with_letters, symbol.upper())
+                
+                if match:
+                    underlying, year, month_letter, day, strike, option_type = match.groups()
+                    letter_to_month = {'O': '10', 'N': '11', 'D': '12'}
+                    month = letter_to_month[month_letter]
+                else:
+                    # Try pattern for Jan-Sep months
+                    pattern = r'^([A-Z]+)(\d{5})(\d+)(CE|PE)$'
+                    match = re.match(pattern, symbol.upper())
+                    
+                    if match:
+                        underlying, date_part, strike, option_type = match.groups()
+                        if len(date_part) == 5:
+                            year = date_part[:2]
+                            month_day = date_part[2:]
+                            if month_day[0] in '123456789':
+                                month = month_day[0]
+                                day = month_day[1:]
+                            else:
+                                token = await angel_broker.get_instrument_token(symbol, exchange='NFO')
+                                return {'symbol': symbol, 'instrument_token': token} if token else {'symbol': symbol}
+                        else:
+                            token = await angel_broker.get_instrument_token(symbol, exchange='NFO')
+                            return {'symbol': symbol, 'instrument_token': token} if token else {'symbol': symbol}
+                    else:
+                        token = await angel_broker.get_instrument_token(symbol, exchange='NFO')
+                        return {'symbol': symbol, 'instrument_token': token} if token else {'symbol': symbol}
+                
+                # Convert to Angel format
+                month_names = {
+                    1: 'JAN', 2: 'FEB', 3: 'MAR', 4: 'APR', 5: 'MAY', 6: 'JUN',
+                    7: 'JUL', 8: 'AUG', 9: 'SEP', 10: 'OCT', 11: 'NOV', 12: 'DEC'
+                }
+                month_abbr = month_names[int(month)]
+                angel_symbol = f"{underlying}{day.zfill(2)}{month_abbr}{year}{strike}{option_type}"
+                token = await angel_broker.get_instrument_token(angel_symbol, exchange='NFO')
+                return {'symbol': angel_symbol, 'instrument_token': token} if token else {'symbol': angel_symbol}
+                
+            # Handle INDEX type only for non-option symbols
+            elif instrument_type and instrument_type.upper() == 'INDEX':
+                # Remove exchange prefix for indices
+                index_symbol = symbol.split(':')[-1]
+                
+                # Map common index names to Angel format
+                index_map = {
+                    'NIFTY50': 'NIFTY 50',
+                    'NIFTY': 'NIFTY 50',
+                    'BANKNIFTY': 'NIFTY BANK',
+                    'FINNIFTY': 'NIFTY FIN SERVICE',
+                    'MIDCPNIFTY': 'NIFTY MIDCAP 100'
+                }
+                
+                angel_index = index_map.get(index_symbol, index_symbol)
+                # Get token with explicit exchange=NSE for indices
+                token = await angel_broker.get_instrument_token(angel_index, exchange='NSE')
+                
+                if token:
+                    logger.info(f"Angel: Found token for index {angel_index} (token: {token})")
+                    return {'symbol': angel_index, 'instrument_token': token}
+                return {'symbol': angel_index}
             
             # Parse option symbol format: {underlying}{yyMdd}{strike}{CE/PE}
             # Example: NIFTY2591624950CE = NIFTY + 25916 + 24950 + CE 
